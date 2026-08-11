@@ -138,11 +138,13 @@ async def _startup() -> None:
     # Keep the local SQLite schema in sync (creates tables + late-added columns).
     await ensure_schema()
     # Bootstrap auth: seed system roles + the initial admin/admin account.
+    from app.auth.oidc_seed import seed_oidc_provider
     from app.auth.service import seed_admin
     from app.core.db import SessionLocal
 
     async with SessionLocal() as db:
         await seed_admin(db)
+        await seed_oidc_provider(db)
     # Seed curated starter workbooks on first run.
     from app.workbooks.registry import seed_if_empty
 
@@ -733,4 +735,3 @@ if _STATIC_DIR.is_dir():
         if candidate.is_file() and candidate.is_relative_to(_STATIC_DIR):
             return FileResponse(str(candidate))
         return FileResponse(str(_index_file), headers={"Cache-Control": "no-cache"})
-

@@ -32,6 +32,14 @@ class Settings(BaseSettings):
     # real deployment via SEED_ADMIN_PASSWORD.
     seed_admin_username: str = "admin"
     seed_admin_password: str = "admin"
+    # Optional startup seed for a centrally managed OIDC provider (fleet-wide SSO).
+    sso_oidc_enabled: bool = False
+    sso_oidc_display_name: str = "MicroAge Sign-in"
+    sso_oidc_issuer: str = ""
+    sso_oidc_client_id: str = ""
+    sso_oidc_client_secret: str = ""
+    sso_oidc_scopes: str = "openid email profile"
+    sso_oidc_group_claim: str = "groups"
     # Session cookie security. In production set cookie_secure=true and serve over HTTPS;
     # for cross-site (different domains) deployments set cookie_samesite="none".
     cookie_secure: bool = False

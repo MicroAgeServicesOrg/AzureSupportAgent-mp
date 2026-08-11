@@ -20,6 +20,28 @@ param adminUsername string = 'admin'
 @minLength(12)
 param adminPassword string
 
+@description('Enable startup seeding of a central OIDC provider (MicroAge fleet sign-in).')
+param ssoOidcEnabled bool = false
+
+@description('Display name for the seeded OIDC login option.')
+param ssoOidcDisplayName string = 'MicroAge Sign-in'
+
+@description('OIDC issuer URL for the seeded identity provider (for example, https://login.microsoftonline.com/<tenant-id>/v2.0).')
+param ssoOidcIssuer string = ''
+
+@description('OIDC client ID for the seeded identity provider.')
+param ssoOidcClientId string = ''
+
+@description('OIDC client secret for the seeded identity provider.')
+@secure()
+param ssoOidcClientSecret string = ''
+
+@description('OIDC scopes for the seeded identity provider.')
+param ssoOidcScopes string = 'openid email profile'
+
+@description('OIDC claim name containing groups for role mapping.')
+param ssoOidcGroupClaim string = 'groups'
+
 @description('PostgreSQL administrator username.')
 @minLength(3)
 @maxLength(63)
@@ -457,6 +479,10 @@ resource containerApp 'Microsoft.App/containerApps@2024-03-01' = {
           name: 'admin-password'
           value: adminPassword
         }
+        {
+          name: 'sso-oidc-client-secret'
+          value: ssoOidcClientSecret
+        }
       ]
     }
     template: {
@@ -476,6 +502,34 @@ resource containerApp 'Microsoft.App/containerApps@2024-03-01' = {
             {
               name: 'DATABASE_URL'
               secretRef: 'database-url'
+            }
+            {
+              name: 'SSO_OIDC_ENABLED'
+              value: string(ssoOidcEnabled)
+            }
+            {
+              name: 'SSO_OIDC_DISPLAY_NAME'
+              value: ssoOidcDisplayName
+            }
+            {
+              name: 'SSO_OIDC_ISSUER'
+              value: ssoOidcIssuer
+            }
+            {
+              name: 'SSO_OIDC_CLIENT_ID'
+              value: ssoOidcClientId
+            }
+            {
+              name: 'SSO_OIDC_CLIENT_SECRET'
+              secretRef: 'sso-oidc-client-secret'
+            }
+            {
+              name: 'SSO_OIDC_SCOPES'
+              value: ssoOidcScopes
+            }
+            {
+              name: 'SSO_OIDC_GROUP_CLAIM'
+              value: ssoOidcGroupClaim
             }
             {
               name: 'COOKIE_SECURE'
