@@ -4,8 +4,8 @@
   "metadata": {
     "_generator": {
       "name": "bicep",
-      "version": "0.44.1.10279",
-      "templateHash": "9926749449610323461"
+      "version": "0.46.1.21595",
+      "templateHash": "2941005892802075100"
     }
   },
   "parameters": {
@@ -45,6 +45,55 @@
       "minLength": 12,
       "metadata": {
         "description": "Bootstrap local admin password for first login. User is forced to change it after first sign-in."
+      }
+    },
+    "ssoOidcEnabled": {
+      "type": "bool",
+      "defaultValue": false,
+      "metadata": {
+        "description": "Enable startup seeding of a central OIDC provider (MicroAge fleet sign-in)."
+      }
+    },
+    "ssoOidcDisplayName": {
+      "type": "string",
+      "defaultValue": "MicroAge Sign-in",
+      "metadata": {
+        "description": "Display name for the seeded OIDC login option."
+      }
+    },
+    "ssoOidcIssuer": {
+      "type": "string",
+      "defaultValue": "",
+      "metadata": {
+        "description": "OIDC issuer URL for the seeded identity provider (for example, https://login.microsoftonline.com/<tenant-id>/v2.0)."
+      }
+    },
+    "ssoOidcClientId": {
+      "type": "string",
+      "defaultValue": "",
+      "metadata": {
+        "description": "OIDC client ID for the seeded identity provider."
+      }
+    },
+    "ssoOidcClientSecret": {
+      "type": "securestring",
+      "defaultValue": "",
+      "metadata": {
+        "description": "OIDC client secret for the seeded identity provider."
+      }
+    },
+    "ssoOidcScopes": {
+      "type": "string",
+      "defaultValue": "openid email profile",
+      "metadata": {
+        "description": "OIDC scopes for the seeded identity provider."
+      }
+    },
+    "ssoOidcGroupClaim": {
+      "type": "string",
+      "defaultValue": "groups",
+      "metadata": {
+        "description": "OIDC claim name containing groups for role mapping."
       }
     },
     "postgresAdminLogin": {
@@ -518,6 +567,10 @@
             {
               "name": "admin-password",
               "value": "[parameters('adminPassword')]"
+            },
+            {
+              "name": "sso-oidc-client-secret",
+              "value": "[parameters('ssoOidcClientSecret')]"
             }
           ]
         },
@@ -538,6 +591,34 @@
                 {
                   "name": "DATABASE_URL",
                   "secretRef": "database-url"
+                },
+                {
+                  "name": "SSO_OIDC_ENABLED",
+                  "value": "[string(parameters('ssoOidcEnabled'))]"
+                },
+                {
+                  "name": "SSO_OIDC_DISPLAY_NAME",
+                  "value": "[parameters('ssoOidcDisplayName')]"
+                },
+                {
+                  "name": "SSO_OIDC_ISSUER",
+                  "value": "[parameters('ssoOidcIssuer')]"
+                },
+                {
+                  "name": "SSO_OIDC_CLIENT_ID",
+                  "value": "[parameters('ssoOidcClientId')]"
+                },
+                {
+                  "name": "SSO_OIDC_CLIENT_SECRET",
+                  "secretRef": "sso-oidc-client-secret"
+                },
+                {
+                  "name": "SSO_OIDC_SCOPES",
+                  "value": "[parameters('ssoOidcScopes')]"
+                },
+                {
+                  "name": "SSO_OIDC_GROUP_CLAIM",
+                  "value": "[parameters('ssoOidcGroupClaim')]"
                 },
                 {
                   "name": "COOKIE_SECURE",
