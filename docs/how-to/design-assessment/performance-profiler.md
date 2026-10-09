@@ -25,6 +25,10 @@ feature_ids: [PROACTIVE_NAV:performance, ROUTE:performance]
 
 Open `/performance`. Its top-level views are **🔥 Profiler**, **🚀 Fleet**, and **🧹 Cleanup**. Capacity controls are under `/admin/settings`.
 
+The Profiler header is compact and does not repeat the score and resource-state
+totals in separate cards. Use its score gauge and trend, then inspect Profile
+history and the heatmap for resource counts and details.
+
 ## How to profile one workload or subscription
 
 1. Open **Profiler** and select workload or subscription scope.

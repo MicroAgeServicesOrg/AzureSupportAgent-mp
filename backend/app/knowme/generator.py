@@ -77,6 +77,9 @@ GROUNDING RULES:
    issues, and Thresholds sections — they are what the reader uses live.
 6. Flag scope mismatches: if the memory cites IDs from a DIFFERENT workload, surface it as
    a verify-scope warning (⚠), not as in-scope inventory.
+7. Composite SLA is calculated separately by the server. NEVER calculate, quote, infer or
+   invent a composite/solution availability percentage or a Composite SLA subsection.
+   Customer contractual SLA/SLO/RTO/RPO fields remain human-owned TODOs.
 
 STYLE: Short declarative sentences, active voice, resource-first. Use ❌ for high-severity
 risks, ⚠ for medium, ⟦TODO⟧ for human-required fields. Use Markdown tables for
@@ -371,6 +374,8 @@ async def generate_section(
         "You are 'Know-Me Writer'. Rewrite a SINGLE section of a support-facing Know-Me, "
         "grounded only in the supplied memory, scope and evidence. Use ⟦TODO: <label> | "
         "key=<field_key>⟧ for any human-only field; never fabricate people/SLAs/contacts. "
+        "Composite SLA is computed separately by the server: do not calculate or quote "
+        "a composite availability percentage or write a Composite SLA subsection. "
         "Use Markdown (tables, ❌/⚠). Respond with ONLY a JSON object: {\"content\": \"<markdown>\"}."
     )
     user = (
@@ -466,5 +471,3 @@ async def suggest_field_choices(
         if s and s not in out:
             out.append(s)
     return out[:max_options]
-
-

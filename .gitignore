@@ -84,6 +84,7 @@ docs/UX_ADVANCED_PLAN.md
 
 # --- Presentation / deck working files (non-distributable) -------------------
 # The pitch deck, its product screenshots, and its build scripts are internal.
+/presentations/
 docs/deck-assets/
 docs/_build_deck.py
 docs/_validate.py
@@ -124,6 +125,7 @@ pnpm-debug.log*
 playwright-report/
 test-results/
 .playwright/
+.playwright-mcp/
 
 # --- Local security scan reports (gitleaks/trivy/zap/etc.) --------------------
 .security/

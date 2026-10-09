@@ -23,6 +23,7 @@ from app.architectures import registry as arch_registry
 from app.core.azure_connections import get_connection, resolve_connection
 from app.core.genjob import JobRegistry
 from app.core.security import Principal, require_permission
+from app.knowme import sla
 from app.workloads.registry import get_workload, list_workloads
 
 # KP5/KU4 — background-survivable Know-Me generation. The generate/regenerate run as detached
@@ -764,13 +765,28 @@ class KnowMeSectionGenerateRequest(BaseModel):
 
 
 def _know_me_response(architecture_id: str, arch: dict[str, Any], km_doc: dict[str, Any]) -> dict[str, Any]:
+    from app.architectures import memory as mem
     from app.knowme import sections as km
+    from app.knowme.sla import CALCULATOR_VERSION, source_fingerprint
+    from app.knowme.sla_catalog import CATALOG_VERSION
+
+    snapshot = km_doc.get("composite_sla")
+    workload = get_workload(arch.get("workload_id") or km_doc.get("workload_id") or "")
+    stale = bool(snapshot and (
+        snapshot.get("source_fingerprint") != source_fingerprint(arch, workload)
+        or snapshot.get("catalog_version") != CATALOG_VERSION
+        or snapshot.get("calculator_version") != CALCULATOR_VERSION
+    ))
 
     wl_name = arch.get("workload_name", "") or km_doc.get("workload_name", "")
+    memory = mem.get_memory(architecture_id)
     return {
         "id": km_doc.get("id"),
         "know_me": km_doc,
-        "markdown": km.render_markdown(km_doc, wl_name),
+        "composite_sla_stale": stale,
+        "has_memory": memory is not None,
+        "memory_updated_at": (memory or {}).get("updated_at", ""),
+        "markdown": km.render_markdown({**km_doc, "composite_sla_stale": stale}, wl_name),
         "architecture": _arch_meta(architecture_id, arch),
     }
 
@@ -1175,6 +1191,53 @@ async def upsert_know_me_endpoint(km_id: str, payload: KnowMeUpsert, principal: 
         tenant_id=principal.tenant_id,
         actor=_actor(principal),
     )
+    if saved is None:
+        raise HTTPException(status_code=409, detail="Know-Me was removed while saving.")
+    return _know_me_response(km_doc.get("architecture_id", ""), arch, saved)
+
+
+class CompositeSlaReviewRequest(BaseModel):
+    model_config = {"extra": "forbid"}
+    model: dict[str, Any] | None = None
+
+
+@router.post("/know-me/{km_id}/composite-sla")
+async def review_composite_sla_endpoint(
+    km_id: str, payload: CompositeSlaReviewRequest,
+    principal: Principal = Depends(_write),
+):
+    from pydantic import ValidationError
+
+    from app.knowme import registry as kreg
+    from app.knowme.sla import Journey, generate_snapshot
+
+    km_doc, arch = _km_or_404(km_id, principal)
+    if not arch or arch.get("deleted_at") or (arch.get("tenant_id") or "") not in ("", principal.tenant_id):
+        raise HTTPException(status_code=409, detail="A current linked architecture is required.")
+    model = None
+    if payload.model is not None:
+        try:
+            model = Journey.model_validate(payload.model)
+        except ValidationError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+    workload = get_workload(arch.get("workload_id") or "")
+    if workload and (workload.get("tenant_id") or "") not in ("", principal.tenant_id):
+        raise HTTPException(status_code=404, detail="Workload not found.")
+    snapshot = await generate_snapshot(
+        arch, workload, arch.get("connection_id") or (workload or {}).get("connection_id") or "",
+        previous=km_doc.get("composite_sla"), model=model, actor=_actor(principal),
+    )
+    current, current_arch = _km_or_404(km_id, principal)
+    current_workload = get_workload(current_arch.get("workload_id") or "")
+    if (current.get("composite_sla") != km_doc.get("composite_sla")
+            or sla.source_fingerprint(current_arch, current_workload) != snapshot["source_fingerprint"]):
+        raise HTTPException(status_code=409, detail="SLA sources or review changed while calculating. Refresh and retry.")
+    saved = kreg.update_know_me(
+        km_id, composite_sla=snapshot, tenant_id=principal.tenant_id,
+        actor=_actor(principal), reason="Reviewed Composite SLA" if model else "Refreshed Composite SLA",
+    )
+    if saved is None:
+        raise HTTPException(status_code=409, detail="Know-Me was removed while calculating.")
     return _know_me_response(km_doc.get("architecture_id", ""), arch, saved)
 
 
@@ -1274,7 +1337,10 @@ async def export_know_me_endpoint(
 
     km_doc, arch = _km_or_404(km_id, principal, allow_deleted=True)
     wl_name = arch.get("workload_name", "") or km_doc.get("workload_name", "")
-    markdown = km.render_markdown(km_doc, wl_name, cover=True)
+    response = _know_me_response(km_doc.get("architecture_id", ""), arch, km_doc)
+    markdown = km.render_markdown(
+        {**km_doc, "composite_sla_stale": response["composite_sla_stale"]}, wl_name, cover=True,
+    )
     base = re.sub(r"[^a-z0-9]+", "-", (km_doc.get("title") or wl_name or "know-me").lower()).strip("-") or "know-me"
     if format == "pdf":
         from app.connectors import chat_pdf
@@ -1442,12 +1508,21 @@ async def _run_generate_know_me(
         raise ValueError("No architecture memory to transform. Generate the Memory first.")
 
     wl = get_workload(workload_id) if workload_id else None
+    if wl and (wl.get("tenant_id") or "") not in ("", tenant_id):
+        raise ValueError("Workload not found.")
     wl_name = arch.get("workload_name", "") or (wl or {}).get("name", "")
     await progress("scope", "🔎 Resolving the workload's Azure scope & known values…")
     facts = km.scope_facts(wl, arch)
     known = await kctx.gather_known_facts(wl, arch, tenant_id, connection_id, facts)
     await progress("evidence", "📊 Pulling posture evidence (assessments, coverage, profiler)…")
     evidence = await kctx.gather_evidence(architecture_id, workload_id, tenant_id, connection_id)
+    existing = kreg.get_know_me(target_km_id) if target_km_id else None
+    await progress("sla", "Resolving service commitments and Composite SLA inputs…")
+    composite_sla = await sla.generate_snapshot(
+        arch, wl, connection_id, previous=(existing or {}).get("composite_sla"),
+    )
+    await progress("sla", "Composite SLA calculated." if composite_sla["status"] == "calculated"
+                   else "Composite SLA withheld: review unresolved inputs in Resiliency & DR.")
 
     await progress("ai", "Transforming the architecture memory into a Know-Me…")
     queue: asyncio.Queue[dict[str, str]] = asyncio.Queue()
@@ -1473,7 +1548,6 @@ async def _run_generate_know_me(
         raise RuntimeError("The AI could not draft the Know-Me. Try again.")
 
     await progress("save", "💾 Validating sections & saving…")
-    existing = kreg.get_know_me(target_km_id) if target_km_id else None
     sections = kreg.merge_ai_sections((existing or {}).get("sections"), result["sections"])
     todos, autofilled = _finalize_know_me_todos(sections, existing, known)
     if autofilled:
@@ -1490,6 +1564,7 @@ async def _run_generate_know_me(
         km_doc = kreg.update_know_me(
             target_km_id, workload_id=workload_id, workload_name=wl_name, connection_id=connection_id,
             sections=sections, todos=todos, source="hybrid", ai=ai_meta,
+            composite_sla=composite_sla,
             tenant_id=tenant_id, actor=_actor(principal), reason="Generated with AI",
         )
     else:
@@ -1500,8 +1575,11 @@ async def _run_generate_know_me(
         km_doc = kreg.update_know_me(
             km_doc["id"], workload_id=workload_id, workload_name=wl_name, connection_id=connection_id,
             sections=sections, todos=todos, source="ai", ai=ai_meta,
+            composite_sla=composite_sla,
             tenant_id=tenant_id, actor=_actor(principal), reason="Generated with AI",
         )
+    if km_doc is None:
+        raise RuntimeError("Know-Me was removed while generation was saving.")
     return _know_me_response(architecture_id, arch, km_doc)
 
 
@@ -1629,12 +1707,22 @@ async def generate_know_me_section_stream_endpoint(
 
             label = km.section_label(section_key)
             wl = get_workload(workload_id) if workload_id else None
+            if wl and (wl.get("tenant_id") or "") not in ("", tenant_id):
+                raise ValueError("Workload not found.")
             wl_name = arch.get("workload_name", "") or (wl or {}).get("name", "")
             yield {"event": "status", "data": json.dumps({"phase": "scope", "message": f"🔎 Resolving scope & known values for “{label}”…"})}
             facts = km.scope_facts(wl, arch)
             known = await kctx.gather_known_facts(wl, arch, tenant_id, connection_id, facts)
             yield {"event": "status", "data": json.dumps({"phase": "evidence", "message": "📊 Pulling posture evidence (assessments, coverage, profiler)…"})}
             evidence = await kctx.gather_evidence(architecture_id, workload_id, tenant_id, connection_id)
+            composite_sla = None
+            if section_key == "resiliency_dr":
+                yield {"event": "status", "data": json.dumps({
+                    "phase": "sla", "message": "Refreshing Composite SLA configuration…",
+                })}
+                composite_sla = await sla.generate_snapshot(
+                    arch, wl, connection_id, previous=cur.get("composite_sla"),
+                )
 
             queue: asyncio.Queue[dict[str, str]] = asyncio.Queue()
 
@@ -1673,9 +1761,12 @@ async def generate_know_me_section_stream_endpoint(
             saved = kreg.update_know_me(
                 km_id, workload_id=workload_id, workload_name=wl_name, connection_id=connection_id,
                 sections=sections, todos=todos, source="hybrid",
+                composite_sla=composite_sla,
                 tenant_id=tenant_id, actor=_actor(principal),
                 reason=f"Regenerated section: {label}",
             )
+            if saved is None:
+                raise RuntimeError("Know-Me was removed while section generation was saving.")
             yield {"event": "done", "data": json.dumps(_know_me_response(architecture_id, arch, saved))}
         except Exception as exc:  # noqa: BLE001
             logger.exception("Know-Me section regeneration failed")
@@ -1717,7 +1808,7 @@ async def _run_know_me_from_workload(
     from app.knowme import sections as km
 
     wl = get_workload(workload_id) if workload_id else None
-    if wl is None:
+    if wl is None or (wl.get("tenant_id") or "") not in ("", tenant_id):
         raise RuntimeError("Workload not found.")
     wl_name = wl.get("name", "") or "workload"
     conn_id = connection_id or wl.get("connection_id") or ""
@@ -1806,11 +1897,17 @@ async def _run_know_me_from_workload(
         )
 
     # 3) Transform the Memory into a Know-Me.
+    if memory is None:
+        raise RuntimeError("Architecture Memory could not be saved.")
     await progress("knowme", "📄 Transforming the Memory into a Know-Me…")
     facts = km.scope_facts(wl, arch)
     await progress("knowme", "🔎 Resolving platform-known values & posture evidence…")
     known = await kctx.gather_known_facts(wl, arch, tenant_id, conn_id, facts)
     evidence = await kctx.gather_evidence(architecture_id, workload_id, tenant_id, conn_id)
+    await progress("sla", "Resolving service commitments and Composite SLA inputs…")
+    composite_sla = await sla.generate_snapshot(arch, wl, conn_id)
+    await progress("sla", "Composite SLA withheld pending dependency review."
+                   if composite_sla["status"] != "calculated" else "Composite SLA calculated.")
 
     async def _kprog(_phase: str, message: str) -> None:
         await progress("knowme", message)
@@ -1835,6 +1932,7 @@ async def _run_know_me_from_workload(
     km_doc = kreg.update_know_me(
         new_km["id"], workload_id=workload_id, workload_name=workload_name, connection_id=conn_id,
         sections=sections, todos=todos, source="ai",
+        composite_sla=composite_sla,
         ai={
             "confidence": kres.get("confidence"),
             "passes": kres.get("passes"),
@@ -1845,6 +1943,8 @@ async def _run_know_me_from_workload(
         },
         tenant_id=tenant_id, actor=_actor(principal), reason="Generated with AI (from workload)",
     )
+    if km_doc is None:
+        raise RuntimeError("Know-Me was removed while generation was saving.")
     return _know_me_response(architecture_id, arch, km_doc)
 
 

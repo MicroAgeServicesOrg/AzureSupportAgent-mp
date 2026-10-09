@@ -7,7 +7,7 @@
  * export (Markdown / PDF). A workload can have MANY Know-Me documents (drafts + a published
  * reference); each is keyed by its own ``km_id`` and supports soft-delete to a Trash.
  */
-import { memo, useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { lazy, memo, Suspense, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useLocation, useNavigate, useSearchParams } from "react-router-dom";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { Skeleton, useDebounced } from "../utils/perf";
@@ -30,7 +30,12 @@ import { formatError } from "../utils/format";
 import { GuidedFill } from "./knowme/GuidedFill";
 import { SectionEditor } from "./knowme/SectionEditor";
 import { FieldInput } from "./knowme/FieldInput";
+import { useAuth } from "./AuthContext";
 import { fieldProgress, renderSectionRead, isPlaceholderMermaid, parseFieldToken, validateField, FIELD_META } from "./knowme/fields";
+
+const CompositeSla = lazy(() => import("./knowme/CompositeSla").then((m) => ({ default: m.CompositeSla })));
+const HistoricalSlaDocument = lazy(() => import("./knowme/CompositeSla").then((m) => ({ default: m.HistoricalSlaDocument })));
+const SLA_LOADING = <div role="status" className="my-3 rounded-xl border p-4 text-xs text-gray-500">Loading Composite SLA…</div>;
 
 // KP1 — memoized Markdown wrapper: only re-parses when its own body string or the (now stable)
 // components object changes. With the imperatively-driven chip highlight, a field click no longer
@@ -58,6 +63,16 @@ const STATUS_OPTIONS: { value: string; label: string }[] = [
   { value: "published", label: "Published" },
   { value: "archived", label: "Archived" },
 ];
+
+function isResiliencySection(section: KnowMeSection) {
+  return /resilien/i.test(section.key) || /resilien/i.test(section.label);
+}
+
+function withResiliencySection(sections: KnowMeSection[]) {
+  if (sections.some(isResiliencySection)) return sections;
+  // Presentation-only fallback for legacy/partial documents; ordinary saves keep their sections.
+  return [...sections, { key: "resiliency_dr", label: "Resiliency & DR", content: "" }];
+}
 
 function fmtElapsed(s: number): string {
   const m = Math.floor(s / 60);
@@ -239,6 +254,7 @@ function withAssetUrls(kmId: string, md: string): string {
 
 export function KnowMeView({ kmId }: { kmId: string }) {
   const navigate = useNavigate();
+  const { has } = useAuth();
   const qc = useQueryClient();
   const kmQ = useQuery({ queryKey: ["knowMe", kmId], queryFn: () => api.knowMe(kmId), staleTime: 5 * 60 * 1000 });
 
@@ -342,6 +358,7 @@ export function KnowMeView({ kmId }: { kmId: string }) {
   // --- todos / fields ---
   const todos: KnowMeTodo[] = km?.todos ?? [];
   const sections: KnowMeSection[] = km?.sections ?? [];
+  const displaySections = useMemo(() => withResiliencySection(sections), [sections]);
   const sectionKeys = useMemo(() => sections.map((s) => s.key), [sections]);
   const prog = useMemo(() => fieldProgress(todos), [todos]);
 
@@ -607,7 +624,7 @@ export function KnowMeView({ kmId }: { kmId: string }) {
   const [copied, setCopied] = useState(false);
   const [exportToast, setExportToast] = useState(""); // KU7 — export feedback
   function copyMarkdown() {
-    void navigator.clipboard.writeText(kmQ.data?.markdown ?? "");
+    void navigator.clipboard.writeText(viewingRevId ? revContentQ.data?.markdown ?? "" : kmQ.data?.markdown ?? "");
     setCopied(true);
     setTimeout(() => setCopied(false), 1500);
   }
@@ -670,6 +687,16 @@ export function KnowMeView({ kmId }: { kmId: string }) {
   const statusMeta = STATUS_META[km?.status ?? "draft"] ?? STATUS_META.draft;
   const confidence = km?.ai?.confidence ?? km?.confidence;
   const viewingRevMd = useMemo(() => revContentQ.data?.markdown ?? "", [revContentQ.data]);
+  function downloadRevisionMarkdown() {
+    if (!revContentQ.data) return;
+    const url = URL.createObjectURL(new Blob([viewingRevMd], { type: "text/markdown;charset=utf-8" }));
+    const link = document.createElement("a");
+    link.href = url;
+    link.download = `know-me-${kmId}-revision-${viewingRevId}.md`;
+    link.click();
+    setTimeout(() => URL.revokeObjectURL(url), 1000);
+    noteExport("Revision Markdown");
+  }
   const ev = km?.ai?.evidence_used;
 
   // --- staleness: the source Memory changed after this Know-Me was generated ---
@@ -685,22 +712,22 @@ export function KnowMeView({ kmId }: { kmId: string }) {
   // --- in-doc table of contents (sections with content) ---
   const [showToc, setShowToc] = useState(false);
   const tocSections = useMemo(
-    () => sections.filter((s) => (s.content || "").trim()).map((s) => ({ key: s.key, label: s.label })),
-    [sections],
+    () => displaySections.filter((s) => (s.content || "").trim() || isResiliencySection(s)).map((s) => ({ key: s.key, label: s.label })),
+    [displaySections],
   );
   // KP1 — precompute each read-mode section's rendered Markdown body ONCE (keyed on its content +
   // todos), so a chip click doesn't re-run renderSectionRead for all 13 sections. Paired with the
   // memoized <Markdown> wrapper + stable components object, only edited sections re-render.
   const readSections = useMemo(
     () =>
-      sections
-        .filter((s) => (s.content || "").trim())
+      displaySections
+        .filter((s) => (s.content || "").trim() || isResiliencySection(s))
         .map((s) => ({
           section: s,
           body: withAssetUrls(kmId, renderSectionRead(s.content, s.key, todos, "", s.label)),
           openCount: todos.filter((t) => t.section_key === s.key && t.status !== "done").length,
         })),
-    [sections, todos, kmId],
+    [displaySections, todos, kmId],
   );
   function jumpToSection(key: string) {
     const el = docRef.current?.querySelector(`[data-kmsec="${key}"]`) as HTMLElement | null;
@@ -847,9 +874,13 @@ export function KnowMeView({ kmId }: { kmId: string }) {
           </button>
           )}
           {km && <>
-            <button onClick={copyMarkdown} aria-label="Copy document as Markdown" className="rounded-lg border px-2 py-1 text-xs text-gray-600 hover:bg-gray-50">{copied ? "✓ Copied" : "Copy"}</button>
+            <button onClick={copyMarkdown} disabled={!!viewingRevId && !revContentQ.data} aria-label={viewingRevId ? "Copy revision as Markdown" : "Copy document as Markdown"} className="rounded-lg border px-2 py-1 text-xs text-gray-600 hover:bg-gray-50 disabled:opacity-50">{copied ? "✓ Copied" : viewingRevId ? "Copy revision" : "Copy"}</button>
+            {viewingRevId ? (
+              <button onClick={downloadRevisionMarkdown} disabled={!revContentQ.data} aria-label="Download revision as Markdown" title="Downloads this historical revision, including its saved SLA snapshot. PDF export is available only for the current document." className="rounded-lg border px-2 py-1 text-xs text-gray-600 hover:bg-gray-50 disabled:opacity-50">⬇ Revision .md</button>
+            ) : (<>
             <a href={api.knowMeExportUrl(kmId, "md")} onClick={() => noteExport("Markdown")} aria-label="Download as Markdown" className="rounded-lg border px-2 py-1 text-xs text-gray-600 hover:bg-gray-50">⬇ .md</a>
             <a href={api.knowMeExportUrl(kmId, "pdf")} onClick={() => noteExport("PDF")} aria-label="Download as PDF" className="rounded-lg border px-2 py-1 text-xs text-gray-600 hover:bg-gray-50">📄 PDF</a>
+            </>)}
             <button onClick={() => (showHistory ? closeHistory() : setShowHistory(true))} aria-label="Toggle revision history" className={`rounded-lg border px-2 py-1 text-xs ${showHistory ? "border-brand/40 bg-brand/5 text-brand" : "text-gray-600 hover:bg-gray-50"}`}>🕘 History</button>
           </>}
         </div>
@@ -953,6 +984,8 @@ export function KnowMeView({ kmId }: { kmId: string }) {
                 </div>
                 {revContentQ.isLoading ? (
                   <div className="py-10 text-center text-sm text-gray-400">Loading revision…</div>
+                ) : revContentQ.isError ? (
+                  <p role="alert" className="rounded-lg border border-red-200 bg-red-50 p-3 text-sm text-red-700">Could not load this revision: {formatError(revContentQ.error)}</p>
                 ) : diffMode ? (
                   <div className="overflow-hidden rounded-xl border">
                     <div className="flex items-center gap-3 border-b bg-gray-50 px-3 py-1.5 text-[11px] text-gray-500">
@@ -972,9 +1005,18 @@ export function KnowMeView({ kmId }: { kmId: string }) {
                     </pre>
                   </div>
                 ) : (
-                  <div className={`${PROSE} rounded-xl border border-amber-200 bg-amber-50/20 p-5`}>
-                    <Markdown components={docMarkdownComponents}>{withAssetUrls(kmId, viewingRevMd)}</Markdown>
-                  </div>
+                  revContentQ.data && <Suspense fallback={SLA_LOADING}>
+                    <HistoricalSlaDocument
+                      key={`${kmId}-${viewingRevId}`} kmId={kmId} revision={revContentQ.data.revision}
+                      components={docMarkdownComponents} proseClassName={PROSE}
+                      sections={withResiliencySection(revContentQ.data.revision.sections)
+                        .filter((s) => s.content.trim() || isResiliencySection(s))
+                        .map((s) => ({
+                          key: s.key, label: s.label, isResiliency: isResiliencySection(s),
+                          body: withAssetUrls(kmId, renderSectionRead(s.content, s.key, revContentQ.data!.revision.todos, "", s.label)),
+                        }))}
+                    />
+                  </Suspense>
                 )}
               </div>
             ) : (<>
@@ -1034,7 +1076,7 @@ export function KnowMeView({ kmId }: { kmId: string }) {
                   <section key={s.key} data-kmsec={s.key} className="group scroll-mt-20 rounded-xl border border-transparent px-3 py-2 transition hover:border-gray-100 hover:bg-gray-50/40">
                     <div className="flex items-center gap-2">
                       <h2 className="flex-1 text-lg font-bold text-gray-900">{s.label}</h2>
-                      <div className={`relative flex items-center gap-1 transition ${regenKey === s.key ? "opacity-100" : "opacity-0 group-hover:opacity-100"}`}>
+                      {sectionKeys.includes(s.key) && <div className={`relative flex items-center gap-1 transition ${regenKey === s.key ? "opacity-100" : "opacity-0 group-hover:opacity-100"}`}>
                         {sectionOpen > 0 && (
                           <button
                             onClick={() => { setFillScope(s.key); setMode("fill"); }}
@@ -1071,9 +1113,21 @@ export function KnowMeView({ kmId }: { kmId: string }) {
                             </ol>
                           </div>
                         )}
-                      </div>
+                      </div>}
                     </div>
                     <div className={PROSE}><MemoMarkdown components={docMarkdownComponents}>{body}</MemoMarkdown></div>
+                    {isResiliencySection(s) && (
+                      <Suspense fallback={SLA_LOADING}>
+                        <CompositeSla
+                          key={kmId} kmId={kmId} snapshot={km.composite_sla}
+                          stale={kmQ.data?.composite_sla_stale}
+                          canReview={has("architects.write")}
+                          readOnlyReason={km.deleted_at ? "Deleted document: restore it before refreshing or reviewing the SLA." : undefined}
+                          busy={saving || genState === "running" || !!regenKey}
+                          onUpdated={onGenDone}
+                        />
+                      </Suspense>
+                    )}
                   </section>
                 );
               })}
@@ -1805,4 +1859,3 @@ export function KnowMePanel() {
   if (id) return <KnowMeView kmId={id} />;
   return <KnowMeIndex />;
 }
-

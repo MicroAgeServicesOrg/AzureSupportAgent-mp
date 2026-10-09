@@ -75,6 +75,21 @@ Architectures: `/architectures`, `/architectures/{id}`, `/architectures/{id}/mem
 
 **Verification:** Reopen current/history after restore and inspect the downloaded file for scope and sensitive topology.
 
+## How to review a Know-Me Composite SLA
+
+1. Generate Know-Me from Memory or build it from a linked workload with a readable Azure connection.
+2. Open **Resiliency & DR** and inspect the Composite SLA snapshot, completeness and missing inputs. Generation continues even when the solution percentage cannot be calculated.
+3. Define a critical user journey and its success boundary. Classify required components, genuine alternative paths and explicitly excluded supporting resources.
+4. Review service eligibility against the displayed configuration and source-linked commitment. Resolve unsupported or missing critical inputs; do not exclude them merely to obtain a percentage.
+5. Record assumptions, including whether a fallback satisfies the same success boundary. Acknowledge that independent failures are a modeling assumption, not a verified property of Azure zones/regions.
+6. Submit the model for server-side calculation. Review the result, evidence and unresolved inputs. Customer contractual SLA and RTO/RPO fields still require human completion.
+7. Export the reviewed document. Use history to inspect or restore the exact prior snapshot; restoring a pre-feature revision does not retain a later calculation.
+8. Refresh after relevant configuration changes. Review the journey again if architecture/scope changed, and heed stale-source notices. The application does not continuously monitor Azure configuration.
+
+**Expected result:** A source-linked modeled availability explanation under the existing Resiliency & DR section, or a precise list of unresolved inputs with no whole-solution percentage.
+
+**Verification:** Compare the expression with a hand-checked topology, confirm that shared dependencies are counted once, and verify that a relevant configuration change changes the matched commitment/result or makes it unresolved. The model is not a contractual SLA, service-credit calculation or observed uptime.
+
 ## How to generate and maintain architecture Memory
 
 {: .note }

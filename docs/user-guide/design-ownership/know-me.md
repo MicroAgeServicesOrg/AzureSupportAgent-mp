@@ -50,6 +50,31 @@ The Know-Me document has **Read**, **Fill**, and **Edit** modes. Field chips rem
 
 Each section's editor has **Visual**, **Markdown**, and **Preview** tabs, table editing, architecture/Mermaid insertion, and image upload/paste. **Save section** persists the edit; closing the dialog is not a save. Uploads are limited to 8 MB and can create an asset before the section is saved. **How built** shows generation passes and the assessment, coverage, performance, and idle-resource evidence used; **Source** opens related records.
 
+## Composite SLA: modeled availability
+
+Know-Me generation collects SLA-relevant workload configuration and adds a read-only **Composite SLA** subsection under **Resiliency & DR**. The document retains its 13 sections. The calculation runs on the server, separately from the AI-written narrative.
+
+**Generate from Memory**, **Build from workload**, and full regeneration collect a new configuration snapshot. Regenerating **Resiliency & DR** also refreshes it; regenerating other sections preserves the existing calculation. Existing documents without a snapshot can use the Composite SLA refresh control.
+
+The first snapshot normally requires a journey review. Define what success means, select required components (**ALL**), group genuine alternatives (**ANY**), and explain every excluded inventory resource. A fallback that only queues work is not equivalent to immediate transaction completion unless that is the journey's stated boundary. A repeated resource identity is counted once, including dependencies shared between alternatives.
+
+Explicitly acknowledge the independent-failure modeling assumption and record the failover/operational assumptions. Zone or region separation alone does not prove independent failures. Provider commitments may already include redundancy; do not model the same redundancy uplift a second time. External dependencies without resolved commitments remain unresolved.
+
+The result shows the modeled percentage when calculable, service commitments, eligibility facts, operation covered, source/version, review attribution and unresolved inputs. Unsupported services, unknown configuration, incomplete inventory, unresolved critical dependencies or incompatible measurement bases withhold the **whole-solution percentage**; they do not block generation of the rest of Know-Me. Excluding an unsupported service is only appropriate when it genuinely falls outside the reviewed journey.
+
+{: .warning }
+**Not a contractual SLA or uptime forecast.** Service commitments are not measured failure probabilities. This assumption-based model is not the customer's agreed SLA, an Azure service-credit entitlement, an SLO or observed production uptime. Human-owned SLA, RTO/RPO and contact fields remain unchanged.
+
+Calculations use a versioned, source-linked catalog rather than an LLM's remembered percentages or a live legal-page lookup. A supported service family does not mean every SKU, operation or deployment is covered; inspect the matched eligibility rule and source.
+
+The initial catalog has 23 rules across nine families: Storage, App Service, single Virtual Machines, SQL Database, Cosmos DB, Key Vault, Service Bus, Event Hubs and AKS. Rules are pinned to the Microsoft Online Services SLA effective October 1, 2026. Operation-specific promises remain operation-specific: for example, an AKS control-plane commitment is not an availability promise for application pods. Request-error-rate and time-based measurement bases are kept distinct; incompatible selected commitments withhold the composite percentage.
+
+Models support up to 16 distinct selected components, 128 expression nodes and eight nesting levels; collection is limited to 1,000 workload resources. Narrow the workload/journey when these bounds are exceeded rather than treating partial coverage as complete.
+
+The calculation and its evidence are saved together and included in Markdown/PDF exports and revision history. Restoring a historical revision restores its calculation snapshot, not a newly calculated result. Restoring a revision predating this feature removes the newer snapshot.
+
+Known changes to architecture, workload membership, catalog or calculator versions mark a snapshot stale. Refresh reevaluates current configuration; changed architecture/scope requires journey review again. Azure configuration is **not continuously polled**. Always check the observation timestamp before relying on a result.
+
 {% include screenshot.html file="fdesign-knowme-how-built.png" title="Inspect modeled provenance in How built" caption="Pass labels, confidence, and evidence counts are deliberately synthetic provenance rendered by the native panel. They do not show an LLM call or establish that source evidence was collected or verified." %}
 
 ## Architecture Memory is a separate source document

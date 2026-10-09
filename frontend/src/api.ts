@@ -6132,6 +6132,11 @@ export const api = {
     http<{ jobs: KnowMeBuildJob[] }>("/architectures/know-me/from-workload/active"),
   saveKnowMe: (kmId: string, body: { title?: string; description?: string; sections?: KnowMeSection[]; todos?: KnowMeTodo[]; status?: string }) =>
     http<KnowMeResponse>(`/architectures/know-me/${kmId}`, { method: "PUT", body: JSON.stringify(body) }),
+  calculateKnowMeCompositeSla: (kmId: string, model?: SlaJourney) =>
+    http<KnowMeResponse>(`/architectures/know-me/${kmId}/composite-sla`, {
+      method: "POST",
+      body: JSON.stringify(model ? { model } : {}),
+    }),
   setKnowMeReference: (kmId: string, isReference = true) =>
     http<KnowMeResponse>(`/architectures/know-me/${kmId}/reference`, { method: "POST", body: JSON.stringify({ is_reference: isReference }) }),
   suggestKnowMeField: (kmId: string, fieldId: string) =>
@@ -14599,6 +14604,57 @@ export interface KnowMeAsset {
   content_type: string;
   size: number;
 }
+export interface SlaExpression {
+  operator: "component" | "all" | "any";
+  component_id?: string;
+  children?: SlaExpression[];
+}
+export interface SlaJourney {
+  name: string;
+  boundary: string;
+  expression: SlaExpression;
+  exclusions: { component_id: string; reason: string }[];
+  independent_failures: true;
+  assumptions: string[];
+  external_dependencies: string[];
+}
+export interface SlaComponent {
+  component_id: string;
+  resource_id: string;
+  name: string;
+  resource_type: string;
+  location: string;
+  sku: string | null;
+  configuration: Record<string, unknown>;
+  status: "resolved" | "unresolved" | "unsupported" | "ineligible";
+  availability: string | null;
+  rule_id: string | null;
+  operation: string | null;
+  source_url: string | null;
+  source_version: string | null;
+  measurement_basis: string | null;
+  reason: string | null;
+  assumptions: string[];
+}
+export interface SlaSnapshot {
+  status: "calculated" | "needs_review" | "incomplete";
+  percentage: string | null;
+  availability: string | null;
+  calculated_at: string | null;
+  configuration_observed_at: string | null;
+  source_fingerprint: string;
+  input_fingerprint: string;
+  inventory_complete: boolean;
+  catalog_version: string;
+  calculator_version: string;
+  schema_version: string;
+  reviewed_by: string | null;
+  reviewed_at: string | null;
+  disclaimer: string;
+  unresolved: string[];
+  components: SlaComponent[];
+  model: SlaJourney | null;
+}
 export interface KnowMe {
   id: string;
   architecture_id: string;
@@ -14609,6 +14665,8 @@ export interface KnowMe {
   sections: KnowMeSection[];
   todos: KnowMeTodo[];
   assets?: KnowMeAsset[];
+  composite_sla?: SlaSnapshot | null;
+  deleted_at?: string | null;
   status: "draft" | "in_review" | "published" | "archived";
   is_reference?: boolean;
   source: "ai" | "edited" | "hybrid";
@@ -14636,6 +14694,7 @@ export interface KnowMeResponse {
   markdown: string;
   has_memory?: boolean;
   memory_updated_at?: string;
+  composite_sla_stale?: boolean;
   architecture: ArchitectureMemoryResponse["architecture"];
 }
 export interface KnowMeRevision {
@@ -14653,6 +14712,7 @@ export interface KnowMeRevision {
 export interface KnowMeRevisionContent extends KnowMeRevision {
   sections: KnowMeSection[];
   todos: KnowMeTodo[];
+  composite_sla?: SlaSnapshot | null;
 }
 /** One Know-Me document in the standalone index (a workload may have many). */
 export interface KnowMeDocument {

@@ -256,6 +256,8 @@ def update_know_me(
     status: str | None = None,
     source: str | None = None,
     ai: dict[str, Any] | None = None,
+    composite_sla: dict[str, Any] | None = None,
+    clear_composite_sla: bool = False,
     tenant_id: str = "",
     actor: str = "",
     reason: str = "Edited",
@@ -315,6 +317,12 @@ def update_know_me(
             value["ai"] = ai
         elif "ai" not in value:
             value["ai"] = {}
+        if composite_sla is not None:
+            from app.knowme.sla import Snapshot
+
+            value["composite_sla"] = Snapshot.model_validate(composite_sla).model_dump()
+        elif clear_composite_sla:
+            value.pop("composite_sla", None)
         value.setdefault("is_reference", bool(existing.get("is_reference", False)))
         value.setdefault("deleted_at", "")
         value["created_at"] = existing.get("created_at") or _now()
@@ -462,6 +470,8 @@ def restore_revision(km_id: str, revision_id: str, actor: str = "") -> dict[str,
         status=rev.get("status", "draft"),
         source=rev.get("source", "edited"),
         ai=rev.get("ai", {}),
+        composite_sla=rev.get("composite_sla"),
+        clear_composite_sla="composite_sla" not in rev or rev["composite_sla"] is None,
         actor=actor,
         reason="Restored from history",
     )

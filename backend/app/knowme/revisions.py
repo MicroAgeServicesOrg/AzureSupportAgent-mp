@@ -18,7 +18,7 @@ from app.core import jsonstore
 _PATH = Path(__file__).resolve().parents[2] / ".data" / "know_me_revisions.json"
 
 _MAX_PER_DOC = 50
-_CONTENT_KEYS = ("title", "sections", "todos", "status", "source", "ai")
+_CONTENT_KEYS = ("title", "sections", "todos", "status", "source", "ai", "composite_sla")
 
 
 def _now() -> str:
@@ -32,15 +32,15 @@ def _read() -> dict[str, Any]:
 
 def signature(km_doc: dict[str, Any]) -> str:
     """A stable content fingerprint (excludes timestamps that always change)."""
-    return json.dumps(
-        {
-            "title": km_doc.get("title", ""),
-            "sections": km_doc.get("sections", []),
-            "todos": km_doc.get("todos", []),
-            "status": km_doc.get("status", "draft"),
-        },
-        sort_keys=True,
-    )
+    content = {
+        "title": km_doc.get("title", ""),
+        "sections": km_doc.get("sections", []),
+        "todos": km_doc.get("todos", []),
+        "status": km_doc.get("status", "draft"),
+    }
+    if km_doc.get("composite_sla") is not None:
+        content["composite_sla"] = km_doc["composite_sla"]
+    return json.dumps(content, sort_keys=True)
 
 
 def _meta(rev: dict[str, Any]) -> dict[str, Any]:

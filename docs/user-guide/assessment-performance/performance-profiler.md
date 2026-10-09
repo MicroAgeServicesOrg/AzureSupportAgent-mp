@@ -37,6 +37,10 @@ Performance Profiler reads Azure Monitor metrics for a workload or subscription,
 
 Choose a workload or subscription, connection, and exact time range, then select **Run profile**. The screen streams per-resource progress and keeps the stream active while navigating within the same browser tab.
 
+The compact header keeps the score gauge, trend, and run controls together without
+a separate summary-card row. Resource counts remain available in Profile history
+and the heatmap. Collapse the overview or use **Focus** to give the matrix more space.
+
 If the stream fails or closes before a terminal event, the UI reports the interruption, clears
 its local running indicator, and refreshes Profile history and Fleet. A disconnected stream is
 not proof that collection failed: the server-side task may still finish and save its attempt.

@@ -358,23 +358,20 @@ function ScoreDonut({ score }: { score: number | null | undefined }) {
   const dash = ((pct ?? 0) / 100) * c;
   const color = pct == null ? "#e5e7eb" : pct >= 80 ? "#16a34a" : pct >= 50 ? "#d97706" : "#dc2626";
   return (
-    <svg viewBox="0 0 80 80" className="h-20 w-20 shrink-0">
+    <svg
+      viewBox="0 0 80 80"
+      className="h-14 w-14 shrink-0"
+      role="img"
+      aria-label={pct == null ? "Performance score unavailable" : `Performance score: ${pct}`}
+      data-testid="perf-score"
+    >
       <circle cx="40" cy="40" r={r} fill="none" stroke="#e5e7eb" strokeWidth="8" />
       {pct != null && (
         <circle cx="40" cy="40" r={r} fill="none" stroke={color} strokeWidth="8" strokeLinecap="round"
           strokeDasharray={`${dash} ${c - dash}`} transform="rotate(-90 40 40)" />
       )}
-      <text x="40" y="45" textAnchor="middle" className="fill-gray-900 text-[18px] font-semibold">{pct ?? "—"}</text>
+      <text x="40" y="45" textAnchor="middle" className="fill-gray-900 text-[20px] font-semibold">{pct ?? "—"}</text>
     </svg>
-  );
-}
-
-function Stat({ label, value, tone }: { label: string; value: string; tone?: string }) {
-  return (
-    <div className="rounded-lg border bg-white px-3 py-2">
-      <div className={`text-xl font-semibold ${tone ?? "text-gray-900"}`}>{value}</div>
-      <div className="truncate text-[11px] text-gray-500">{label}</div>
-    </div>
   );
 }
 
@@ -889,13 +886,13 @@ export function PerformancePanel() {
       ) : (
       <>
       {/* Header + controls */}
-      <div className="border-b bg-white px-5 py-3" data-testid="perf-header">
-        <div className="flex flex-wrap items-center gap-4">
+      <div className="border-b bg-white px-5 py-2" data-testid="perf-header">
+        <div className="flex flex-wrap items-center gap-x-3 gap-y-2">
           {overviewOpen && !focused && (
             <ScoreDonut score={data?.scorecard?.workload_score ?? runs[0]?.workload_score ?? null} />
           )}
-          <div className="min-w-0 max-w-md">
-            <h1 className="flex items-center gap-2 text-lg font-semibold text-gray-900">
+          <div className="min-w-0 max-w-[17rem]">
+            <h1 className="flex items-center gap-2 text-base font-semibold text-gray-900">
               {focused ? (
                 /* No chevron in focus mode: the overview is already hidden, so a control that
                    visibly does nothing when clicked is worse than no control. */
@@ -915,8 +912,11 @@ export function PerformancePanel() {
               )}
             </h1>
             {overviewOpen && !focused && (
-              <p className="text-xs text-gray-500">
-                Reads live Azure Monitor metrics for every resource in a workload and lays them out in a single matrix — so you can see the whole workload's performance holistically and spot the binding bottleneck against its AMBA thresholds. Pick a window and click Run. Read-only.
+              <p
+                className="text-xs text-gray-500"
+                title="Reads live Azure Monitor metrics for every resource in a workload and compares them with AMBA thresholds to identify the binding bottleneck. Pick a window and click Run. Read-only."
+              >
+                Read-only Azure Monitor metrics against AMBA thresholds.
               </p>
             )}
           </div>
@@ -959,21 +959,12 @@ export function PerformancePanel() {
             </button>
           </div>
         </div>
-        {overviewOpen && !focused && data?.scorecard && (
-          <div className="mt-3 grid grid-cols-2 gap-2 sm:grid-cols-5" data-testid="perf-kpis">
-            <Stat label="Performance score" value={data.scorecard.workload_score == null ? "—" : `${data.scorecard.workload_score}`} tone={scoreTone(data.scorecard.workload_score)} />
-            <Stat label="Resources profiled" value={`${data.scorecard.resources_profiled}`} />
-            <Stat label="Breaching" value={`${data.scorecard.breaching}`} tone={data.scorecard.breaching ? "text-red-600" : undefined} />
-            <Stat label="Approaching" value={`${data.scorecard.approaching}`} tone={data.scorecard.approaching ? "text-amber-600" : undefined} />
-            <Stat label="Healthy" value={`${data.scorecard.healthy}`} tone="text-green-600" />
-          </div>
-        )}
         {runningHere && runningEntry?.lastResource && (
           <div className="mt-1 truncate text-[11px] text-gray-500">profiling… {runningEntry.lastResource}</div>
         )}
       </div>
 
-      <div className="min-h-0 flex-1 overflow-auto px-5 py-4">
+      <div className="min-h-0 flex-1 overflow-auto px-5 py-3">
         {msg && (
           <div className={`mb-3 rounded-md border px-3 py-2 text-sm ${msg.ok ? "border-green-200 bg-green-50 text-green-700" : "border-red-200 bg-red-50 text-red-700"}`}>{msg.text}</div>
         )}
