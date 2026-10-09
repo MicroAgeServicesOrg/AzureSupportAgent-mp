@@ -21,7 +21,8 @@ export function GuidedFill({
   focusFieldId,
   focusNonce,
   onSuggestField,
-  suggestingId,
+  suggestingField,
+  suggestionError,
 }: {
   todos: KnowMeTodo[];
   sections: KnowMeSection[];
@@ -40,7 +41,8 @@ export function GuidedFill({
   focusNonce?: number;
   // On-demand AI "suggest options" for a field (P3).
   onSuggestField?: (fieldId: string) => void;
-  suggestingId?: string;
+  suggestingField?: (fieldId: string) => boolean;
+  suggestionError?: (fieldId: string) => string | undefined;
 }) {
   const ordered = useMemo(() => {
     const all = orderTodos(todos, sectionKeys);
@@ -232,7 +234,8 @@ export function GuidedFill({
               onEnter={() => advance(1, true)}
               autoFocus
               onSuggest={onSuggestField ? () => onSuggestField(cur.id) : undefined}
-              suggesting={suggestingId === cur.id}
+              suggesting={suggestingField?.(cur.id)}
+              suggestionError={suggestionError?.(cur.id)}
             />
             {/* Optional ownership of this field: who's responsible + a note for the next person. */}
             <div>

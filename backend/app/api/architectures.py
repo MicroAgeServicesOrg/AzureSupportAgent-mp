@@ -1221,8 +1221,8 @@ async def review_composite_sla_endpoint(
         except ValidationError as exc:
             raise HTTPException(status_code=422, detail=str(exc)) from exc
     workload = get_workload(arch.get("workload_id") or "")
-    if workload and (workload.get("tenant_id") or "") not in ("", principal.tenant_id):
-        raise HTTPException(status_code=404, detail="Workload not found.")
+    # Workload tenant_id is the Azure directory, not the app tenant. Document/architecture
+    # authorization above and the admin-managed connection govern access to its scope.
     snapshot = await generate_snapshot(
         arch, workload, arch.get("connection_id") or (workload or {}).get("connection_id") or "",
         previous=km_doc.get("composite_sla"), model=model, actor=_actor(principal),
@@ -1427,11 +1427,12 @@ async def delete_know_me_asset_endpoint(km_id: str, asset_id: str, principal: Pr
 
 @router.post("/know-me/{km_id}/fields/{field_id}/suggest")
 async def suggest_know_me_field_endpoint(
-    km_id: str, field_id: str, principal: Principal = Depends(_write)
+    km_id: str, field_id: str, principal: Principal = Depends(_write),
+    preload: bool = Query(False),
 ):
     """AI-infer a short list of realistic answer OPTIONS for one human-completion field
-    (P3, on-demand). Returns ``{choices: [...]}`` and caches them onto the field so the UI can
-    offer a dropdown. Best-effort — returns the field's existing choices on any failure."""
+    Returns ``{choices: [...]}``. Preloads are read-only and cached in process memory;
+    legacy on-demand calls atomically cache only this field. Provider failures are explicit."""
     from app.knowme import context as kctx
     from app.knowme import generator as kgen
     from app.knowme import registry as kreg
@@ -1442,6 +1443,19 @@ async def suggest_know_me_field_endpoint(
     todo = next((t for t in todos if str(t.get("id")) == field_id), None)
     if todo is None:
         raise HTTPException(status_code=404, detail="Field not found.")
+    if todo.get("choices") or todo.get("suggestions"):
+        return {"choices": todo.get("choices") or todo.get("suggestions") or [],
+                "choice_source": todo.get("choice_source") or ""}
+
+    def source(doc: dict[str, Any], field: dict[str, Any], architecture: dict[str, Any]) -> str:
+        return json.dumps([
+            (doc.get("ai") or {}).get("generated_at"), architecture.get("updated_at"),
+            [field.get(key) for key in ("label", "field_key", "section_key", "type")],
+            [row.get("content") for row in doc.get("sections", [])
+             if row.get("key") == field.get("section_key")],
+        ], sort_keys=True)
+
+    field_source = source(km_doc, todo, arch)
 
     workload_id = arch.get("workload_id") or km_doc.get("workload_id") or ""
     connection_id = arch.get("connection_id") or km_doc.get("connection_id") or ""
@@ -1452,35 +1466,29 @@ async def suggest_know_me_field_endpoint(
     known = await kctx.gather_known_facts(wl, arch, principal.tenant_id, connection_id, facts)
     evidence = await kctx.gather_evidence(km_doc.get("architecture_id", ""), workload_id, principal.tenant_id, connection_id)
 
-    options = await kgen.suggest_field_choices(
-        label=str(todo.get("label") or ""),
-        field_key=str(todo.get("field_key") or ""),
-        section_label=section_label,
-        workload_name=wl_name,
-        known_block=known.get("block", ""),
-        evidence_block=evidence.get("block", ""),
-    )
-    if not options:
-        return {"choices": todo.get("choices") or [], "choice_source": todo.get("choice_source") or ""}
+    try:
+        options = await kgen.suggest_field_choices(
+            label=str(todo.get("label") or ""), field_key=str(todo.get("field_key") or ""),
+            section_label=section_label, workload_name=wl_name,
+            known_block=known.get("block", ""), evidence_block=evidence.get("block", ""),
+            cache_scope=json.dumps([principal.tenant_id, km_id, field_id, field_source]),
+        )
+    except asyncio.TimeoutError as exc:
+        raise HTTPException(status_code=504, detail="AI suggestions timed out. Retry this field.") from exc
+    except Exception as exc:
+        logger.exception("Know-Me field suggestion failed")
+        raise HTTPException(status_code=502, detail="AI suggestions are unavailable. Check the provider and retry this field.") from exc
 
-    # Merge AI options after any existing choices (preserve order, dedup) + persist.
-    merged: list[str] = []
-    for v in [*(todo.get("choices") or []), *options]:
-        s = str(v).strip()
-        if s and s not in merged:
-            merged.append(s)
-    merged = merged[:12]
-    for t in todos:
-        if str(t.get("id")) == field_id:
-            t["choices"] = merged
-            t["allow_custom"] = True
-            if not t.get("choice_source"):
-                t["choice_source"] = "ai"
-    kreg.update_know_me(
-        km_id, todos=todos, source="edited",
-        tenant_id=principal.tenant_id, actor=_actor(principal), reason="Suggested field options",
-    )
-    return {"choices": merged, "choice_source": "ai"}
+    current, current_arch = _km_or_404(km_id, principal)
+    field = next((row for row in current.get("todos", []) if row.get("id") == field_id), None)
+    if field is None or source(current, field, current_arch) != field_source:
+        raise HTTPException(status_code=409, detail="The field changed while loading suggestions. Refresh the document.")
+    if preload or not options:
+        return {"choices": options, "choice_source": "ai"}
+    saved = kreg.cache_field_choices(km_id, field_id, options, field, _actor(principal))
+    if saved is None:
+        raise HTTPException(status_code=409, detail="The field changed while saving suggestions.")
+    return {"choices": saved.get("choices") or [], "choice_source": saved.get("choice_source") or ""}
 
 
 async def _run_generate_know_me(
@@ -1508,8 +1516,6 @@ async def _run_generate_know_me(
         raise ValueError("No architecture memory to transform. Generate the Memory first.")
 
     wl = get_workload(workload_id) if workload_id else None
-    if wl and (wl.get("tenant_id") or "") not in ("", tenant_id):
-        raise ValueError("Workload not found.")
     wl_name = arch.get("workload_name", "") or (wl or {}).get("name", "")
     await progress("scope", "🔎 Resolving the workload's Azure scope & known values…")
     facts = km.scope_facts(wl, arch)
@@ -1707,8 +1713,6 @@ async def generate_know_me_section_stream_endpoint(
 
             label = km.section_label(section_key)
             wl = get_workload(workload_id) if workload_id else None
-            if wl and (wl.get("tenant_id") or "") not in ("", tenant_id):
-                raise ValueError("Workload not found.")
             wl_name = arch.get("workload_name", "") or (wl or {}).get("name", "")
             yield {"event": "status", "data": json.dumps({"phase": "scope", "message": f"🔎 Resolving scope & known values for “{label}”…"})}
             facts = km.scope_facts(wl, arch)
@@ -1808,7 +1812,7 @@ async def _run_know_me_from_workload(
     from app.knowme import sections as km
 
     wl = get_workload(workload_id) if workload_id else None
-    if wl is None or (wl.get("tenant_id") or "") not in ("", tenant_id):
+    if wl is None:
         raise RuntimeError("Workload not found.")
     wl_name = wl.get("name", "") or "workload"
     conn_id = connection_id or wl.get("connection_id") or ""

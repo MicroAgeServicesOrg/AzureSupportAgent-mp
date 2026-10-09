@@ -344,6 +344,37 @@ def update_know_me(
     return dict(merged)
 
 
+def cache_field_choices(
+    km_id: str, field_id: str, options: list[str], expected: dict[str, Any], actor: str,
+) -> dict[str, Any] | None:
+    """Merge one field into the latest record, never replace a stale whole TODO list."""
+    saved: dict[str, Any] = {}
+
+    def mutate(data: dict[str, Any]) -> None:
+        record = data.get("know_me", {}).get(km_id)
+        if not record or record.get("deleted_at"):
+            return
+        current = next((row for row in record.get("todos", []) if row.get("id") == field_id), None)
+        if current is None or any(current.get(key) != expected.get(key)
+                                  for key in ("label", "field_key", "section_key", "type")):
+            return
+        if current.get("choice_source") == "platform":
+            saved.update(current)
+            return
+        merged = list(dict.fromkeys([*(current.get("choices") or []), *options]))[:12]
+        current["choices"] = merged
+        current["allow_custom"] = True
+        current["choice_source"] = current.get("choice_source") or "ai"
+        record["updated_at"] = _now()
+        record["updated_by"] = actor
+        saved.update(current)
+
+    jsonstore.mutate_json(_PATH, {"know_me": {}}, mutate)
+    if not saved:
+        return None
+    return dict(saved)
+
+
 def set_reference(km_id: str, *, is_reference: bool = True, actor: str = "") -> dict[str, Any] | None:
     """Mark this Know-Me as the canonical *reference* for its workload. Only one document per
     workload can be the reference, so setting it clears the flag on its siblings. Pass

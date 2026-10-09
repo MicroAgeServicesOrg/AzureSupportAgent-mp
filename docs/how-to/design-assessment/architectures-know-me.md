@@ -75,6 +75,18 @@ Architectures: `/architectures`, `/architectures/{id}`, `/architectures/{id}/mem
 
 **Verification:** Reopen current/history after restore and inspect the downloaded file for scope and sensitive topology.
 
+## How to use preloaded Know-Me field suggestions
+
+1. Open the current Know-Me with write permission. Empty fields without existing useful choices preload in the background, with up to five concurrent requests.
+2. Click a field chip or enter **Guided fill**. Already-loaded options are shared between both interfaces; clicking does not start another AI call for that field.
+3. If the field is still queued/loading, type your own value while its options arrive. Review AI suggestions rather than treating them as agreed customer commitments.
+4. Choose an option or retain your own entry, then **Save**. Preloading alone does not save the document, alter field values or add revisions.
+5. Use **Retry suggestions** on a failed field, or continue with manual entry. Navigating away stops queued preload work; historical/read-only views do not start it.
+
+**Expected result:** Suggestions are ready before most fields are opened, without blocking document reading or replacing human inputs.
+
+**Verification:** Open several previously unfilled fields and confirm options are reused in both the popover and Guided fill. Provider errors should be explicit, and existing platform choices should remain unchanged.
+
 ## How to review a Know-Me Composite SLA
 
 1. Generate Know-Me from Memory or build it from a linked workload with a readable Azure connection.

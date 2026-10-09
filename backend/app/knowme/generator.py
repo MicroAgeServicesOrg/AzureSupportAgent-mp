@@ -422,12 +422,16 @@ async def suggest_field_choices(
     known_block: str = "",
     evidence_block: str = "",
     max_options: int = 6,
+    cache_scope: str = "",
 ) -> list[str]:
     """Infer a short list of realistic candidate values for ONE human-completion field, using
-    the field label + its section + the workload's scope/evidence as grounding. Best-effort:
-    returns [] on any failure. The values are *options a human can pick from* (still editable),
-    never fabricated facts like specific people/emails."""
+    the field label + its section + the workload's scope/evidence as grounding. An empty
+    JSON array is a valid no-candidates result; failures are explicit. Values remain options,
+    never automatically accepted facts like specific people/emails."""
+    import inspect
     import json
+
+    from app.knowme.suggestions import SuggestionError, cached_choices
 
     ctx_parts = [p for p in (known_block, evidence_block) if p]
     ctx = ("\n\nWORKLOAD CONTEXT:\n" + "\n".join(ctx_parts)) if ctx_parts else ""
@@ -445,29 +449,31 @@ async def suggest_field_choices(
         f"Field key: {field_key or '(none)'}{ctx}\n\n"
         'Respond with ONLY a JSON array, e.g. ["Critical","High","Medium","Low"].'
     )
-    try:
+    async def generate() -> list[str]:
         provider = build_provider()
         text = ""
-        async for ev in provider.stream(
-            [{"role": "system", "content": system}, {"role": "user", "content": user}],
-            None, max_tokens=300,
-        ):
-            if ev.type == "token":
-                text += ev.text
-    except Exception:  # noqa: BLE001
-        return []
+        try:
+            async for ev in provider.stream(
+                [{"role": "system", "content": system}, {"role": "user", "content": user}],
+                None, max_tokens=300,
+            ):
+                if ev.type == "token":
+                    text += ev.text
+        finally:
+            close = getattr(provider, "close", None)
+            if callable(close):
+                result = close()
+                if inspect.isawaitable(result):
+                    await result
+        match = re.search(r"\[.*\]", text.strip(), re.DOTALL)
+        if not match:
+            raise SuggestionError("AI returned no suggestion array.")
+        try:
+            values = json.loads(match.group(0))
+        except json.JSONDecodeError as exc:
+            raise SuggestionError("AI returned malformed suggestions.") from exc
+        if not isinstance(values, list) or any(not isinstance(value, str) for value in values):
+            raise SuggestionError("AI suggestions must be a JSON array of strings.")
+        return list(dict.fromkeys(value.strip() for value in values if value.strip()))[:max_options]
 
-    t = (text or "").strip()
-    m = re.search(r"\[.*\]", t, re.DOTALL)
-    if not m:
-        return []
-    try:
-        arr = json.loads(m.group(0))
-    except (json.JSONDecodeError, ValueError):
-        return []
-    out: list[str] = []
-    for v in arr if isinstance(arr, list) else []:
-        s = str(v).strip()
-        if s and s not in out:
-            out.append(s)
-    return out[:max_options]
+    return await cached_choices(cache_scope, [system, user, max_options], generate)

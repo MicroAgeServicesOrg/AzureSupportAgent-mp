@@ -29,11 +29,12 @@ import { MermaidDiagram } from "./MermaidDiagram";
 import { formatError } from "../utils/format";
 import { GuidedFill } from "./knowme/GuidedFill";
 import { SectionEditor } from "./knowme/SectionEditor";
-import { FieldInput } from "./knowme/FieldInput";
+import { useSuggestions } from "./knowme/useSuggestions";
 import { useAuth } from "./AuthContext";
-import { fieldProgress, renderSectionRead, isPlaceholderMermaid, parseFieldToken, validateField, FIELD_META } from "./knowme/fields";
+import { fieldProgress, renderSectionRead, isPlaceholderMermaid, parseFieldToken, validateField } from "./knowme/fields";
 
 const CompositeSla = lazy(() => import("./knowme/CompositeSla").then((m) => ({ default: m.CompositeSla })));
+const FieldPopover = lazy(() => import("./knowme/FieldPopover").then((m) => ({ default: m.FieldPopover })));
 const HistoricalSlaDocument = lazy(() => import("./knowme/CompositeSla").then((m) => ({ default: m.HistoricalSlaDocument })));
 const SLA_LOADING = <div role="status" className="my-3 rounded-xl border p-4 text-xs text-gray-500">Loading Composite SLA…</div>;
 
@@ -103,149 +104,6 @@ function lineDiff(oldText: string, newText: string): DiffRow[] {
   return rows;
 }
 
-/** Inline pick-or-type popover anchored to a clicked field chip. Shows the field's choices /
- *  suggestions (segmented buttons, a combobox, or suggestion pills via FieldInput) plus a
- *  free-text box — the user can pick an option OR type their own value, then Save. No
- *  right-hand guided-fill panel involved. Closes on outside-click / Esc / scroll. */
-function FieldPopover({
-  todo,
-  anchor,
-  saving,
-  onSave,
-  onClose,
-  onSuggest,
-  suggesting,
-  onStep,
-}: {
-  todo: KnowMeTodo;
-  anchor: DOMRect;
-  saving: boolean;
-  onSave: (value: string) => void;
-  onClose: () => void;
-  onSuggest: () => void;
-  suggesting: boolean;
-  // KU5 — step to the previous/next field without leaving the popover. Receives the current
-  // draft so the parent can persist it before moving on.
-  onStep: (dir: 1 | -1, draft: string) => void;
-}) {
-  const [draft, setDraft] = useState(todo.value || "");
-  const ref = useRef<HTMLDivElement>(null);
-  // Position: prefer below the chip; flip above if it would overflow the viewport bottom.
-  const WIDTH = 340;
-  const vw = typeof window !== "undefined" ? window.innerWidth : 1280;
-  const vh = typeof window !== "undefined" ? window.innerHeight : 800;
-  const left = Math.max(8, Math.min(anchor.left, vw - WIDTH - 8));
-  const below = anchor.bottom + 8;
-  const placeAbove = below + 220 > vh && anchor.top > vh - anchor.bottom;
-  const style: React.CSSProperties = placeAbove
-    ? { position: "fixed", left, bottom: vh - anchor.top + 8, width: WIDTH, zIndex: 50 }
-    : { position: "fixed", left, top: below, width: WIDTH, zIndex: 50 };
-
-  useEffect(() => {
-    // Outside-click close. Runs in the CAPTURE phase: a combobox option unmounts itself
-    // synchronously on mousedown (React 18 flushes discrete events), so by the bubble phase
-    // the clicked node is detached and ``contains`` would wrongly report "outside" — closing
-    // the popover and discarding the pick. Capturing fires before that unmount, while the
-    // option is still in the DOM and correctly inside the popover.
-    const onDown = (e: MouseEvent) => {
-      const t = e.target as Node;
-      if (ref.current && t && ref.current.contains(t)) return; // click inside → keep open
-      onClose();
-    };
-    const onKey = (e: KeyboardEvent) => { if (e.key === "Escape") onClose(); };
-    // A scroll in the document moves the anchor out from under us → just close.
-    const onScroll = () => onClose();
-    window.addEventListener("mousedown", onDown, true);
-    window.addEventListener("keydown", onKey);
-    window.addEventListener("scroll", onScroll, true);
-    return () => {
-      window.removeEventListener("mousedown", onDown, true);
-      window.removeEventListener("keydown", onKey);
-      window.removeEventListener("scroll", onScroll, true);
-    };
-  }, [onClose]);
-
-  const error = validateField(todo, draft);
-  const meta = FIELD_META[todo.type];
-
-  // Automatically ask AI for suggestions the moment the popover opens — but only for fields that
-  // don't already have a useful choice set (mirrors FieldInput's `canSuggest`), only when the
-  // field is still empty, and only once per open. Once AI returns, choice_source becomes "ai" and
-  // this won't re-fire. The user can still type their own value while suggestions load.
-  const autoSuggestedRef = useRef(false);
-  useEffect(() => {
-    if (autoSuggestedRef.current) return;
-    const eligible =
-      todo.choice_source !== "platform" &&
-      todo.choice_source !== "ai" &&
-      (todo.choices?.length ?? 0) === 0 &&
-      !(todo.value || "").trim() &&
-      !suggesting;
-    if (eligible) {
-      autoSuggestedRef.current = true;
-      onSuggest();
-    }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [todo.id]);
-
-  return (
-    <div ref={ref} style={style} className="rounded-xl border border-gray-200 bg-white p-3 shadow-2xl">
-      <div className="mb-1.5 flex items-start gap-2">
-        <span className="min-w-0 flex-1 text-[13px] font-semibold text-gray-800">{todo.label}</span>
-        {todo.required && <span className="shrink-0 rounded-full bg-amber-50 px-1.5 py-0.5 text-[10px] font-medium text-amber-700">required</span>}
-        {/* KU5 — step between fields without closing; saves the current valid entry first. */}
-        <div className="shrink-0 flex items-center gap-0.5">
-          <button
-            onClick={() => onStep(-1, draft)}
-            disabled={saving || !!error}
-            className="rounded-sm p-0.5 text-gray-400 hover:bg-gray-100 hover:text-gray-700 disabled:opacity-40"
-            title="Previous field"
-            aria-label="Previous field"
-          >↤</button>
-          <button
-            onClick={() => onStep(1, draft)}
-            disabled={saving || !!error}
-            className="rounded-sm p-0.5 text-gray-400 hover:bg-gray-100 hover:text-gray-700 disabled:opacity-40"
-            title="Next field"
-            aria-label="Next field"
-          >↦</button>
-        </div>
-        <button onClick={onClose} aria-label="Close" className="shrink-0 rounded-sm p-0.5 text-gray-400 hover:bg-gray-100">✕</button>
-      </div>
-      {meta?.label && <div className="mb-1.5 text-[11px] text-gray-400">{meta.label}{meta.placeholder ? ` · e.g. ${meta.placeholder}` : ""}</div>}
-      <FieldInput
-        todo={todo}
-        value={draft}
-        onChange={setDraft}
-        onEnter={() => { if (!error) onSave(draft); }}
-        autoFocus
-        onSuggest={onSuggest}
-        suggesting={suggesting}
-      />
-      <div className="mt-2.5 flex items-center gap-2">
-        <button
-          onClick={() => onSave(draft)}
-          disabled={saving || !!error}
-          className="rounded-lg bg-brand px-3 py-1.5 text-xs font-semibold text-white hover:bg-brand-dark disabled:opacity-50"
-        >
-          {saving ? "Saving…" : "Save"}
-        </button>
-        {todo.value && (
-          <button
-            onClick={() => onSave("")}
-            disabled={saving}
-            className="rounded-lg border px-2.5 py-1.5 text-xs text-gray-500 hover:bg-gray-50 disabled:opacity-50"
-            title="Clear this field"
-          >
-            Clear
-          </button>
-        )}
-        <button onClick={onClose} className="ml-auto rounded-lg border px-2.5 py-1.5 text-xs text-gray-600 hover:bg-gray-50">Cancel</button>
-      </div>
-    </div>
-  );
-}
-
 /** Rewrite ``asset:<id>`` image refs to the live asset API URL so images render in the doc.
  *  Assets are keyed by the Know-Me's own id. */
 function withAssetUrls(kmId: string, md: string): string {
@@ -254,6 +112,7 @@ function withAssetUrls(kmId: string, md: string): string {
 
 export function KnowMeView({ kmId }: { kmId: string }) {
   const navigate = useNavigate();
+  const location = useLocation();
   const { has } = useAuth();
   const qc = useQueryClient();
   const kmQ = useQuery({ queryKey: ["knowMe", kmId], queryFn: () => api.knowMe(kmId), staleTime: 5 * 60 * 1000 });
@@ -276,6 +135,7 @@ export function KnowMeView({ kmId }: { kmId: string }) {
   const [fillScope, setFillScope] = useState<string>("");
   const [err, setErr] = useState("");
   const [saving, setSaving] = useState(false);
+  const [viewingRevId, setViewingRevId] = useState<string | null>(null);
 
   // --- generation (SSE) ---
   const [genState, setGenState] = useState<"idle" | "running">("idle");
@@ -356,8 +216,14 @@ export function KnowMeView({ kmId }: { kmId: string }) {
   }, [kmId]);
 
   // --- todos / fields ---
-  const todos: KnowMeTodo[] = km?.todos ?? [];
   const sections: KnowMeSection[] = km?.sections ?? [];
+  const suggestionSource = JSON.stringify([km?.ai?.generated_at, kmQ.data?.memory_updated_at, kmQ.data?.architecture.updated_at, sections]);
+  const suggestions = useSuggestions(
+    kmId, km?.todos ?? [], suggestionSource,
+    !!km && !km.deleted_at && !viewingRevId && genState !== "running" &&
+      location.pathname.replace(/\/$/, "") === `/knowme/${kmId}` && has("architects.write"),
+  );
+  const todos = suggestions.todos;
   const displaySections = useMemo(() => withResiliencySection(sections), [sections]);
   const sectionKeys = useMemo(() => sections.map((s) => s.key), [sections]);
   const prog = useMemo(() => fieldProgress(todos), [todos]);
@@ -403,18 +269,6 @@ export function KnowMeView({ kmId }: { kmId: string }) {
       qc.setQueryData(["knowMe", kmId], r);
       void qc.invalidateQueries({ queryKey: ["knowMeIndex"] });
     } catch (e) { setErr(formatError(e)); }
-  }
-  // On-demand AI "suggest options" for a single field (P3).
-  const [suggestingId, setSuggestingId] = useState("");
-  async function suggestField(fieldId: string) {
-    if (suggestingId) return;
-    setSuggestingId(fieldId);
-    setErr("");
-    try {
-      const r = await api.suggestKnowMeField(kmId, fieldId);
-      // Refetch the doc so the field's new choices flow into the walker.
-      if (r.choices?.length) await qc.invalidateQueries({ queryKey: ["knowMe", kmId] });
-    } catch (e) { setErr(formatError(e)); } finally { setSuggestingId(""); }
   }
   // Inline title / description editing.
   const [editingMeta, setEditingMeta] = useState(false);
@@ -651,7 +505,6 @@ export function KnowMeView({ kmId }: { kmId: string }) {
     window.addEventListener("mousedown", onDown);
     return () => window.removeEventListener("mousedown", onDown);
   }, [openMenu]);
-  const [viewingRevId, setViewingRevId] = useState<string | null>(null);
   const revQ = useQuery({
     queryKey: ["knowMeRevisions", kmId],
     queryFn: () => api.knowMeRevisions(kmId),
@@ -757,15 +610,16 @@ export function KnowMeView({ kmId }: { kmId: string }) {
         const todo = todos.find((t) => t.id === picker.id);
         if (!todo) return null;
         return (
-          <FieldPopover
+          <Suspense fallback={null}><FieldPopover
             key={picker.id}
             todo={todo}
             anchor={picker.anchor}
             saving={saving}
             onSave={async (v) => { await saveField(picker.id, v); closePicker(); }}
             onClose={closePicker}
-            onSuggest={() => void suggestField(picker.id)}
-            suggesting={suggestingId === picker.id}
+            onSuggest={() => suggestions.retry(picker.id)}
+            suggesting={suggestions.pending(picker.id)}
+            suggestionError={suggestions.results[picker.id]?.error}
             onStep={async (dir, draft) => {
               // Persist the current entry first (if it's a valid change), then move to the
               // prev/next field — so walking the doc doesn't lose what you just typed.
@@ -775,7 +629,7 @@ export function KnowMeView({ kmId }: { kmId: string }) {
               }
               stepField(fid, dir);
             }}
-          />
+          /></Suspense>
         );
       })()}
       {/* Toolbar */}
@@ -1169,8 +1023,9 @@ export function KnowMeView({ kmId }: { kmId: string }) {
               onPublish={() => void saveTodos(todos, "published")}
               scopeSection={fillScope || undefined}
               onClearScope={() => setFillScope("")}
-              onSuggestField={(fid) => void suggestField(fid)}
-              suggestingId={suggestingId}
+              onSuggestField={suggestions.retry}
+              suggestingField={suggestions.pending}
+              suggestionError={(fid) => suggestions.results[fid]?.error}
             />
           )}
 

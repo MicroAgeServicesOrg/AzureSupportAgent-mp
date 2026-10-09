@@ -50,6 +50,18 @@ The Know-Me document has **Read**, **Fill**, and **Edit** modes. Field chips rem
 
 Each section's editor has **Visual**, **Markdown**, and **Preview** tabs, table editing, architecture/Mermaid insertion, and image upload/paste. **Save section** persists the edit; closing the dialog is not a save. Uploads are limited to 8 MB and can create an asset before the section is saved. **How built** shows generation passes and the assessment, coverage, performance, and idle-resource evidence used; **Source** opens related records.
 
+### Background field suggestions
+
+Opening an editable Know-Me preloads AI options for empty fields that do not already have platform, rule or stored suggestions. The page remains usable: no generation dialog opens and no field value is automatically filled. Up to **five requests run concurrently**, not five requests per second. The backend also bounds suggestion AI work to five concurrent calls per process.
+
+Inline field popovers and **Guided fill** share the warmed results. Opening a field does not launch a duplicate request; an individual field can still show **Suggesting...** if it is opened before its queued request finishes. If results arrive while you are typing, the existing draft/input remains stable and options appear without replacing the value.
+
+Background preloads do not save the document or create history revisions. Existing platform choices and completed values are not overwritten. Read-only users, deleted documents and historical revision views do not start preloads. Navigating away stops queued browser requests; already-dispatched shared server work may finish and populate its cache.
+
+Successful results, including a valid empty candidate list, are cached for up to ten minutes in a bounded process-local cache. Matching in-flight work is shared, and changed field/generation/source context uses a different cache key. This cache is not shared across backend processes or replicas.
+
+Suggestions are editable advice, not accepted facts. If a preload fails, the field shows the error and **Retry suggestions**; manual entry remains available. An empty valid result shows that no suitable AI suggestions were found rather than inventing a value.
+
 ## Composite SLA: modeled availability
 
 Know-Me generation collects SLA-relevant workload configuration and adds a read-only **Composite SLA** subsection under **Resiliency & DR**. The document retains its 13 sections. The calculation runs on the server, separately from the AI-written narrative.

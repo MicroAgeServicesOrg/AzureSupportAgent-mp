@@ -288,6 +288,25 @@ async def test_build_from_workload_pipeline(environment):
     assert len(response["know_me"]["sections"]) == 13
 
 
+async def test_azure_directory_tenant_is_not_app_authorization_boundary(environment):
+    env = environment
+    env.wl["tenant_id"] = "azure-directory-not-app-tenant"
+    reviewed = await routes.review_composite_sla_endpoint(
+        env.doc["id"], routes.CompositeSlaReviewRequest(model=journey().model_dump()), env.principal)
+    assert reviewed["know_me"]["composite_sla"]["status"] == "calculated"
+    generated = await routes._run_generate_know_me(
+        AsyncMock(), architecture_id="arch", arch=env.arch, principal=env.principal,
+        extra_context="", target_km_id=env.doc["id"])
+    assert generated["know_me"]["composite_sla"]["status"] == "calculated"
+    built = await routes._run_know_me_from_workload(
+        AsyncMock(), workload_id="wl", explicit_arch_id="arch", extra_context="",
+        connection_id="conn", tenant_id="tenant", principal=env.principal)
+    assert built["know_me"]["composite_sla"]["status"] == "needs_review"
+    response = await routes.generate_know_me_section_stream_endpoint(
+        env.doc["id"], "resiliency_dr", routes.KnowMeSectionGenerateRequest(), env.principal)
+    assert [event async for event in response.body_iterator][-1]["event"] == "done"
+
+
 async def test_relevant_section_refreshes_snapshot_other_sections_preserve(environment):
     env = environment
     reviewed = await routes.review_composite_sla_endpoint(

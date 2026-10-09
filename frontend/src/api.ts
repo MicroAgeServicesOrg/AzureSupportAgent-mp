@@ -6139,8 +6139,8 @@ export const api = {
     }),
   setKnowMeReference: (kmId: string, isReference = true) =>
     http<KnowMeResponse>(`/architectures/know-me/${kmId}/reference`, { method: "POST", body: JSON.stringify({ is_reference: isReference }) }),
-  suggestKnowMeField: (kmId: string, fieldId: string) =>
-    http<{ choices: string[]; choice_source?: string }>(`/architectures/know-me/${kmId}/fields/${encodeURIComponent(fieldId)}/suggest`, { method: "POST", body: "{}" }),
+  suggestKnowMeField: (kmId: string, fieldId: string, signal?: AbortSignal, preload = false) =>
+    http<{ choices: string[]; choice_source?: string }>(`/architectures/know-me/${kmId}/fields/${encodeURIComponent(fieldId)}/suggest${preload ? "?preload=true" : ""}`, { method: "POST", body: "{}", signal }),
   deleteKnowMe: (kmId: string) =>
     http<{ ok: boolean }>(`/architectures/know-me/${kmId}`, { method: "DELETE" }),
   restoreKnowMe: (kmId: string) =>
