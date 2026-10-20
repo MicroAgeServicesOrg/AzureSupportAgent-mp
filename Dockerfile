@@ -185,7 +185,7 @@ COPY third_party/ /app/third_party/
 RUN python -m venv /opt/eidmcp \
     && /opt/eidmcp/bin/pip install --no-cache-dir --upgrade pip \
     && /opt/eidmcp/bin/pip install --no-cache-dir \
-        "cryptography>=50.0.0" azure-core azure-identity "mcp[cli]>=1.28.1,<2" msgraph-core msgraph-sdk fastmcp python-dotenv \
+        "cryptography>=50.0.0" "aiohttp>=3.14.4" "yarl>=1.25.1" azure-core azure-identity "mcp[cli]>=1.30.0,<2" msgraph-core msgraph-sdk fastmcp python-dotenv \
     && rm -rf /opt/eidmcp/lib/python*/site-packages/pip \
         /opt/eidmcp/lib/python*/site-packages/pip-*.dist-info \
         /opt/eidmcp/bin/pip /opt/eidmcp/bin/pip3 /opt/eidmcp/bin/pip3.*

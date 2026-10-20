@@ -1,6 +1,6 @@
 aiofile==3.12.3
 aiohappyeyeballs==2.7.1
-aiohttp==3.14.3
+aiohttp==3.14.4
 aiosignal==1.4.0
 aiosqlite==0.22.1
 alembic==1.18.5
@@ -19,7 +19,7 @@ azure-servicebus==7.14.3
 beartype==0.22.9
 boto3==1.43.108
 botocore==1.43.108
-cachetools==7.1.8
+cachetools==7.2.1
 caio==0.12.2
 certifi==2026.7.22
 cffi==2.1.1
@@ -57,7 +57,7 @@ isodate==0.7.2
 jaraco.classes==3.4.0
 jaraco.context==6.1.2
 jaraco.functools==4.6.0
-jiter==0.15.0
+jiter==0.16.0
 jmespath==1.1.0
 joserfc==1.7.4
 jsonref==1.1.0
@@ -69,28 +69,28 @@ lxml==6.1.1
 Mako==1.4.2
 markdown-it-py==4.2.0
 MarkupSafe==3.0.3
-mcp==1.28.1
+mcp==1.30.0
 mdurl==0.1.2
-microsoft-kiota-abstractions==1.14.1
-microsoft-kiota-authentication-azure==1.14.1
-microsoft-kiota-http==1.14.1
-microsoft-kiota-serialization-form==1.14.1
-microsoft-kiota-serialization-json==1.14.1
-microsoft-kiota-serialization-multipart==1.14.1
-microsoft-kiota-serialization-text==1.14.1
+microsoft-kiota-abstractions==1.14.2
+microsoft-kiota-authentication-azure==1.14.2
+microsoft-kiota-http==1.14.2
+microsoft-kiota-serialization-form==1.14.2
+microsoft-kiota-serialization-json==1.14.2
+microsoft-kiota-serialization-multipart==1.14.2
+microsoft-kiota-serialization-text==1.14.2
 more-itertools==11.1.0
 msal==1.39.0
 msal-extensions==1.3.1
 multidict==6.9.1
-openai==3.1.0
-openapi-pydantic==0.5.1
+openai==3.29.0
+openapi-pydantic==0.6.0
 openpyxl==3.1.5
 opentelemetry-api==1.42.1
 opentelemetry-sdk==1.42.1
 opentelemetry-semantic-conventions==0.63b1
 packaging==26.3
 pathable==0.6.0
-platformdirs==4.12.3
+platformdirs==4.13.0
 pluggy==1.6.0
 propcache==0.5.2
 py-key-value-aio==0.4.5
@@ -134,7 +134,7 @@ urllib3==2.8.0
 uvicorn==0.52.1
 watchfiles==1.2.0
 websockets==17.2
-yarl==1.24.2
+yarl==1.25.1
 # --- PDF report export (assessments) — xhtml2pdf + its dependency tree (pure-Python, no
 # system libraries; works on Windows and Linux containers) ---
 arabic-reshaper==3.0.1
