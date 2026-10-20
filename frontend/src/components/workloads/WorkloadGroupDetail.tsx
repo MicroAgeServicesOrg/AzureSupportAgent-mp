@@ -19,6 +19,7 @@ import {
 } from "../../api";
 import { formatError } from "../../utils/format";
 import { Skeleton } from "../../utils/perf";
+import { DurableBatchBar, useDurableBatch } from "../DurableBatch";
 
 type Tone = "gray" | "green" | "amber" | "red" | "indigo";
 
@@ -31,7 +32,7 @@ const TONE_CLS: Record<Tone, string> = {
 };
 
 function Chip({ tone, children }: { tone: Tone; children: React.ReactNode }) {
-  return <span className={`inline-flex items-center gap-1 rounded px-1.5 py-0.5 text-[11px] font-medium ${TONE_CLS[tone]}`}>{children}</span>;
+  return <span className={`inline-flex items-center gap-1 rounded-sm px-1.5 py-0.5 text-[11px] font-medium ${TONE_CLS[tone]}`}>{children}</span>;
 }
 
 const bandTone = (band?: string): Tone =>
@@ -63,7 +64,7 @@ function RollupChips({ rollup }: { rollup: WorkloadGroupRollup }) {
   );
 }
 
-// Inline modal to edit the group's own metadata (name / description / owner / colour).
+// Inline modal to edit the group's own metadata (name / description / owner / color).
 function GroupEditModal({
   group,
   onClose,
@@ -112,7 +113,7 @@ function GroupEditModal({
               <input value={owner} onChange={(e) => setOwner(e.target.value)} placeholder="team / person" className="mt-1 w-full rounded-lg border px-2 py-1.5 text-sm" />
             </label>
             <label>
-              <span className="text-xs font-medium text-gray-600">Colour</span>
+              <span className="text-xs font-medium text-gray-600">Color</span>
               <input type="color" value={color} onChange={(e) => setColor(e.target.value)} className="mt-1 h-9 w-12 cursor-pointer rounded-lg border" />
             </label>
           </div>
@@ -171,7 +172,7 @@ function DriftMatrix({
                         {c > 0 ? (
                           <span className="text-gray-800">{c}</span>
                         ) : (
-                          <span className="rounded bg-red-50 px-1.5 py-0.5 text-[11px] font-medium text-red-500">missing</span>
+                          <span className="rounded-sm bg-red-50 px-1.5 py-0.5 text-[11px] font-medium text-red-500">missing</span>
                         )}
                       </td>
                     );
@@ -221,7 +222,7 @@ function SignalMatrix({
                         {typeof v === "number" ? (
                           <span className="text-gray-800">{v}</span>
                         ) : (
-                          <span className="rounded bg-red-50 px-1.5 py-0.5 text-[11px] font-medium text-red-500">none</span>
+                          <span className="rounded-sm bg-red-50 px-1.5 py-0.5 text-[11px] font-medium text-red-500">none</span>
                         )}
                       </td>
                     );
@@ -367,6 +368,9 @@ export function WorkloadGroupDetailPanel() {
   const { id = "" } = useParams<{ id: string }>();
   const navigate = useNavigate();
   const qc = useQueryClient();
+  const missionBatch = useDurableBatch("mission", [["missions"], ["missionLatest"]]);
+  const assessmentBatch = useDurableBatch("assessment", [["assessmentFleet"], ["assessmentRuns"]]);
+  const architectureBatch = useDurableBatch("architecture", [["architectures"]]);
   const [msg, setMsg] = useState<{ text: string; ok: boolean } | null>(null);
   const [editing, setEditing] = useState(false);
   const [busy, setBusy] = useState(false);
@@ -411,8 +415,8 @@ export function WorkloadGroupDetailPanel() {
     setBusy(true);
     setMsg(null);
     try {
-      const r = await api.runFleet({ workload_ids: members.map((m) => m.id) });
-      setMsg({ text: `🚀 Launched ${r.launched} mission${r.launched === 1 ? "" : "s"}. Open a member's Mission Control to watch progress.`, ok: true });
+      const batch = await missionBatch.launch(members.map((m) => m.id));
+      setMsg({ text: `🚀 Queued ${batch.total} durable mission${batch.total === 1 ? "" : "s"}. Open a member's Mission Control to watch progress.`, ok: true });
     } catch (e) {
       setMsg({ text: formatError(e), ok: false });
     } finally {
@@ -425,8 +429,8 @@ export function WorkloadGroupDetailPanel() {
     setBusy(true);
     setMsg(null);
     try {
-      const r = await api.enqueueAssessments({ workload_ids: members.map((m) => m.id), pack: "waf" });
-      setMsg({ text: `🛡 Queued ${r.queued} WAF assessment${r.queued === 1 ? "" : "s"}. Track progress on the Assessments page.`, ok: true });
+      const batch = await assessmentBatch.launch(members.map((m) => m.id), { pack: "waf", use_ai: true });
+      setMsg({ text: `🛡 Queued ${batch.total} durable WAF assessment${batch.total === 1 ? "" : "s"}. Track progress on the Assessments page.`, ok: true });
     } catch (e) {
       setMsg({ text: formatError(e), ok: false });
     } finally {
@@ -439,8 +443,8 @@ export function WorkloadGroupDetailPanel() {
     setBusy(true);
     setMsg(null);
     try {
-      const r = await api.createArchitectureJobs(members.map((m) => m.id));
-      setMsg({ text: `🏛 Queued ${r.queued} architecture build${r.queued === 1 ? "" : "s"}. Track progress on the Architectures page.`, ok: true });
+      const batch = await architectureBatch.launch(members.map((m) => m.id));
+      setMsg({ text: `🏛 Queued ${batch.total} durable architecture build${batch.total === 1 ? "" : "s"}. Track progress on the Architectures page.`, ok: true });
     } catch (e) {
       setMsg({ text: formatError(e), ok: false });
     } finally {
@@ -547,6 +551,9 @@ export function WorkloadGroupDetailPanel() {
         {msg && (
           <div className={`mt-2 rounded-lg border px-3 py-1.5 text-xs ${msg.ok ? "border-green-200 bg-green-50 text-green-700" : "border-red-200 bg-red-50 text-red-700"}`}>{msg.text}</div>
         )}
+        <DurableBatchBar batch={missionBatch.batch} onCancel={() => { void missionBatch.cancel(); }} onRetry={() => { void missionBatch.retry(); }} />
+        <DurableBatchBar batch={assessmentBatch.batch} onCancel={() => { void assessmentBatch.cancel(); }} onRetry={() => { void assessmentBatch.retry(); }} />
+        <DurableBatchBar batch={architectureBatch.batch} onCancel={() => { void architectureBatch.cancel(); }} onRetry={() => { void architectureBatch.retry(); }} />
       </header>
 
       {/* Body */}
@@ -567,13 +574,13 @@ export function WorkloadGroupDetailPanel() {
             <div className="flex w-fit items-center gap-0.5 rounded-lg border bg-gray-50 p-0.5 text-xs">
               <button
                 onClick={() => setTab("members")}
-                className={tab === "members" ? "rounded-md bg-white px-3 py-1 font-medium text-gray-800 shadow-sm" : "rounded-md px-3 py-1 text-gray-500 hover:text-gray-700"}
+                className={tab === "members" ? "rounded-md bg-white px-3 py-1 font-medium text-gray-800 shadow-xs" : "rounded-md px-3 py-1 text-gray-500 hover:text-gray-700"}
               >
                 Members
               </button>
               <button
                 onClick={() => setTab("compare")}
-                className={tab === "compare" ? "rounded-md bg-white px-3 py-1 font-medium text-gray-800 shadow-sm" : "rounded-md px-3 py-1 text-gray-500 hover:text-gray-700"}
+                className={tab === "compare" ? "rounded-md bg-white px-3 py-1 font-medium text-gray-800 shadow-xs" : "rounded-md px-3 py-1 text-gray-500 hover:text-gray-700"}
               >
                 ⚖️ Compare environments
               </button>

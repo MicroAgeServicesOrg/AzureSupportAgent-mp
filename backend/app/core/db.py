@@ -1,9 +1,11 @@
 """Async SQLAlchemy engine and session management."""
 from __future__ import annotations
 
+import asyncio
 from collections.abc import AsyncGenerator
+from contextlib import asynccontextmanager
 
-from sqlalchemy import event
+from sqlalchemy import event, text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 from sqlalchemy.orm import DeclarativeBase
 
@@ -26,10 +28,59 @@ _connect_args = {"timeout": 30} if _is_sqlite else {}
 # round trip costs ~0 ms idle and **210 ms while one CPU-bound worker thread holds the GIL**, so
 # on SQLite the pre-ping doubles the round trips of every authenticated request precisely while
 # a heavy IAM analysis is running. Kept for Postgres, where it earns its cost.
+#
+# The pool is sized EXPLICITLY. Left at SQLAlchemy's defaults it was 5 + 10 overflow with a 30
+# second wait, which produced both failure modes at once on a small deployment: four background
+# workers exhausted the fifteen slots, every request then queued for thirty seconds before
+# failing, and four replicas together asked the server for sixty connections. SQLite ignores
+# pool sizing (it uses a different pool class), so these only apply to a real server.
+def pool_kwargs(is_sqlite: bool) -> dict[str, object]:
+    """Engine pool arguments for this backend. A pure function so it is testable without
+    building an engine or reloading this module."""
+    if is_sqlite:
+        return {}
+    return {
+        "pool_size": settings.db_pool_size,
+        "max_overflow": settings.db_max_overflow,
+        "pool_timeout": settings.db_pool_timeout,
+        "pool_recycle": settings.db_pool_recycle_s,
+    }
+
+
 engine = create_async_engine(
-    _db_url, echo=False, pool_pre_ping=not _is_sqlite, connect_args=_connect_args
+    _db_url, echo=False, pool_pre_ping=not _is_sqlite, connect_args=_connect_args,
+    **pool_kwargs(_is_sqlite),
 )
 SessionLocal = async_sessionmaker(engine, expire_on_commit=False, class_=AsyncSession)
+
+#: Admission control for background loops. Created lazily because a semaphore binds to the
+#: running loop, and this module is imported long before one exists.
+_background_gate: asyncio.Semaphore | None = None
+
+
+def background_slots() -> asyncio.Semaphore:
+    global _background_gate
+    if _background_gate is None:
+        _background_gate = asyncio.Semaphore(max(1, settings.db_background_slots))
+    return _background_gate
+
+
+@asynccontextmanager
+async def background_session() -> AsyncGenerator[AsyncSession, None]:
+    """A database session for a background loop, behind an admission gate.
+
+    The gate is the point: background work and HTTP requests share one pool, and the workers
+    are in a loop while a person is not. Without a cap the loops win every race and the login
+    page is what fails."""
+    async with background_slots():
+        async with SessionLocal() as session:
+            yield session
+
+
+def reset_background_gate() -> None:
+    """Drop the semaphore so the next caller rebinds it. For tests and for a fresh loop."""
+    global _background_gate
+    _background_gate = None
 
 if _is_sqlite:
     @event.listens_for(engine.sync_engine, "connect")
@@ -90,6 +141,11 @@ _RUNTIME_COLUMNS: dict[str, dict[str, str]] = {
         "notify_connector_ids": "JSON",
         "target_type": "VARCHAR(16) DEFAULT 'agent'",
         "target_config": "JSON",
+        "lease_owner": "VARCHAR(128)",
+        "lease_token": "VARCHAR(36)",
+        "lease_expires_at": "DATETIME",
+        "lease_heartbeat_at": "DATETIME",
+        "lease_occurrence_at": "DATETIME",
     },
     "task_runs": {
         "task_name": "VARCHAR(256)",
@@ -115,6 +171,15 @@ _RUNTIME_COLUMNS: dict[str, dict[str, str]] = {
         "language": "VARCHAR(16)",
         "default_role": "VARCHAR(64)",
     },
+    "roles": {
+        "tenant_id": "VARCHAR(128) DEFAULT 'default' NOT NULL",
+    },
+    "groups": {
+        "tenant_id": "VARCHAR(128) DEFAULT 'default' NOT NULL",
+    },
+    "identity_providers": {
+        "tenant_id": "VARCHAR(128) DEFAULT 'default' NOT NULL",
+    },
     "sessions": {
         "active_role": "VARCHAR(64)",
     },
@@ -122,6 +187,18 @@ _RUNTIME_COLUMNS: dict[str, dict[str, str]] = {
         # The mission activity log, persisted so it reloads when the mission is reopened
         # (the live in-memory log is evicted after the run finishes / on a restart).
         "log_json": "JSON",
+    },
+    "work_batch_items": {
+        "lease_owner": "VARCHAR(128)",
+        "lease_token": "VARCHAR(36)",
+        "lease_expires_at": "DATETIME",
+        "lease_heartbeat_at": "DATETIME",
+    },
+    "perf_profile_fleet_items": {
+        "lease_owner": "VARCHAR(128)",
+        "lease_token": "VARCHAR(36)",
+        "lease_expires_at": "DATETIME",
+        "lease_heartbeat_at": "DATETIME",
     },
     # A case opened from an identity investigation is ABOUT a principal. Existing installs
     # already have a `cases` table, so these have to be patched on here as well as in the
@@ -144,19 +221,46 @@ _RUNTIME_INDEXES: list[tuple[str, str, str]] = [
     ("ix_messages_chat_created", "messages", "chat_id, created_at"),
     ("ix_audit_tenant_created", "audit_log", "tenant_id, created_at"),
     ("ix_usage_tenant_created", "usage", "tenant_id, created_at"),
+    ("ix_tool_calls_tenant_created", "tool_calls", "tenant_id, created_at"),
+    ("ix_tool_calls_tenant_status_created", "tool_calls", "tenant_id, status, created_at"),
+    ("ix_approvals_tenant_decision_created", "approvals", "tenant_id, decision, created_at"),
+    ("ix_usage_tenant_provider_model", "usage", "tenant_id, provider, model"),
+    ("ix_usage_tenant_model_created", "usage", "tenant_id, model, created_at"),
     ("ix_taskruns_task_started", "task_runs", "task_id, started_at"),
     ("ix_taskruns_tenant_started", "task_runs", "tenant_id, started_at"),
     ("ix_workbookruns_wb_started", "workbook_runs", "workbook_id, started_at"),
     ("ix_playbookruns_pb_started", "playbook_runs", "playbook_id, started_at"),
     ("ix_missionruns_wl_started", "mission_runs", "workload_id, started_at"),
     ("ix_assessmentruns_wl", "assessment_runs", "workload_id, tenant_id"),
+    ("ix_assessment_runs_tenant_deleted_started", "assessment_runs", "tenant_id, deleted_at, started_at"),
+    ("ix_assessment_runs_tenant_workload_deleted_started", "assessment_runs", "tenant_id, workload_id, deleted_at, started_at"),
     # Notifications: the unread-count poll filters deliveries by (tenant, channel) and the
     # notification list joins+filters by (tenant, read). These back both hot paths.
     ("ix_notif_tenant_read", "notifications", "tenant_id, read"),
-    ("ix_notifdeliv_tenant_channel", "notification_deliveries", "tenant_id, channel"),
+    ("ix_notifications_tenant_created", "notifications", "tenant_id, created_at"),
+    ("ix_notification_deliveries_tenant_channel_notification", "notification_deliveries", "tenant_id, channel, notification_id"),
     # "Every case about this identity" is the second question an investigator asks.
     ("ix_cases_principal_id", "cases", "principal_id"),
+    ("ix_cases_tenant_deleted_status_updated", "cases", "tenant_id, deleted_at, status, updated_at"),
+    ("ix_case_events_tenant_case_created", "case_events", "tenant_id, case_id, created_at"),
+    ("ix_sessions_revoked", "sessions", "revoked"),
+    ("ix_sessions_expires", "sessions", "expires_at"),
+    ("ix_sessions_last_seen", "sessions", "last_seen_at"),
+    ("ix_rbac_scan_runs_tenant_started", "rbac_scan_runs", "tenant_id, started_at"),
+    ("ix_quota_scan_runs_tenant_started", "quota_scan_runs", "tenant_id, started_at"),
+    ("ix_roles_tenant_id", "roles", "tenant_id"),
+    ("ix_groups_tenant_id", "groups", "tenant_id"),
+    ("ix_identity_providers_tenant_id", "identity_providers", "tenant_id"),
+    ("ix_work_batch_items_claim", "work_batch_items", "status, lease_expires_at, available_at"),
+    ("ix_perf_fleet_items_claim", "perf_profile_fleet_items", "status, lease_expires_at, batch_id"),
+    ("ix_scheduled_tasks_due_claim", "scheduled_tasks", "status, next_run_at, lease_expires_at"),
+    ("ix_scheduled_tasks_occurrence_claim", "scheduled_tasks", "status, lease_occurrence_at, lease_expires_at"),
 ]
+
+
+#: Arbitrary but STABLE key for the schema advisory lock. Every replica must pick the same
+#: number or the lock serialises nothing.
+_SCHEMA_LOCK_KEY = 8_274_119_004_512_337
 
 
 async def ensure_schema() -> None:
@@ -164,11 +268,19 @@ async def ensure_schema() -> None:
 
     Works on both SQLite (local dev) and PostgreSQL (deployed): ``create_all`` makes any
     fully-missing tables with the complete current schema, then the late-added columns are
-    patched onto pre-existing tables (e.g. ones an older Alembic migration created)."""
+    patched onto pre-existing tables (e.g. ones an older Alembic migration created).
+
+    On PostgreSQL the whole thing runs under an advisory lock. Every replica executes this at
+    boot, and the statements below take ``AccessExclusiveLock``; two replicas starting together
+    deadlocked on it, the loser raised inside the lifespan, and the container exited and was
+    restarted into the same race. The lock makes one replica migrate while the others wait."""
     # Import models so they register on Base.metadata before create_all.
     import app.models  # noqa: F401
 
     async with engine.begin() as conn:
+        if not _is_sqlite:
+            # Session-scoped and re-entrant per connection; released when the block exits.
+            await conn.execute(text("SELECT pg_advisory_xact_lock(:k)"), {"k": _SCHEMA_LOCK_KEY})
         await conn.run_sync(Base.metadata.create_all)
         if _is_sqlite:
             for table, columns in _RUNTIME_COLUMNS.items():

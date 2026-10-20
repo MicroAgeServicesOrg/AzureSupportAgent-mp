@@ -121,7 +121,7 @@ async def test_refused_requests_grant_nothing(monkeypatch, status):
 
 
 async def test_missing_p2_licence_is_skipped_not_failed(monkeypatch):
-    """PIM reports a missing licence as a 400 WITH A MESSAGE, not a 403. Calling that Failed
+    """PIM reports a missing license as a 400 WITH A MESSAGE, not a 403. Calling that Failed
     sends the operator chasing a permission problem that does not exist."""
     _patch_get_all(monkeypatch, [], err="HTTP 400: The tenant needs an AADP2 licence to use PIM", code=400)
     rows, st = await collectors.collect_pim_eligibility(
@@ -297,7 +297,10 @@ def test_standing_ratio_over_demo_data(isolated_cache_for_ratio):
 
     demo.seed_demo("t1")
     k = compose.compute_overview("t1")["kpis"]
-    assert k["eligible_privileged"] == 3      # 2 Azure PIM + 1 Entra directory-role eligibility
+    # 3 Azure PIM + 1 Entra directory-role eligibility. The third Azure one belongs to a
+    # DISABLED account (Oscar, permanently eligible for Owner) — an eligibility survives
+    # offboarding, which is precisely why it is counted here rather than ignored.
+    assert k["eligible_privileged"] == 4
     assert k["active_elevations"] == 1        # Eve is elevated right now
     assert k["standing_privileged"] > 0
     # The elevated row is active but must NOT be counted as standing privilege.

@@ -1,0 +1,12 @@
+{
+  "budgets": {
+    "entryRawKB": 437,
+    "entryGzipKB": 98,
+    "totalRawKB": 10780,
+    "chunkCount": 196,
+    "largestChunkRawKB": 665
+  },
+  "optInChunks": [
+    "elk.js"
+  ]
+}

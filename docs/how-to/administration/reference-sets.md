@@ -6,6 +6,7 @@ grand_parent: How-to guides
 nav_order: 60
 description: Version AMBA, telemetry, BackupDR, and Retirement references and decide supported change requests.
 permalink: /how-to/administration/reference-sets/
+feature_ids: [ADMIN_NAV:amba, ADMIN_NAV:ambachanges, ADMIN_NAV:telemetry, ADMIN_NAV:telemetrychanges, ADMIN_NAV:backupdr, ADMIN_NAV:backupdrchanges, ADMIN_NAV:radar]
 ---
 
 # Maintain reference sets and change requests
@@ -21,7 +22,8 @@ permalink: /how-to/administration/reference-sets/
 - A reviewed pending request and destination data-boundary approval.
 - Reviewed protection, job, restore-test, replication, and severity requirements.
 - A reviewed request and an owner for the external protection change.
-- Product permission `radar.read`.
+- Product permissions `radar.read` and `radar.manage` for Retirement Radar reference changes.
+	The route/history reads use `radar.read`; save, restore, and reset use `radar.manage`.
 - Authoritative retirement/breaking-change sources and reviewed model lifecycle dates.
 
 ## Route
@@ -31,11 +33,12 @@ permalink: /how-to/administration/reference-sets/
 - Open `/admin/backupdr`.
 - Open `/admin/backupdrchanges`.
 - Open `/admin/radar`.
-- Open `/admin/settings`.
 - Open `/admin/telemetry`.
 - Open `/admin/telemetrychanges`.
 
 ## How to update the AMBA Reference Set
+
+{% include screenshot.html file="admin-reference-amba-vm-baseline.png" title="Review VM alert recommendations before changing AMBA" caption="Compare categories, severity, and thresholds for the selected resource type before editing the reference. This local inspection saved no revision and deployed no Azure alerts; coverage still requires a separate scoped scan." %}
 
 1. Review the current reference version and the resource types/rules affected.
 2. Edit only fields shown by the editor, such as recommended alert signal/metric, operator, threshold/unit, aggregation/window, severity, or classification.
@@ -62,9 +65,11 @@ permalink: /how-to/administration/reference-sets/
 
 ## How to update the Telemetry Reference Set
 
+{% include screenshot.html file="admin-reference-telemetry-key-vault-audit.png" title="Inspect Key Vault AuditEvent coverage semantics" caption="Opening the existing category exposes the category key, log kind, audit group, and recommended flag for review. No field was changed or version saved, and no live workspace discovery was performed; this is not proof that diagnostic settings exist in Azure." %}
+
 1. Review the current version and affected resource types.
 2. Edit only visible log/metric category and destination expectations.
-3. Check category support and the approved Log Analytics workspace list in `/admin/settings`.
+3. Check category support and the approved Log Analytics workspace list exposed by the Telemetry workflow.
 4. Save a new revision.
 5. Run a representative Telemetry Coverage scan.
 6. Record changed baseline behavior.
@@ -86,6 +91,8 @@ permalink: /how-to/administration/reference-sets/
 **Verification:** Check Audit Log, external deployment records, and a post-change coverage scan.
 
 ## How to update the BackupDR Reference Set
+
+{% include screenshot.html file="admin-reference-backupdr-vm-checks.png" title="Review applicable VM protection checks before editing" caption="The reference lists resilience expectations to compare with service support and recovery objectives. No revision was saved and no protection or recovery operation occurred; independently verify Azure evidence after any approved change." %}
 
 1. Review the current version and affected resource types.
 2. Edit only visible protection checks and semantics.

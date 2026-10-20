@@ -25,6 +25,7 @@ import { EscalationTab } from "./IamEscalation";
 import { BypassTab } from "./IamBypass";
 import { CompareTab } from "./IamCompare";
 import { LeastPrivilegeTab } from "./IamLeastPrivilege";
+import { LeaversTab } from "./IamLeavers";
 import { SimulatorTab } from "./IamSimulator";
 import { ReviewsTab } from "./IamReviews";
 import { FindingsTab } from "./IamFindings";
@@ -34,7 +35,7 @@ import { OverviewTab } from "./IamOverview";
 import { PimTab } from "./IamPim";
 import { RolesTab } from "./IamRoles";
 import { ScopesTab } from "./IamScopes";
-import { IAM_QUERY_KEYS, IamConnectionContext, IamFreshness, RefreshConsole, useIamRefresh } from "./IamShared";
+import { IAM_QUERY_KEYS, IamConnectionChangeContext, IamConnectionContext, IamFreshness, RefreshConsole, useIamRefresh } from "./IamShared";
 
 // Renamed from /rbac, and later folded into the SHARED connection selection: a tenant switch is
 // a statement about the session, not about one page. Losing the stored value silently falls back
@@ -47,7 +48,9 @@ export function IamPanel({ tab = "overview" }: { tab?: IamTab }) {
   const [connectionId, setConnectionId] = usePersistedState(CONNECTION_KEY, "");
   return (
     <IamConnectionContext.Provider value={connectionId}>
-      <IamPanelBody tab={tab} connectionId={connectionId} setConnectionId={setConnectionId} />
+      <IamConnectionChangeContext.Provider value={setConnectionId}>
+        <IamPanelBody tab={tab} connectionId={connectionId} setConnectionId={setConnectionId} />
+      </IamConnectionChangeContext.Provider>
     </IamConnectionContext.Provider>
   );
 }
@@ -118,6 +121,11 @@ function IamPanelBody({
   }
 
   const data = overviewQ.data;
+  // Overview draws its own console in BOTH branches that reach it — the empty state and the
+  // loaded tab — so the shared strip would be a second copy of the same log. The other
+  // branches (loading, error, no data) draw none, and there the strip is the only progress.
+  const ownsConsole = tab === "overview" && !!data
+    && !overviewQ.isLoading && !overviewQ.isError;
 
   return (
     <div className="flex h-full min-h-0 flex-col overflow-hidden bg-gray-50">
@@ -137,7 +145,7 @@ function IamPanelBody({
               onClick={refreshCtl.refreshAll}
               disabled={refreshCtl.isBusy}
               title="Re-collect every scope and the directory"
-              className="rounded border px-2 py-1 text-xs font-medium text-gray-700 transition hover:bg-gray-50 disabled:opacity-50"
+              className="rounded-sm border px-2 py-1 text-xs font-medium text-gray-700 transition hover:bg-gray-50 disabled:opacity-50"
             >
               {refreshCtl.isBusy ? "Scanning…" : "↻ Rescan"}
             </button>
@@ -168,8 +176,33 @@ function IamPanelBody({
 
       {err && <div className="border-b bg-red-50 px-4 py-2 text-sm text-red-700">{err}</div>}
 
-      {overviewQ.isLoading ? (
+      {/* Shown only where the active tab draws no console of its own; otherwise a scan on any
+          other tab would run silently. */}
+      {refreshCtl.isBusy && !ownsConsole && (
+        <div className="border-b bg-gray-50 px-4 py-2">
+          <RefreshConsole ctl={refreshCtl} lines={4} />
+        </div>
+      )}
+
+      {overviewQ.isLoading && tab === "overview" ? (
         <div className="p-6"><Skeleton rows={8} /></div>
+      ) : overviewQ.isError && tab === "overview" ? (
+        <div className="flex flex-1 flex-col items-center justify-center gap-3 p-8 text-center">
+          <div className="text-4xl">⚠️</div>
+          <div className="text-lg font-semibold text-gray-800">Could not load the access overview</div>
+          <p className="max-w-md text-sm text-red-700">{formatError(overviewQ.error)}</p>
+          {/* On an access review, silence reads as "nobody has access" -- say which one this is. */}
+          <p className="max-w-md text-xs text-gray-500">
+            This is a failure to read the review, not a finding that no access exists.
+          </p>
+          <button
+            onClick={() => void overviewQ.refetch()}
+            disabled={overviewQ.isFetching}
+            className="rounded-sm bg-brand px-3 py-1.5 text-sm font-medium text-white hover:bg-brand-dark disabled:opacity-50"
+          >
+            {overviewQ.isFetching ? "Retrying…" : "↻ Retry"}
+          </button>
+        </div>
       ) : data && data.never_loaded && tab === "overview" ? (
         <div className="flex flex-1 flex-col items-center justify-center gap-3 p-8 text-center">
           <div className="text-4xl">🛡️</div>
@@ -179,10 +212,10 @@ function IamPanelBody({
             review without an Azure connection.
           </p>
           <div className="flex gap-2">
-            <button onClick={refreshCtl.refreshAll} disabled={refreshCtl.isBusy} className="rounded bg-brand px-3 py-1.5 text-sm font-medium text-white hover:bg-brand-dark disabled:opacity-50">
+            <button onClick={refreshCtl.refreshAll} disabled={refreshCtl.isBusy} className="rounded-sm bg-brand px-3 py-1.5 text-sm font-medium text-white hover:bg-brand-dark disabled:opacity-50">
               {refreshCtl.isBusy ? "Scanning…" : "↻ Run access scan"}
             </button>
-            <button onClick={seedDemo} disabled={seeding} className="rounded border px-3 py-1.5 text-sm text-gray-700 hover:bg-gray-50 disabled:opacity-50">
+            <button onClick={seedDemo} disabled={seeding} className="rounded-sm border px-3 py-1.5 text-sm text-gray-700 hover:bg-gray-50 disabled:opacity-50">
               {seeding ? "Seeding…" : "🎬 Seed demo data"}
             </button>
           </div>
@@ -190,9 +223,9 @@ function IamPanelBody({
             <RefreshConsole ctl={refreshCtl} lines={6} />
           </div>
         </div>
-      ) : !data ? (
-        <div className="p-6 text-sm text-gray-500">No data.</div>
-      ) : tab === "overview" ? (
+      ) : !data && tab === "overview" ? (
+        <div className="p-6 text-sm text-gray-500">Could not load the access overview.</div>
+      ) : tab === "overview" && data ? (
         <OverviewTab data={data} refreshCtl={refreshCtl} onPurgeDemo={purgeDemo} purging={purging} />
       ) : tab === "findings" ? (
         <FindingsTab />
@@ -214,6 +247,8 @@ function IamPanelBody({
         <BypassTab />
       ) : tab === "leastprivilege" ? (
         <LeastPrivilegeTab />
+      ) : tab === "leavers" ? (
+        <LeaversTab />
       ) : tab === "simulator" ? (
         <SimulatorTab />
       ) : tab === "compare" ? (

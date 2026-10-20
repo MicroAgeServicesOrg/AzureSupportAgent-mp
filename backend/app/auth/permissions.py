@@ -49,11 +49,13 @@ PERMISSION_GROUPS: list[tuple[str, list[tuple[str, str]]]] = [
     ]),
     ("Estate insight", [
         ("inventory.read", "View the resource inventory"),
+        ("cost.read", "Query actual Azure costs through Cost Management"),
         ("graph.read", "View the knowledge graph"),
         ("changeexplorer.read", "View the Azure Workload Change Explorer"),
         ("reservations.read", "View reservation expiry tracking"),
         ("perfprofile.read", "View the workload performance heatmap"),
         ("radar.read", "View the Retirement Radar"),
+        ("radar.manage", "Curate Retirement Radar reference data"),
         ("quota.read", "View the Quota Monitor (usage, limits, risk)"),
         ("quota.run", "Run quota scans"),
     ]),
@@ -80,7 +82,7 @@ PERMISSION_GROUPS: list[tuple[str, list[tuple[str, str]]]] = [
         ("cases.read", "View durable case files and their timelines"),
         ("cases.write", "Open, update, attach to, and resolve case files"),
         ("investigate.read", "Investigate one identity: who it is, what it can reach, and how that changed"),
-        ("investigate.activity", "Read a named identity's sign-in, audit and activity history (behavioural data)"),
+        ("investigate.activity", "Read a named identity's sign-in, audit and activity history (behavioral data)"),
     ]),
     ("Observability", [
         ("monitor.view", "View the Monitor dashboard"),
@@ -107,6 +109,8 @@ PERMISSION_GROUPS: list[tuple[str, list[tuple[str, str]]]] = [
         ("backup_manager.drill_write", "Manage recovery drills and request Site Recovery test failovers"),
         ("backup_manager.reference_write", "Curate the backup failure knowledge base and protection baselines"),
         ("backup_manager.approve", "Approve and apply Backup Manager changes to Azure"),
+        ("resiliency.read", "View recovery readiness — per-scenario RTO/RPO, breaches and workload roll-up"),
+        ("resiliency.admin", "Set recovery objectives per tier and tune the restore-rate reference"),
         ("teleintel.read", "View App Insights correlation and KQL tools"),
     ]),
     ("Live diagnostics", [
@@ -123,6 +127,12 @@ PERMISSION_GROUPS: list[tuple[str, list[tuple[str, str]]]] = [
         ("settings.write", "Change application settings (general, tuning, providers, prompts, scoring)"),
         ("users.manage", "Manage users, groups, roles, identity providers, sessions"),
         ("audit.read", "View the audit log"),
+        # Deliberately NOT folded into settings.write: restricting which networks may reach the
+        # application has a completely different blast radius from tuning prompts or scoring,
+        # and a misconfiguration here takes the whole deployment offline. Split read/manage so
+        # an auditor can evidence the network policy without being able to change it.
+        ("firewall.read", "View network access control (IP allowlist)"),
+        ("firewall.manage", "Change network access control (IP allowlist)"),
         ("backup.manage", "Export / import the whole-tenant configuration"),
         ("demo.manage", "Load or remove demo data"),
     ]),
@@ -168,6 +178,7 @@ _ADMIN_ONLY: set[str] = {
     "settings.write",
     "users.manage",
     "audit.read",
+    "firewall.manage",
     "backup.manage",
     "demo.manage",
 }
@@ -177,7 +188,7 @@ _OPERATOR_PERMISSIONS: list[str] = [p for p in ALL_PERMISSIONS if p not in _ADMI
 
 # Auditor = read-only oversight across the whole product (+ audit log + monitor + chat).
 # ``investigate.activity`` is named explicitly because it does NOT end in ``.read``: reading a
-# named person's sign-in and audit history is behavioural data, deliberately held apart from the
+# named person's sign-in and audit history is behavioral data, deliberately held apart from the
 # structural reads. The auditor is nevertheless the persona that feature exists for — proving who
 # held privileged access in a period and what they did with it is the job.
 _AUDITOR_PERMISSIONS: list[str] = list(dict.fromkeys(

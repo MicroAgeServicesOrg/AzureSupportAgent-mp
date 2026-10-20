@@ -1,7 +1,7 @@
 """AI generator for a Workload Know-Me document.
 
 Transforms an Architecture Memory (the authoritative technical source) plus the workload's
-real Azure scope into the labelled Know-Me sections — the way a senior engineer would write
+real Azure scope into the labeled Know-Me sections — the way a senior engineer would write
 a triage-ready reference for a responder. Grounded on the memory; fills subscriptions/RGs
 from real scope; emits ``⟦TODO⟧`` for anything a human must supply (people, coverage,
 escalation routing, SLAs) instead of inventing it.
@@ -77,6 +77,9 @@ GROUNDING RULES:
    issues, and Thresholds sections — they are what the reader uses live.
 6. Flag scope mismatches: if the memory cites IDs from a DIFFERENT workload, surface it as
    a verify-scope warning (⚠), not as in-scope inventory.
+7. Composite SLA is calculated separately by the server. NEVER calculate, quote, infer or
+   invent a composite/solution availability percentage or a Composite SLA subsection.
+   Customer contractual SLA/SLO/RTO/RPO fields remain human-owned TODOs.
 
 STYLE: Short declarative sentences, active voice, resource-first. Use ❌ for high-severity
 risks, ⚠ for medium, ⟦TODO⟧ for human-required fields. Use Markdown tables for
@@ -371,6 +374,8 @@ async def generate_section(
         "You are 'Know-Me Writer'. Rewrite a SINGLE section of a support-facing Know-Me, "
         "grounded only in the supplied memory, scope and evidence. Use ⟦TODO: <label> | "
         "key=<field_key>⟧ for any human-only field; never fabricate people/SLAs/contacts. "
+        "Composite SLA is computed separately by the server: do not calculate or quote "
+        "a composite availability percentage or write a Composite SLA subsection. "
         "Use Markdown (tables, ❌/⚠). Respond with ONLY a JSON object: {\"content\": \"<markdown>\"}."
     )
     user = (
@@ -417,12 +422,16 @@ async def suggest_field_choices(
     known_block: str = "",
     evidence_block: str = "",
     max_options: int = 6,
+    cache_scope: str = "",
 ) -> list[str]:
     """Infer a short list of realistic candidate values for ONE human-completion field, using
-    the field label + its section + the workload's scope/evidence as grounding. Best-effort:
-    returns [] on any failure. The values are *options a human can pick from* (still editable),
-    never fabricated facts like specific people/emails."""
+    the field label + its section + the workload's scope/evidence as grounding. An empty
+    JSON array is a valid no-candidates result; failures are explicit. Values remain options,
+    never automatically accepted facts like specific people/emails."""
+    import inspect
     import json
+
+    from app.knowme.suggestions import SuggestionError, cached_choices
 
     ctx_parts = [p for p in (known_block, evidence_block) if p]
     ctx = ("\n\nWORKLOAD CONTEXT:\n" + "\n".join(ctx_parts)) if ctx_parts else ""
@@ -440,31 +449,31 @@ async def suggest_field_choices(
         f"Field key: {field_key or '(none)'}{ctx}\n\n"
         'Respond with ONLY a JSON array, e.g. ["Critical","High","Medium","Low"].'
     )
-    try:
+    async def generate() -> list[str]:
         provider = build_provider()
         text = ""
-        async for ev in provider.stream(
-            [{"role": "system", "content": system}, {"role": "user", "content": user}],
-            None, max_tokens=300,
-        ):
-            if ev.type == "token":
-                text += ev.text
-    except Exception:  # noqa: BLE001
-        return []
+        try:
+            async for ev in provider.stream(
+                [{"role": "system", "content": system}, {"role": "user", "content": user}],
+                None, max_tokens=300,
+            ):
+                if ev.type == "token":
+                    text += ev.text
+        finally:
+            close = getattr(provider, "close", None)
+            if callable(close):
+                result = close()
+                if inspect.isawaitable(result):
+                    await result
+        match = re.search(r"\[.*\]", text.strip(), re.DOTALL)
+        if not match:
+            raise SuggestionError("AI returned no suggestion array.")
+        try:
+            values = json.loads(match.group(0))
+        except json.JSONDecodeError as exc:
+            raise SuggestionError("AI returned malformed suggestions.") from exc
+        if not isinstance(values, list) or any(not isinstance(value, str) for value in values):
+            raise SuggestionError("AI suggestions must be a JSON array of strings.")
+        return list(dict.fromkeys(value.strip() for value in values if value.strip()))[:max_options]
 
-    t = (text or "").strip()
-    m = re.search(r"\[.*\]", t, re.DOTALL)
-    if not m:
-        return []
-    try:
-        arr = json.loads(m.group(0))
-    except (json.JSONDecodeError, ValueError):
-        return []
-    out: list[str] = []
-    for v in arr if isinstance(arr, list) else []:
-        s = str(v).strip()
-        if s and s not in out:
-            out.append(s)
-    return out[:max_options]
-
-
+    return await cached_choices(cache_scope, [system, user, max_options], generate)

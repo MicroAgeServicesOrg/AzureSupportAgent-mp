@@ -10,7 +10,13 @@ export default function LoginPage() {
   const [submitting, setSubmitting] = useState(false);
   const [localError, setLocalError] = useState<string | null>(null);
 
-  const { data: config } = useQuery({ queryKey: ["auth-config"], queryFn: api.authConfig });
+  const { data: config, isPending: configLoading, isError: configFailed, refetch } = useQuery({
+    queryKey: ["auth-config"],
+    queryFn: api.authConfig,
+    // A blip here used to strand the user on the wrong sign-in form, so it is worth retrying.
+    retry: 3,
+    retryDelay: (attempt) => Math.min(4000, 500 * 2 ** attempt),
+  });
 
   // Surface SSO errors passed back via ?error=… on the login redirect.
   const ssoError = (() => {
@@ -45,12 +51,16 @@ export default function LoginPage() {
     window.location.href = `${apiBase}${path}`;
   };
 
-  const localEnabled = config?.local_login_enabled ?? true;
+  // NEVER inferred. `config?.local_login_enabled ?? true` is what put a local username/password
+  // box in front of tenants that had switched local login OFF: when /auth/config failed the
+  // fallback enabled the one credential form that could not work and hid the SSO button, so a
+  // backend blip looked like a misconfigured tenant. Unknown is its own state now.
+  const localEnabled = config?.local_login_enabled === true;
   const providers = config?.providers ?? [];
 
   return (
     <div className="flex min-h-full flex-col items-center justify-center gap-4 bg-slate-100 p-6">
-      <div className="w-full max-w-sm rounded-xl border bg-white p-8 shadow-sm">
+      <div className="w-full max-w-sm rounded-xl border bg-white p-8 shadow-xs">
         <div className="mb-6 flex flex-col items-center gap-2 text-center">
           <span className="text-3xl">🤖</span>
           <h1 className="text-xl font-semibold text-slate-800">Azure Support Agent</h1>
@@ -63,12 +73,38 @@ export default function LoginPage() {
           </div>
         )}
 
+        {configLoading && (
+          <p className="py-6 text-center text-sm text-slate-500">Loading sign-in options…</p>
+        )}
+
+        {configFailed && (
+          <div className="flex flex-col gap-3">
+            <div className="rounded-md border border-amber-200 bg-amber-50 px-3 py-2 text-sm text-amber-800">
+              Sign-in options could not be loaded, so none are shown. This is a problem reaching
+              the server, not with your account.
+            </div>
+            <button
+              type="button"
+              onClick={() => void refetch()}
+              className="rounded-md border border-slate-300 px-4 py-2 text-sm font-medium text-slate-700 hover:bg-slate-50"
+            >
+              Try again
+            </button>
+          </div>
+        )}
+
+        {config?.stale && (
+          <div className="mb-4 rounded-md border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-800">
+            Showing the last known sign-in options — the server could not be fully reached.
+          </div>
+        )}
+
         {localEnabled && (
           <form onSubmit={onSubmit} className="flex flex-col gap-3">
             <label className="text-sm font-medium text-slate-700">
               Username or email
               <input
-                className="mt-1 w-full rounded-md border border-slate-300 px-3 py-2 text-sm focus:border-brand-dark focus:outline-none"
+                className="mt-1 w-full rounded-md border border-slate-300 px-3 py-2 text-sm focus:border-brand-dark focus:outline-hidden"
                 value={username}
                 onChange={(e) => setUsername(e.target.value)}
                 autoFocus
@@ -79,7 +115,7 @@ export default function LoginPage() {
               Password
               <input
                 type="password"
-                className="mt-1 w-full rounded-md border border-slate-300 px-3 py-2 text-sm focus:border-brand-dark focus:outline-none"
+                className="mt-1 w-full rounded-md border border-slate-300 px-3 py-2 text-sm focus:border-brand-dark focus:outline-hidden"
                 value={password}
                 onChange={(e) => setPassword(e.target.value)}
                 autoComplete="current-password"
@@ -118,7 +154,7 @@ export default function LoginPage() {
           </div>
         )}
 
-        {!localEnabled && providers.length === 0 && (
+        {config && !localEnabled && providers.length === 0 && (
           <p className="text-center text-sm text-slate-500">
             No sign-in methods are configured. Contact your administrator.
           </p>
@@ -162,7 +198,7 @@ export function ForcePasswordChange() {
     <div className="flex min-h-full items-center justify-center bg-slate-100 p-6">
       <form
         onSubmit={submit}
-        className="w-full max-w-sm rounded-xl border bg-white p-8 shadow-sm"
+        className="w-full max-w-sm rounded-xl border bg-white p-8 shadow-xs"
       >
         <h1 className="mb-1 text-lg font-semibold text-slate-800">Set a new password</h1>
         <p className="mb-5 text-sm text-slate-500">
@@ -178,7 +214,7 @@ export function ForcePasswordChange() {
           New password
           <input
             type="password"
-            className="mt-1 w-full rounded-md border border-slate-300 px-3 py-2 text-sm focus:border-brand-dark focus:outline-none"
+            className="mt-1 w-full rounded-md border border-slate-300 px-3 py-2 text-sm focus:border-brand-dark focus:outline-hidden"
             value={pw}
             onChange={(e) => setPw(e.target.value)}
             autoFocus
@@ -188,7 +224,7 @@ export function ForcePasswordChange() {
           Confirm password
           <input
             type="password"
-            className="mt-1 w-full rounded-md border border-slate-300 px-3 py-2 text-sm focus:border-brand-dark focus:outline-none"
+            className="mt-1 w-full rounded-md border border-slate-300 px-3 py-2 text-sm focus:border-brand-dark focus:outline-hidden"
             value={confirm}
             onChange={(e) => setConfirm(e.target.value)}
           />

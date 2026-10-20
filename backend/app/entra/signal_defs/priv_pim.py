@@ -7,12 +7,11 @@ directory data joined to the Azure RBAC cache another feature already maintains.
 """
 from __future__ import annotations
 
-from datetime import datetime, timezone
 from typing import Any
 
 from app.entra import model
 from app.entra.collectors.apps import TIER_CRITICAL
-from app.entra.collectors.pim import last_activation, policy_for_role, privileged_policies
+from app.entra.collectors.pim import last_activation, privileged_policies
 from app.entra.collectors.roles import (
     effective_role_names,
     principal_names,
@@ -20,14 +19,12 @@ from app.entra.collectors.roles import (
 )
 from app.entra.signals import (
     IMPACT_BINARY,
-    IMPACT_RATIO,
     IMPACT_SATURATING,
     SignalContext,
     SignalSpec,
     SignalUnavailable,
     domain,
     principal_label,
-    user_index,
 )
 
 PIM_DOC = "https://learn.microsoft.com/entra/id-governance/privileged-identity-management/pim-configure"
@@ -47,7 +44,7 @@ def _require_policies(data: dict[str, Any]) -> list[dict[str, Any]]:
     if not caps.get("policies"):
         raise SignalUnavailable(
             "Role management policies were not collected — this needs "
-            "RoleManagementPolicy.Read.Directory and an Entra ID P2 licence."
+            "RoleManagementPolicy.Read.Directory and an Entra ID P2 license."
         )
     rows = privileged_policies(pim, domain(data, "roles"))
     if not rows:
@@ -159,7 +156,7 @@ def _pim_group_unmanaged(data: dict[str, Any], ctx: SignalContext) -> list[dict[
     if not caps.get("group_pim"):
         raise SignalUnavailable(
             "PIM for Groups was not collected — this needs PrivilegedAccess.Read.AzureADGroup "
-            "and an Entra ID P2 licence."
+            "and an Entra ID P2 license."
         )
     managed = {g.get("group_id") for g in _pim(data).get("group_eligibilities") or []}
     out = []
@@ -285,7 +282,7 @@ SPECS: list[SignalSpec] = [
         benchmarks=("MCSB PA-2",), impact=IMPACT_SATURATING, saturation=3,
         remediation="Require MFA (or an authentication context) on activation for every privileged role.",
         remediation_steps=(
-            "Entra admin centre > Identity Governance > PIM > Microsoft Entra roles > Settings.",
+            "Entra admin center > Identity Governance > PIM > Microsoft Entra roles > Settings.",
             "Select the role > Edit > Activation > tick 'Require Microsoft Entra multifactor authentication'.",
             "Prefer 'Require Microsoft Entra Conditional Access authentication context' for tier-0 roles.",
         ),

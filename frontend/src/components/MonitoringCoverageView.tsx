@@ -19,8 +19,6 @@ import { ConnectionScopePicker } from "./ConnectionScopePicker";
 import { DensityToggle } from "./DensityToggle";
 import { CoverageHistory, coverageRunsKey } from "./CoverageHistory";
 import { PdfGeneratingOverlay } from "./PdfGeneratingOverlay";
-import { PageIntro } from "./PageIntro";
-import { PAGE_INTROS } from "../help/content";
 import { isRefreshing, startBackgroundRefresh, takeRefreshError, useBackgroundRefresh } from "../utils/backgroundRefresh";
 import { Skeleton, useDebounced } from "../utils/perf";
 import { MonitoringCoverageFleet } from "./coverage/MonitoringCoverageFleet";
@@ -148,7 +146,7 @@ function AmbaMatrixBody({ group, expandedRow, setExpandedRow, setDrawer }: {
             <th className="sticky left-0 z-20 bg-gray-50 px-3 py-2 text-left font-medium">Resource</th>
             {cols.map((a) => (
               <th key={a.key} className="px-2 py-2 text-center font-medium align-bottom" title={a.name}>
-                <div className="mx-auto w-[80px] whitespace-normal break-words leading-tight">{a.name}</div>
+                <div className="mx-auto w-[80px] whitespace-normal wrap-break-word leading-tight">{a.name}</div>
               </th>
             ))}
           </tr>
@@ -173,8 +171,8 @@ function AmbaMatrixBody({ group, expandedRow, setExpandedRow, setDrawer }: {
                           {row.cells.map((c) => (
                             <div key={c.alert_key} className="flex flex-wrap items-center gap-2 text-[11px]">
                               <StatusMark status={c.status} />
-                              <span className={`rounded px-1.5 py-0.5 ${CAT_CLS[c.amba_category] ?? "bg-gray-100"}`}>{c.amba_category}</span>
-                              <span className={`rounded px-1.5 py-0.5 ${SEV_CLS[c.severity] ?? ""}`}>{c.severity}</span>
+                              <span className={`rounded-sm px-1.5 py-0.5 ${CAT_CLS[c.amba_category] ?? "bg-gray-100"}`}>{c.amba_category}</span>
+                              <span className={`rounded-sm px-1.5 py-0.5 ${SEV_CLS[c.severity] ?? ""}`}>{c.severity}</span>
                               <span className="text-gray-700">{c.alert_name}</span>
                               <span className="text-gray-400">
                                 recommended {c.recommended.metric} {c.recommended.operator} {c.recommended.threshold ?? "—"}{c.recommended.unit}
@@ -254,7 +252,9 @@ export function MonitoringCoveragePanel() {
 
   // Background refresh (per-scope) — survives scope switches + navigation. "Refreshing…"
   // shows ONLY for the scope actually refreshing; other scopes show "↻ Refresh now".
-  const refreshKey = `amba:${scopeKey}`;
+  const refreshKey = scopeKind === "workload"
+    ? `amba:workload:${effectiveWorkloadId}`
+    : `amba:subscription:${subId}:${connId}`;
   const refreshVersion = useBackgroundRefresh();
   const refreshing = isRefreshing(refreshKey);
 
@@ -517,14 +517,14 @@ export function MonitoringCoveragePanel() {
             <p className="text-xs text-gray-500">
               Baseline-alert (AMBA) coverage of your resources.
               {data?.demo && (
-                <span className="ml-1 rounded bg-indigo-50 px-1.5 py-0.5 text-[10px] text-indigo-700">demo data</span>
+                <span className="ml-1 rounded-sm bg-indigo-50 px-1.5 py-0.5 text-[10px] text-indigo-700">demo data</span>
               )}
             </p>
             <div className="mt-1 flex flex-wrap gap-3 text-xs text-gray-600">
               <span>Resources: <b>{data?.kpis.total_resources_in_baseline ?? 0}</b></span>
-              <span className="text-green-600">✓ {data?.kpis.alerts_present ?? 0}</span>
-              <span className="text-red-500">✗ {data?.kpis.alerts_missing ?? 0}</span>
-              <span className="text-amber-500">⚠ {data?.kpis.alerts_misconfigured ?? 0}</span>
+              <span className="text-green-700">✓ {data?.kpis.alerts_present ?? 0}</span>
+              <span className="text-red-700">✗ {data?.kpis.alerts_missing ?? 0}</span>
+              <span className="text-amber-700">⚠ {data?.kpis.alerts_misconfigured ?? 0}</span>
               {data?.kpis.alerts_suppressed ? (
                 <span className="text-fuchsia-600" title="Muted by an alert processing rule">
                   🔇 {data.kpis.alerts_suppressed}
@@ -541,7 +541,12 @@ export function MonitoringCoveragePanel() {
 
           <div className="ml-auto flex flex-wrap items-center gap-2">
             {/* Azure tenant + scope switcher */}
-            <ConnectionScopePicker value={connId} onChange={(id) => { setConnId(id); if (scopeKind === "subscription") { setSubId(""); setSubName(""); } }} />
+            <ConnectionScopePicker
+              value={connId}
+              onChange={(id) => { setConnId(id); if (scopeKind === "subscription") { setSubId(""); setSubName(""); } }}
+              disabled={scopeKind === "workload"}
+              disabledTitle="The selected workload controls its Azure connection."
+            />
             <ScopePicker
               scopeKind={scopeKind}
               onScopeKindChange={setScopeKind}
@@ -551,6 +556,7 @@ export function MonitoringCoveragePanel() {
               subId={subId}
               subName={subName}
               connectionId={connId}
+              onConnectionChange={setConnId}
               onSubPick={(id, name) => {
                 setSubId(id);
                 setSubName(name);
@@ -561,7 +567,7 @@ export function MonitoringCoveragePanel() {
                 <>
                   Updated {agoText(data.age_seconds)}
                   {data.stale && <span className="ml-1 text-amber-600">· stale</span>}
-                  <span className="ml-1 rounded bg-gray-100 px-1.5 py-0.5 text-[10px]">cached</span>
+                  <span className="ml-1 rounded-sm bg-gray-100 px-1.5 py-0.5 text-[10px]">cached</span>
                 </>
               ) : "—"}
               {refreshing && <span className="ml-1 text-blue-600">· refreshing…</span>}
@@ -619,14 +625,14 @@ export function MonitoringCoveragePanel() {
         <div className="mt-3 flex items-center gap-1 border-b text-sm">
           <button onClick={() => setTab("coverage")} className={`-mb-px border-b-2 px-3 py-1.5 ${tab === "coverage" ? "border-brand font-medium text-gray-900" : "border-transparent text-gray-500"}`}>Monitoring Coverage</button>
           <button onClick={() => setTab("all")} className={`-mb-px border-b-2 px-3 py-1.5 ${tab === "all" ? "border-brand font-medium text-gray-900" : "border-transparent text-gray-500"}`}>
-            All Resources {data?.all_resources?.length ? <span className="ml-1 rounded bg-gray-100 px-1.5 text-[10px] text-gray-600">{data.all_resources.length}</span> : null}
+            All Resources {data?.all_resources?.length ? <span className="ml-1 rounded-sm bg-gray-100 px-1.5 text-[10px] text-gray-600">{data.all_resources.length}</span> : null}
           </button>
         </div>
 
         {/* Source provenance + filters */}
         {tab === "coverage" && (
         <div className="mt-2 flex flex-wrap items-center gap-2 text-xs">
-          <span className="text-gray-400">
+          <span className="text-gray-500">
             Source: {data?.source === "demo_dummy_data" ? "demo dummy data" : "Azure Resource Graph"}
           </span>
           <span className="text-gray-300">·</span>
@@ -634,22 +640,22 @@ export function MonitoringCoveragePanel() {
             value={query}
             onChange={(e) => setQuery(e.target.value)}
             placeholder="Search resources…"
-            className="w-44 rounded-lg border px-2.5 py-1.5 outline-none focus:border-gray-400"
+            className="w-44 rounded-lg border px-2.5 py-1.5 outline-hidden focus:border-gray-400"
           />
-          <select value={catFilter} onChange={(e) => setCatFilter(e.target.value)} className="rounded-lg border px-2 py-1.5">
+          <select aria-label="Monitoring category" value={catFilter} onChange={(e) => setCatFilter(e.target.value)} className="rounded-lg border px-2 py-1.5">
             <option value="all">All categories</option>
             <option value="availability">Availability</option>
             <option value="performance">Performance</option>
             <option value="security">Security</option>
           </select>
-          <select value={sevFilter} onChange={(e) => setSevFilter(e.target.value)} className="rounded-lg border px-2 py-1.5">
+          <select aria-label="Monitoring severity" value={sevFilter} onChange={(e) => setSevFilter(e.target.value)} className="rounded-lg border px-2 py-1.5">
             <option value="all">All severities</option>
             <option value="critical">Critical</option>
             <option value="error">Error</option>
             <option value="warning">Warning</option>
             <option value="info">Info</option>
           </select>
-          <select value={statusFilter} onChange={(e) => setStatusFilter(e.target.value)} className="rounded-lg border px-2 py-1.5">
+          <select aria-label="Monitoring coverage status" value={statusFilter} onChange={(e) => setStatusFilter(e.target.value)} className="rounded-lg border px-2 py-1.5">
             <option value="all">All statuses</option>
             <option value="present">✓ Present</option>
             <option value="missing">✗ Missing</option>
@@ -761,7 +767,6 @@ export function MonitoringCoveragePanel() {
 
       {/* Body */}
       <div className="min-h-0 flex-1 overflow-auto px-6 py-4">
-        <PageIntro {...PAGE_INTROS["/coverage"]} icon="📡" storageKey="coverage" />
         {enabled && tab === "coverage" && (
           <CoverageHistory<AmbaCoverage>
             feature="amba"
@@ -777,7 +782,7 @@ export function MonitoringCoveragePanel() {
           />
         )}
         {!enabled ? (
-          <div className="py-16 text-center text-sm text-gray-400">
+          <div className="py-16 text-center text-sm text-gray-500">
             {scopeReady
               ? <>Pick a workload, then click <b>Load coverage</b> to audit its monitoring baseline coverage.</>
               : "Pick a workload or enter a subscription to begin."}
@@ -853,13 +858,13 @@ export function MonitoringCoveragePanel() {
               <div className="truncate text-sm font-semibold text-gray-900">{drawer.cell.alert_name}</div>
               <div className="truncate text-[11px] text-gray-500">{drawer.row.resource_name}</div>
             </div>
-            <button onClick={() => setDrawer(null)} className="rounded p-1 text-gray-400 hover:bg-gray-100">✕</button>
+            <button onClick={() => setDrawer(null)} className="rounded-sm p-1 text-gray-400 hover:bg-gray-100">✕</button>
           </div>
           <div className="min-h-0 flex-1 space-y-3 overflow-auto p-4 text-xs">
             <div className="flex items-center gap-2">
               <StatusMark status={drawer.cell.status} />
-              <span className={`rounded px-1.5 py-0.5 ${CAT_CLS[drawer.cell.amba_category] ?? "bg-gray-100"}`}>{drawer.cell.amba_category}</span>
-              <span className={`rounded px-1.5 py-0.5 ${SEV_CLS[drawer.cell.severity] ?? ""}`}>{drawer.cell.severity}</span>
+              <span className={`rounded-sm px-1.5 py-0.5 ${CAT_CLS[drawer.cell.amba_category] ?? "bg-gray-100"}`}>{drawer.cell.amba_category}</span>
+              <span className={`rounded-sm px-1.5 py-0.5 ${SEV_CLS[drawer.cell.severity] ?? ""}`}>{drawer.cell.severity}</span>
             </div>
             <div>
               <div className="mb-1 font-medium text-gray-700">Why this matters</div>
@@ -868,11 +873,11 @@ export function MonitoringCoveragePanel() {
             <div className="grid grid-cols-2 gap-2">
               <div className="rounded-lg border bg-gray-50 p-2">
                 <div className="mb-1 font-medium text-gray-700">Recommended</div>
-                <pre className="whitespace-pre-wrap break-words text-[10px] text-gray-600">{JSON.stringify(drawer.cell.recommended, null, 2)}</pre>
+                <pre className="whitespace-pre-wrap wrap-break-word text-[10px] text-gray-600">{JSON.stringify(drawer.cell.recommended, null, 2)}</pre>
               </div>
               <div className="rounded-lg border bg-gray-50 p-2">
                 <div className="mb-1 font-medium text-gray-700">Observed</div>
-                <pre className="whitespace-pre-wrap break-words text-[10px] text-gray-600">{Object.keys(drawer.cell.observed).length ? JSON.stringify(drawer.cell.observed, null, 2) : "(no matching rule)"}</pre>
+                <pre className="whitespace-pre-wrap wrap-break-word text-[10px] text-gray-600">{Object.keys(drawer.cell.observed).length ? JSON.stringify(drawer.cell.observed, null, 2) : "(no matching rule)"}</pre>
               </div>
             </div>
             {drawer.cell.observed.issues?.length ? (
@@ -954,7 +959,7 @@ export function MonitoringCoveragePanel() {
                 >
                   ⬇ Download
                 </button>
-                <button onClick={() => setIacView(null)} className="rounded p-1 text-gray-400 hover:bg-gray-100">✕</button>
+                <button onClick={() => setIacView(null)} className="rounded-sm p-1 text-gray-400 hover:bg-gray-100">✕</button>
               </div>
             </div>
             <pre className="min-h-0 flex-1 overflow-auto bg-gray-900 p-4 text-[11px] leading-relaxed text-gray-100">{iacView.text}</pre>

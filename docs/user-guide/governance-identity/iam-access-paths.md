@@ -21,6 +21,8 @@ Three ways of asking who can reach what. **Effective Access** evaluates a specif
 
 The tab id `evaluate` and the label **Effective Access** deliberately do not match. The id `effective` has always belonged to the raw grant grid on the **Access** tab, and renaming it would change what an existing `/iam/effective` link means. The label moved to the tab that evaluates effective permissions; the id stayed where the URL is.
 
+**Screenshot notes:** These synthetic browser fixtures illustrate verdicts, paths and collection gaps; no live provider calls or backend access analysis was performed. Principals, scopes, selected actions and counts are examples, not default access or verified authorization results.
+
 ## Prerequisites and data sources
 
 - Product permission `iam.read`.
@@ -39,7 +41,7 @@ Three modes across the top; each names what it answers.
 | --- | --- | --- |
 | **Can this principal…** | One principal, one action, one scope — a verdict and the assignment that decided it | `GET /api/iam/effective` |
 | **Who can…** | Everyone who can perform this action here | `GET /api/iam/resource-access` |
-| **What can they reach** | Every role this principal holds at or above a scope, split by plane | `GET /api/iam/principal/{principal_id}/access` |
+| **What can they reach** | Role-level grants above or below the selected scope, split by plane | `GET /api/iam/principal/{principal_id}/access` |
 
 **Controls.** A principal field backed by the cached directory, a scope selector built from `GET /api/iam/scope-tree` with a free-text field beneath it for a resource id, and an action picker with common actions. The mode, principal, scope and action are all read from the URL query string on load, so a deep link from the access grid's why-panel lands on the question the reader was already looking at.
 
@@ -47,19 +49,23 @@ Three modes across the top; each names what it answers.
 
 **The scope tree's synthetic root is not offered.** The tree's top node is an "all scopes" sentinel used by the access grid's filter, and its id is the empty string. Offering it here would pose a question Azure cannot answer — *who can delete a virtual machine at all scopes* — and selecting it would leave the query disabled, rendering no verdict, no error and no prompt. It is dropped and its children are lifted to the top level. When no scope is selected, the results panel says so rather than sitting empty, because an empty results panel is not an answer.
 
-**Verdicts.** The evaluator returns one of `allowed`, `denied`, `not_granted` or `indeterminate`. The last is returned whenever an unevaluated ABAC condition or an unresolved role definition sits in the path: a confident yes that turns out to be conditional is worse than admitting the uncertainty.
+**Verdicts.** The evaluator returns `allowed`, `denied`, `not_granted` or `indeterminate`. When no unconditional known grant resolves the question, an unevaluated ABAC condition or missing role definition produces `indeterminate`. An independent unconditional grant can still produce `allowed`, with competing conditions/unknown roles listed. PIM eligibility is excluded from the action-level allow decision.
+
+{% include screenshot.html file="fid2-iam-evaluate-deny.png" title="Effective Access: a deny assignment takes precedence" caption="The synthetic question targets VM deletion at a protected child scope and names the deny assignment that decides it despite an Owner grant. Read the exact principal, action and scope; this fixture is not an authorization test against Azure." %}
 
 **Indeterminate is kept separate from allow and from deny, everywhere.** In **Who can…** it is a second box below the allowed list with its own heading and count, never merged into it, and the headline counts it separately: *`A` of `C` principals with any grant at or above this scope can perform this action · `I` could not be determined*. A reader scanning a list of names will not notice a per-row qualifier, so the qualifier is the box.
 
 **Who can… re-evaluates every candidate.** It is not a "who holds a matching role" query. Each candidate goes back through the same evaluator, so a principal blocked by a deny assignment does not appear in the allowed list. `candidates` is the number of principals holding any grant at or above the scope that were considered; the response is bounded, and the allowed and indeterminate lists together stop at that bound. When `candidates` is zero the tab states that no principal holds any grant at or above this scope *in the cached scan*, and that this is not the same as nobody being able to do it.
 
-**What can they reach** answers *at or above this scope*, at role level rather than expanding to actions — a tenant-wide action expansion is tens of thousands of strings nobody reads, and the per-action question is what the first mode is for. It splits control plane from data plane, lists deny assignments in their own section, and names any role definition that was not collected so its permissions are explicitly unknown.
+**What can they reach** includes both covering ancestor assignments and descendant assignments under the selected scope, despite the current UI's narrower *at or above* caption. It is a role inventory, not a per-action verdict; inspect assignment state because eligible rows can appear here. It separates control/data planes, denies and unresolved role definitions. **Who can…** returns at most 200 allowed/indeterminate entries by default (API maximum 500 combined); its candidate total is not the number fully evaluated once that cap is reached.
+
+{% include screenshot.html file="fid2-iam-evaluate-who.png" title="Effective Access: allowed and indeterminate candidates stay separate" caption="This question uses the parent subscription, not the protected child scope in the deny example. Allowed candidates and candidates whose conditions cannot be evaluated remain separate; indeterminate is neither permission granted nor a soft denial." %}
 
 ### Escalation
 
 Served by `GET /api/iam/escalation`. The tenant-wide graph is cached; `GET /api/iam/cache` reports how old it is and how long it took to build, and **↻ Rebuild** (`POST /api/iam/cache/rebuild`) recomputes it from the rows already on disk without calling Azure.
 
-**What an edge means.** A *primitive* is a rule of the form *(this principal effectively holds action A) → (capability C)*. Detection runs through the same effective-permission engine as the Effective Access tab rather than matching role names, so a custom role that happens to grant `Microsoft.Authorization/roleAssignments/write` is caught exactly as Owner is. Thirteen primitives are registered, covering self-granting roles, removing deny assignments, Key Vault control-plane-to-data-plane pivots, listing storage keys, obtaining cluster-admin credentials, adding a federated credential to a managed identity, onboarding a subscription to another tenant, removing resource locks, running code as a resource's managed identity on virtual machines, web apps, container instances and automation accounts, and deploying as a policy remediation identity. Everything converges on one capability node labelled **Owner / full control**.
+**What an edge means.** A *primitive* is a rule of the form *(this principal effectively holds action A) → (capability C)*. Detection runs through the same effective-permission engine as the Effective Access tab rather than matching role names, so a custom role that happens to grant `Microsoft.Authorization/roleAssignments/write` is caught exactly as Owner is. Thirteen primitives are registered, covering self-granting roles, removing deny assignments, Key Vault control-plane-to-data-plane pivots, listing storage keys, obtaining cluster-admin credentials, adding a federated credential to a managed identity, onboarding a subscription to another tenant, removing resource locks, running code as a resource's managed identity on virtual machines, web apps, container instances and automation accounts, and deploying as a policy remediation identity. Everything converges on one capability node labeled **Owner / full control**.
 
 **The layout is a breadth-first DAG, not a force graph.** The roots are the nodes nothing points at — a principal nobody else can reach is where an attack starts, and that is the column to scan first. A force layout produced an illegible ball at this size; the reader needs to scan from *where an attack starts* to *full control*, and only a layered layout shows that. The canvas stops zooming out below a legibility floor and lets you pan instead, because a picture nobody can read is not a smaller picture — it is a different and false claim that there is nothing to see. The node and edge counts under the path list say how much is off-screen.
 
@@ -71,6 +77,8 @@ Served by `GET /api/iam/escalation`. The tenant-wide graph is cached; `GET /api/
 | **Paths only** (default on) | Draws only the nodes and edges lying on a route to full control. Off draws every detected capability, which on a large tenant is a hairball |
 | Selecting a path | Highlights that chain and dims everything else |
 | **↻ Rebuild** | Recomputes the cached graph from the collected rows. No Azure call |
+
+{% include screenshot.html file="fid2-iam-escalation-review.png" title="Escalation: a workload-identity path with explicit limitations" caption="Paths only is checked, matching its default; All confidence is selected for this example. Read the limitations and weakest-hop confidence before tracing the workload identity to full control. This synthetic path does not prove exploitability or that anyone used the access." %}
 
 **Fan-out is capped and the true total is kept.** No more than twelve edges are drawn per (source, primitive) pair; beyond that the real count is retained and the footer states `fan-out capped`. One principal producing hundreds of arrows adds no information and costs the legibility that is the entire point of the view — but the count is never quietly lowered to match what is drawn.
 
@@ -95,6 +103,10 @@ Served by `GET /api/iam/bypass`. This tab reports the doors that are *not* Azure
 **Who can fetch the credential is a three-state answer, not a list.** Where a check names a control-plane action that yields the credential, the row joins that action to the effective-access engine. `Not determined` means role assignments for that scope were unavailable, so the holder set is unknown rather than empty; a stated zero means no principal holds that action at a covering scope; otherwise the holders are listed with the scope each holds it at, and a `+N more` line when the list is truncated. An empty list with the join unavailable must never read as *nobody holds this credential*.
 
 **Remediation and its blast radius are one unit.** Every remediation is published with the `Breaks if` line that qualifies it. Telling somebody to disable shared-key access without telling them it breaks every connection-string client is how a read-only tool causes an outage.
+
+{% include screenshot.html file="fid2-iam-shadow-key-reach.png" title="Shadow Access: assessed coverage, credential reach and breakage" caption="Read the RBAC-only percentage with its assessed-resource denominator and the unreadable service-family status. The expanded storage row joins credential-fetch capability to a principal and keeps the Breaks if warning with remediation; it does not inventory previously issued keys or tokens." %}
+
+{% include screenshot.html file="fid2-iam-shadow-unknown-reach.png" title="Shadow Access: an enabled credential with unknown holders" caption="The registry admin credential exists in this example, but its assignment join is unavailable. Not determined means the holder set is unknown, not empty. Check dependent build and deployment clients before disabling the credential; service-internal authorization remains outside this assessment." %}
 
 **Limitations, always shown:** this reports *the door, not the room*. Kubernetes RBAC objects, in-database SQL users and mailbox permissions are not read, so a cluster listed here has **not** had its internal authorization assessed.
 
@@ -130,7 +142,7 @@ Filters: service family (left rail) and severity. Rows are sorted worst severity
 ## Exports, history, scheduling, and integrations
 
 - The Excel workbook from the Overview tab carries the shadow-access sweep, the escalation paths with their blind spots, and the data-plane coverage statement alongside the access sheets.
-- `GET /api/iam/dataplane` publishes the data-plane catalogue: which services hold data, which doors reach it, which authorization models this product cannot read, and a four-step grading of what a role reaches — `credential` (the data *is* a credential, so reading it is an identity takeover), `write` (can modify or destroy the data), `read` (can read the data), `meta` (names and properties only, never the value). It is ranked with `credential` above `write` deliberately. The catalogue backs the data-plane signals and the workbook's coverage sheet; **it is not the source of the Shadow Access tab's service list**, which comes from the bypass check table, and no screen currently renders the catalogue directly.
+- `GET /api/iam/dataplane` publishes the data-plane catalog: which services hold data, which doors reach it, which authorization models this product cannot read, and a four-step grading of what a role reaches — `credential` (the data *is* a credential, so reading it is an identity takeover), `write` (can modify or destroy the data), `read` (can read the data), `meta` (names and properties only, never the value). It is ranked with `credential` above `write` deliberately. The catalog backs the data-plane signals and the workbook's coverage sheet; **it is not the source of the Shadow Access tab's service list**, which comes from the bypass check table, and no screen currently renders the catalog directly.
 - `GET /api/iam/identities` joins the managed-identity inventory to what each identity holds, including federated credentials. It answers *which resource is this service principal?* and has no screen today.
 - The Escalation tab exposes no export of its own; use the workbook.
 
@@ -138,6 +150,7 @@ Filters: service family (left rail) and severity. Rows are sorted worst severity
 
 - Every tab here is read-only. Nothing writes to Azure, and the escalation rebuild writes only this product's derived cache.
 - The evaluator is an evidence-backed model of a known access path, not a full authorization-engine simulation. Deny assignments, ABAC conditions, service-native authorization and resource-level controls can all change the real outcome.
+- Deny rows conservatively block any modeled action at their covering scope because normalized rows lack per-action deny lists. Key Vault access-policy fallback treats a vault policy as a data-plane grant without checking each permission in its label. Verify the requested operation in the authoritative service; neither fallback is exact authorization proof.
 - Escalation is capped in three ways — per-source fan-out, total nodes, and dropped edges whose endpoints are absent. All three are counted and published; none is silent.
 - The graph reflects capability, not intent or exploitability. A detected path is a route that exists, not evidence that anyone has used it.
 - Shadow Access assesses only the fourteen families listed, only the resources the sweep could read, and only the doors in the check table. Absence from this tab is not evidence of absence in Azure.
@@ -154,7 +167,7 @@ Filters: service family (left rail) and severity. Rows are sorted worst severity
 | The graph shows fewer nodes than the footer's total | **Paths only** is on, which is the default. Untick it to draw every detected capability. |
 | An evaluation returns `indeterminate` | An unevaluated ABAC condition or an uncollected role definition is in the path. The response names which. Re-collect role definitions with a full rescan if a role is unknown. |
 | *Who can…* returns nobody and `candidates` is 0 | No principal holds any grant at or above that scope in the cached scan. The tab says so explicitly. Run an access scan before concluding nobody can perform the action. |
-| A `plane` value is rejected | The evaluator accepts only `control` or `data`. Anything else is a 400. |
+| A `plane` value is rejected | The single-action `/api/iam/effective` endpoint accepts only `control` or `data` when explicitly supplied. Use the correct plane rather than inferring it from a role name. |
 | The scope list is empty | No management group or subscription is in the cached scan. Type a resource id into the field beneath the selector, or run an access scan. |
 | Shadow Access headline says coverage is unknown | Nothing was assessed. Check the family statuses in the left rail and Diagnostics — this is deliberately not rendered as 100%. |
 | A service family shows `Unauthorized` instead of counts | The sweep could not read it. Its resources are excluded from both the findings and the denominator; fix the permission and re-collect. |

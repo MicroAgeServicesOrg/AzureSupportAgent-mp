@@ -6,6 +6,7 @@ are persisted per (tenant, workload) with history + trash. Admin-gated. No write
 """
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 from typing import Any
@@ -48,13 +49,13 @@ def _resolve(workload_id: str, connection_id: str | None):
     synthetic definition; real workloads come from the registry with their own connection."""
     if demo.is_demo(workload_id):
         return demo.demo_workload(), None
-    from app.core.azure_connections import connection_for_workload, resolve_connection
+    from app.core.azure_connections import connection_for_workload
     from app.workloads.registry import get_workload
 
     wl = get_workload(workload_id)
     if wl is None:
         return None, None
-    conn = resolve_connection(connection_id) if connection_id else connection_for_workload(wl)
+    conn = connection_for_workload(wl)
     return wl, conn
 
 
@@ -286,6 +287,23 @@ async def get_change_raw(run_id: str, change_id: str, principal: Principal = Dep
     raise HTTPException(status_code=404, detail="Change not found.")
 
 
+@router.get("/runs/{run_id}/diagnostics")
+async def get_run_diagnostics(run_id: str, principal: Principal = Depends(require_admin)):
+    """Source-level completeness without returning event payloads or customer identifiers."""
+    run = runs_store.get_run(principal.tenant_id, run_id)
+    if run is None:
+        raise HTTPException(status_code=404, detail="Run not found.")
+    return {
+        "runId": run.get("runId", ""),
+        "status": run.get("status", ""),
+        "analysisOutcome": run.get("analysisOutcome", "unknown"),
+        "retryable": bool(run.get("retryable", False)),
+        "sourceProvenance": run.get("sourceProvenance", {}),
+        "createdAt": run.get("createdAt", ""),
+        "completedAt": run.get("completedAt", ""),
+    }
+
+
 @router.post("/runs/{run_id}/ai-enrich")
 async def ai_enrich_run(run_id: str, principal: Principal = Depends(require_admin)):
     """Run the AI enrichment pass over an already-persisted run that was analyzed without AI
@@ -399,9 +417,11 @@ async def export_run(run_id: str, format: str = "csv", principal: Principal = De
     events = run.get("events", [])
     name = (run.get("workloadName", "changes") or "changes").replace(" ", "_")
     if format == "csv":
-        return {"filename": f"{name}_changes.csv", "mime": "text/csv", "content": export_mod.to_csv(events)}
+        body = await asyncio.to_thread(export_mod.to_csv, events)
+        return {"filename": f"{name}_changes.csv", "mime": "text/csv", "content": body}
     if format == "csv_high":
-        return {"filename": f"{name}_high_risk.csv", "mime": "text/csv", "content": export_mod.to_csv(events, high_risk_only=True)}
+        body = await asyncio.to_thread(export_mod.to_csv, events, high_risk_only=True)
+        return {"filename": f"{name}_high_risk.csv", "mime": "text/csv", "content": body}
     if format == "json":
         return {"filename": f"{name}_run.json", "mime": "application/json", "content": export_mod.to_json(run)}
     if format == "exec":

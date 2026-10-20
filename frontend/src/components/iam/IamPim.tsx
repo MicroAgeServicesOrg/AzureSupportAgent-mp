@@ -37,7 +37,7 @@ function untilText(iso: string): string {
 function YesNo({ on, label }: { on: boolean; label: string }) {
   return (
     <span
-      className={`rounded px-1.5 py-0.5 text-[10px] font-medium ${on ? "bg-green-100 text-green-700" : "bg-red-100 text-red-700"}`}
+      className={`rounded-sm px-1.5 py-0.5 text-[10px] font-medium ${on ? "bg-green-100 text-green-700" : "bg-red-100 text-red-700"}`}
       title={on ? `${label} is required to activate` : `${label} is NOT required to activate`}
     >
       {on ? "✓" : "✗"} {label}
@@ -138,7 +138,7 @@ export function PimTab() {
         value={search}
         onChange={(e) => setSearch(e.target.value)}
         placeholder="Search principal / role / scope…"
-        className="mb-3 w-72 rounded border px-2 py-1 text-sm"
+        className="mb-3 w-72 rounded-sm border px-2 py-1 text-sm"
       />
 
       {elevated.length > 0 && (
@@ -174,7 +174,7 @@ export function PimTab() {
                     <td className="px-3 py-1.5">{String(r.roleName)}</td>
                     <td className="px-3 py-1.5 text-gray-600">{String(r.scopeDisplayName || r.scope)}</td>
                     <td className="px-3 py-1.5">
-                      <span className="rounded bg-amber-100 px-1.5 py-0.5 text-[11px] font-medium text-amber-800">
+                      <span className="rounded-sm bg-amber-100 px-1.5 py-0.5 text-[11px] font-medium text-amber-800">
                         {untilText(String(r.activationExpiresOn))}
                       </span>
                     </td>
@@ -189,9 +189,9 @@ export function PimTab() {
       <div className="rounded-lg border bg-white">
         <div className="border-b px-3 py-2 text-sm font-semibold text-gray-800">
           {/* The KPI above counts eligible AND PRIVILEGED; this grid lists EVERY eligible
-              assignment. On the live `lu` tenant that is 137 against 174 — two numbers a reader
+              assignment. On a real tenant that is 137 against 174 — two numbers a reader
               would take for the same measure, sitting a few inches apart under near-identical
-              labels. Both are correct; only the labelling was wrong, so the grid states its own
+              labels. Both are correct; only the labeling was wrong, so the grid states its own
               scope rather than hiding the 37 non-privileged rows to make the numbers agree. */}
           All eligible assignments ({eligibleTotal.toLocaleString()})
           {privilegedEligible !== null && privilegedEligible !== eligibleTotal && (
@@ -241,7 +241,7 @@ export function PimTab() {
                     <td className="px-3 py-1.5 text-gray-600">{String(r.scopeDisplayName || r.scope)}</td>
                     <td className="px-3 py-1.5">
                       {permanent ? (
-                        <span className="rounded bg-amber-100 px-1.5 py-0.5 text-[11px] font-medium text-amber-800" title="Eligible with no end date">
+                        <span className="rounded-sm bg-amber-100 px-1.5 py-0.5 text-[11px] font-medium text-amber-800" title="Eligible with no end date">
                           permanent
                         </span>
                       ) : (
@@ -256,7 +256,7 @@ export function PimTab() {
                           <span className="text-[11px] text-gray-500">max {String(r.activationMaxHours)}h</span>
                         ) : null}
                         {weak && permanent && (
-                          <span className="rounded bg-red-100 px-1.5 py-0.5 text-[10px] font-semibold text-red-700" title="Permanently eligible with no approval and no MFA — JIT in name only">
+                          <span className="rounded-sm bg-red-100 px-1.5 py-0.5 text-[10px] font-semibold text-red-700" title="Permanently eligible with no approval and no MFA — JIT in name only">
                             JIT in name only
                           </span>
                         )}

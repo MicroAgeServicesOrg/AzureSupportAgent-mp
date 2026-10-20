@@ -45,7 +45,7 @@ class Settings(BaseSettings):
     cookie_secure: bool = False
     cookie_samesite: str = "lax"
     # Public base URL of this API (used to build OIDC/SAML redirect URIs).
-    public_base_url: str = "http://localhost:8000"
+    public_base_url: str = "http://localhost:35001"
     # Trusted reverse-proxy IPs (comma-separated). When set, the app honors the
     # ``X-Forwarded-For`` header only for requests whose direct client IP is in this
     # allowlist; otherwise it falls back to ``request.client.host`` to prevent IP
@@ -106,7 +106,25 @@ class Settings(BaseSettings):
     secrets_encryption_key: str = ""
 
     # CORS
-    frontend_origin: str = "http://localhost:5173"
+    frontend_origin: str = "http://localhost:35000"
+
+    # --- database connection pool -------------------------------------------------------
+    # These were SQLAlchemy's defaults (5 + 10 overflow, 30s wait), which is two problems at
+    # once on a small deployment: too few connections per replica for the background workers
+    # AND too many in aggregate once the app scales out. `db_pool_size * replicas` must stay
+    # under the server's `max_connections` with headroom for admin sessions and migrations.
+    db_pool_size: int = 5
+    db_max_overflow: int = 5
+    # A request that fails in five seconds is a bad response. One that waits thirty holds a
+    # worker the whole time and is indistinguishable from a hung app.
+    db_pool_timeout: float = 5.0
+    # Below the managed-Postgres idle timeout, so a connection the server has already dropped
+    # is retired here rather than discovered mid-query.
+    db_pool_recycle_s: int = 1800
+    #: How many background loop iterations may hold a database connection at once. The rest of
+    #: the pool stays available to HTTP requests, so a batch worker can never take the last
+    #: connection the login page needs.
+    db_background_slots: int = 2
 
     @property
     def resolved_database_url(self) -> str:

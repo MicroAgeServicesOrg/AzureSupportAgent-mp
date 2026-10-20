@@ -21,7 +21,8 @@ export function GuidedFill({
   focusFieldId,
   focusNonce,
   onSuggestField,
-  suggestingId,
+  suggestingField,
+  suggestionError,
 }: {
   todos: KnowMeTodo[];
   sections: KnowMeSection[];
@@ -40,7 +41,8 @@ export function GuidedFill({
   focusNonce?: number;
   // On-demand AI "suggest options" for a field (P3).
   onSuggestField?: (fieldId: string) => void;
-  suggestingId?: string;
+  suggestingField?: (fieldId: string) => boolean;
+  suggestionError?: (fieldId: string) => string | undefined;
 }) {
   const ordered = useMemo(() => {
     const all = orderTodos(todos, sectionKeys);
@@ -167,7 +169,7 @@ export function GuidedFill({
           <div className="mt-1 flex items-center gap-1.5 text-[11px] text-gray-500">
             <span className="truncate font-medium text-gray-700">{scopeLabel}</span>
             {onClearScope && (
-              <button onClick={onClearScope} className="ml-auto shrink-0 rounded border border-gray-200 px-1.5 py-0.5 text-[10px] text-gray-500 hover:bg-gray-50">Fill whole document</button>
+              <button onClick={onClearScope} className="ml-auto shrink-0 rounded-sm border border-gray-200 px-1.5 py-0.5 text-[10px] text-gray-500 hover:bg-gray-50">Fill whole document</button>
             )}
           </div>
         )}
@@ -232,7 +234,8 @@ export function GuidedFill({
               onEnter={() => advance(1, true)}
               autoFocus
               onSuggest={onSuggestField ? () => onSuggestField(cur.id) : undefined}
-              suggesting={suggestingId === cur.id}
+              suggesting={suggestingField?.(cur.id)}
+              suggestionError={suggestionError?.(cur.id)}
             />
             {/* Optional ownership of this field: who's responsible + a note for the next person. */}
             <div>
@@ -249,7 +252,7 @@ export function GuidedFill({
                     onChange={(e) => setDraftAssignee(e.target.value)}
                     placeholder="Assignee (who should fill this in?)"
                     aria-label="Field assignee"
-                    className="w-full rounded-lg border border-gray-200 px-2.5 py-1.5 text-[12px] focus:border-brand focus:outline-none"
+                    className="w-full rounded-lg border border-gray-200 px-2.5 py-1.5 text-[12px] focus:border-brand focus:outline-hidden"
                   />
                   <textarea
                     value={draftNote}
@@ -257,7 +260,7 @@ export function GuidedFill({
                     placeholder="Note / request for information…"
                     aria-label="Field note"
                     rows={2}
-                    className="w-full resize-y rounded-lg border border-gray-200 px-2.5 py-1.5 text-[12px] focus:border-brand focus:outline-none"
+                    className="w-full resize-y rounded-lg border border-gray-200 px-2.5 py-1.5 text-[12px] focus:border-brand focus:outline-hidden"
                   />
                 </div>
               )}

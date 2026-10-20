@@ -9,6 +9,7 @@ import {
   type MissionSystem,
 } from "../api";
 import { ensureUtc, formatError } from "../utils/format";
+import { MissionControlLoading } from "./MissionControlLoading";
 
 /** A small spinning ring used wherever something is actively running. */
 function Spinner({ className = "h-3 w-3" }: { className?: string }) {
@@ -22,7 +23,8 @@ function StatusChip({ status }: { status: string }) {
     queued: { label: "queued", cls: "bg-gray-100 text-gray-600" },
     running: { label: "running", cls: "bg-blue-100 text-blue-700", spin: true },
     done: { label: "done", cls: "bg-green-100 text-green-700" },
-    skipped: { label: "fresh", cls: "bg-violet-100 text-violet-700" },
+    partial: { label: "partial", cls: "bg-amber-100 text-amber-700" },
+    skipped: { label: "skipped", cls: "bg-violet-100 text-violet-700" },
     fail: { label: "failed", cls: "bg-red-100 text-red-700" },
     error: { label: "error", cls: "bg-red-100 text-red-700" },
   };
@@ -38,8 +40,8 @@ function StatusChip({ status }: { status: string }) {
 // Readiness rollup computed from the current board.
 function rollup(systems: MissionSystem[]): { readiness: string; done: number; total: number; attention: number } {
   const total = systems.length;
-  const done = systems.filter((s) => s.status === "done" || s.status === "skipped").length;
-  const attention = systems.filter((s) => s.attention || s.status === "fail" || s.status === "error").length;
+  const done = systems.filter((s) => s.status === "done" || s.status === "partial" || s.status === "skipped").length;
+  const attention = systems.filter((s) => s.attention || s.status === "partial" || s.status === "fail" || s.status === "error").length;
   const hardFail = systems.some((s) => s.status === "fail" || s.status === "error");
   const anyRun = systems.some((s) => s.status !== "idle" && s.status !== "queued");
   let readiness = "unknown";
@@ -120,7 +122,8 @@ function SystemTile({ system, onRun, busy }: { system: MissionSystem; onRun: (ke
         </div>
         <div className="truncate text-xs text-gray-500" title={system.detail || system.headline} aria-live="polite">
           {system.headline || (system.status === "idle" ? "Not run yet" : "")}
-          {system.error ? <span className="text-red-600"> · {system.error}</span> : null}
+          {system.detail ? <span> · {system.detail}</span> : null}
+          {system.error && system.error.trim() !== system.headline.trim() ? <span className="text-red-600"> · {system.error}</span> : null}
         </div>
       </div>
       <div className="flex shrink-0 items-center gap-1.5">
@@ -162,6 +165,9 @@ function MissionBoard({ workloadId, initialMissionId = "" }: { workloadId: strin
   const [running, setRunning] = useState(false);
   const [force, setForce] = useState(false);
   const [err, setErr] = useState("");
+  const [hydrating, setHydrating] = useState(true);
+  const [hydrationError, setHydrationError] = useState("");
+  const [hydrationAttempt, setHydrationAttempt] = useState(0);
   const [confirmDelete, setConfirmDelete] = useState("");   // mission id pending delete confirm
   const [mobilePane, setMobilePane] = useState<"board" | "log" | "history">("board");
   const abortRef = useRef<AbortController | null>(null);
@@ -286,8 +292,11 @@ function MissionBoard({ workloadId, initialMissionId = "" }: { workloadId: strin
         if (mission.status === "running" || mission.status === "queued") {
           void follow(missionId, quiet);
         }
+        return "";
       } catch (e) {
-        if (!quiet) setErr(formatError(e));
+        const message = formatError(e);
+        if (!quiet) setErr(message);
+        return message;
       }
     },
     [follow, mergeMissionSystems],
@@ -342,36 +351,47 @@ function MissionBoard({ workloadId, initialMissionId = "" }: { workloadId: strin
   useEffect(() => {
     if (!workloadId) return;
     let cancelled = false;
-    if (initialMissionId) {
-      void openMission(initialMissionId, true);
-      return () => { cancelled = true; };
-    }
-    api
-      .listMissions(workloadId, 1)
-      .then((r) => {
-        const latest = r.missions?.[0];
+    setHydrating(true);
+    setHydrationError("");
+    void (async () => {
+      try {
+        if (initialMissionId) {
+          const problem = await openMission(initialMissionId, true);
+          if (!cancelled && problem) setHydrationError(problem);
+          return;
+        }
+        const response = await api.listMissions(workloadId, 1);
+        const latest = response.missions?.[0];
         if (cancelled || !latest) return;
         if (latest.status === "running" || latest.status === "queued") {
           setActive(latest);
           mergeMissionSystems(latest.systems);
           void follow(latest.id, true);
         } else {
-          // Finished mission — load its full record (incl. log) so the log reloads on reopen.
-          void openMission(latest.id, true);
+          const problem = await openMission(latest.id, true);
+          if (!cancelled && problem) setHydrationError(problem);
         }
-      })
-      .catch(() => {});
+      } catch (e) {
+        if (!cancelled) setHydrationError(formatError(e));
+      } finally {
+        if (!cancelled) setHydrating(false);
+      }
+    })();
     return () => {
       cancelled = true;
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [workloadId, initialMissionId]);
+  }, [workloadId, initialMissionId, hydrationAttempt]);
 
   // The board is always the full set of systems (merged with any active mission deltas), so
   // the readiness ring reflects the whole workload — not just the systems of the last run.
   const board = systems;
   const wlName = stateQ.data?.workload_name || active?.workload_name || "Workload";
   const invalidWorkload = !!stateQ.data?.error;
+  const initialLoading = stateQ.isLoading || historyQ.isLoading || hydrating;
+  const loadError = hydrationError || (stateQ.isError ? formatError(stateQ.error) : "") || (historyQ.isError ? formatError(historyQ.error) : "");
+
+  if (initialLoading) return <MissionControlLoading detail />;
 
   return (
     <div className="flex h-full flex-col overflow-hidden bg-gray-50">
@@ -422,7 +442,23 @@ function MissionBoard({ workloadId, initialMissionId = "" }: { workloadId: strin
         </div>
       </div>
 
-      {err && <div className="border-b bg-red-50 px-4 py-2 text-sm text-red-700" role="alert">{err}</div>}
+      {(err || loadError) && (
+        <div className="flex items-center gap-3 border-b bg-red-50 px-4 py-2 text-sm text-red-700" role="alert">
+          <span className="min-w-0 flex-1">{err || loadError}</span>
+          {loadError && (
+            <button
+              onClick={() => {
+                setHydrationAttempt((value) => value + 1);
+                void stateQ.refetch();
+                void historyQ.refetch();
+              }}
+              className="shrink-0 rounded-lg border border-red-200 bg-white px-2.5 py-1 text-xs font-medium hover:bg-red-100"
+            >
+              Retry
+            </button>
+          )}
+        </div>
+      )}
       {active?.status === "queued" && (
         <div className="border-b border-amber-200 bg-amber-50 px-4 py-2 text-sm text-amber-800" aria-live="polite">
           ⏳ Waiting for central Azure capacity
@@ -471,7 +507,9 @@ function MissionBoard({ workloadId, initialMissionId = "" }: { workloadId: strin
           <div className={`${mobilePane === "log" ? "hidden" : "block"} rounded-xl border bg-white lg:block`}>
             <div className="border-b px-3 py-2 text-xs font-semibold uppercase tracking-wide text-gray-500">Mission history</div>
             <div className="max-h-72 overflow-auto">
-              {(historyQ.data?.missions ?? []).length === 0 ? (
+              {historyQ.isError ? (
+                <div className="px-3 py-3 text-xs text-red-600">Mission history could not be loaded.</div>
+              ) : (historyQ.data?.missions ?? []).length === 0 ? (
                 <div className="px-3 py-3 text-xs text-gray-400">No past missions.</div>
               ) : (
                 (historyQ.data?.missions ?? []).map((m) => {
@@ -490,24 +528,24 @@ function MissionBoard({ workloadId, initialMissionId = "" }: { workloadId: strin
                           {m.started_at ? new Date(m.started_at).toLocaleString() : ""} · {m.systems_done}/{m.systems_total}
                         </div>
                       </button>
-                      <span className="shrink-0 rounded bg-gray-100 px-1 text-[10px] text-gray-500">{m.status}</span>
+                      <span className="shrink-0 rounded-sm bg-gray-100 px-1 text-[10px] text-gray-500">{m.status}</span>
                       {confirmDelete === m.id ? (
                         <span className="flex shrink-0 items-center gap-1">
                           <button
                             onClick={() => void removeMission(m.id)}
-                            className="rounded bg-red-600 px-1.5 py-0.5 text-[10px] font-medium text-white hover:bg-red-700"
+                            className="rounded-sm bg-red-600 px-1.5 py-0.5 text-[10px] font-medium text-white hover:bg-red-700"
                             title="Confirm delete"
                           >Delete</button>
                           <button
                             onClick={() => setConfirmDelete("")}
-                            className="rounded border px-1.5 py-0.5 text-[10px] text-gray-500 hover:bg-gray-50"
+                            className="rounded-sm border px-1.5 py-0.5 text-[10px] text-gray-500 hover:bg-gray-50"
                           >Cancel</button>
                         </span>
                       ) : (
                         <button
                           onClick={() => setConfirmDelete(m.id)}
                           disabled={live}
-                          className="shrink-0 rounded px-1 py-0.5 text-[11px] text-gray-300 hover:bg-red-50 hover:text-red-600 disabled:cursor-not-allowed disabled:opacity-30 group-hover:text-gray-400"
+                          className="shrink-0 rounded-sm px-1 py-0.5 text-[11px] text-gray-300 hover:bg-red-50 hover:text-red-600 disabled:cursor-not-allowed disabled:opacity-30 group-hover:text-gray-400"
                           title={live ? "Cancel the mission before deleting" : "Delete this mission from history"}
                           aria-label={`Delete mission from ${m.started_at ? new Date(m.started_at).toLocaleString() : "history"}`}
                         >✕</button>
@@ -576,9 +614,10 @@ function MissionLanding() {
   // Split workloads into those that already have a Mission Control vs. those that don't yet.
   const withMC = workloads.filter((w) => latestByWorkload.has(w.id));
   const withoutMC = workloads.filter((w) => !latestByWorkload.has(w.id));
+  const initialLoading = wlQ.isLoading || missionsQ.isLoading;
 
   return (
-    <div className="flex h-full flex-col overflow-hidden bg-gray-50">
+    <div className="flex h-full flex-col overflow-hidden bg-gray-50" aria-busy={initialLoading}>
       <div className="border-b bg-white px-6 pt-4 pb-4">
         <div className="flex items-center gap-2">
           <span className="text-xl">🚀</span>
@@ -591,8 +630,8 @@ function MissionLanding() {
       </div>
       <div className="min-h-0 flex-1 overflow-auto p-6">
         {(err || wlQ.isError || missionsQ.isError) && <div className="mb-3 rounded-lg border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-700">{err || (wlQ.isError ? formatError(wlQ.error) : formatError(missionsQ.error))}</div>}
-        {wlQ.isLoading || missionsQ.isLoading ? (
-          <div className="text-sm text-gray-500">Loading…</div>
+        {initialLoading ? (
+          <MissionControlLoading />
         ) : wlQ.isError || missionsQ.isError ? (
           <button onClick={() => { void wlQ.refetch(); void missionsQ.refetch(); }} className="rounded-lg border bg-white px-3 py-2 text-sm font-medium text-brand hover:bg-brand/5">Retry</button>
         ) : workloads.length === 0 ? (
@@ -626,7 +665,7 @@ function MissionLanding() {
                     return (
                       <div
                         key={w.id}
-                        className="flex flex-col gap-2 rounded-xl border bg-white p-4 shadow-sm transition hover:border-brand/40 hover:shadow"
+                        className="flex flex-col gap-2 rounded-xl border bg-white p-4 shadow-xs transition hover:border-brand/40 hover:shadow-sm"
                       >
                         <button onClick={() => navigate(`/mission-control/${w.id}`)} className="flex flex-col gap-2 text-left">
                           <div className="flex items-start justify-between gap-2">
@@ -691,7 +730,7 @@ function MissionLanding() {
                     return (
                       <div
                         key={w.id}
-                        className="flex flex-col gap-2 rounded-xl border border-dashed bg-white p-4 shadow-sm transition hover:border-brand/40 hover:shadow"
+                        className="flex flex-col gap-2 rounded-xl border border-dashed bg-white p-4 shadow-xs transition hover:border-brand/40 hover:shadow-sm"
                       >
                         <div className="flex flex-col gap-2">
                           <div className="flex items-start justify-between gap-2">

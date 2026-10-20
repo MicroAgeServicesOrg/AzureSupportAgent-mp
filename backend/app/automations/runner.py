@@ -13,6 +13,8 @@ import time as _time
 from datetime import datetime, timezone
 from typing import Any
 
+from sqlalchemy import select, text
+
 from app.agent.orchestrator import Orchestrator
 from app.automations import agents as agents_registry
 from app.connectors.registry import build_toolset
@@ -29,12 +31,65 @@ def _now() -> datetime:
     return datetime.now(timezone.utc)
 
 
-async def run_task(task_id: str, trigger: str = "schedule") -> str:
+async def _load_task(
+    db, task_id: str, lease_owner: str | None, lease_token: str | None, *, lock: bool = False
+) -> ScheduledTask | None:
+    if lease_owner is None and lease_token is None:
+        return await db.get(ScheduledTask, task_id)
+    if not lease_owner or not lease_token:
+        return None
+    if lock and db.bind is not None and db.bind.dialect.name == "sqlite":
+        await db.execute(text("BEGIN IMMEDIATE"))
+    stmt = select(ScheduledTask).where(
+        ScheduledTask.id == task_id,
+        ScheduledTask.lease_owner == lease_owner,
+        ScheduledTask.lease_token == lease_token,
+        ScheduledTask.lease_occurrence_at.is_not(None),
+        ScheduledTask.lease_expires_at > _now(),
+    )
+    if lock:
+        stmt = stmt.with_for_update()
+    return (await db.execute(stmt)).scalar_one_or_none()
+
+
+def _complete_task_schedule(
+    task: ScheduledTask,
+    *,
+    lease_owner: str | None,
+    lease_token: str | None,
+) -> None:
+    task.completed_runs = (task.completed_runs or 0) + 1
+    reached_limit = task.max_runs is not None and task.completed_runs >= task.max_runs
+    if lease_owner is not None and lease_token is not None:
+        # The scheduler advanced next_run_at in the claim transaction. Do not advance it
+        # again after a long run, or one occurrence would be silently skipped.
+        if reached_limit:
+            task.next_run_at = None
+        task.lease_owner = None
+        task.lease_token = None
+        task.lease_expires_at = None
+        task.lease_heartbeat_at = None
+        task.lease_occurrence_at = None
+    else:
+        from app.automations.schedule import compute_next_run
+
+        task.next_run_at = None if reached_limit else compute_next_run(_task_to_dict(task))
+    if task.next_run_at is None and task.status == "on":
+        task.status = "ended"
+
+
+async def run_task(
+    task_id: str,
+    trigger: str = "schedule",
+    *,
+    lease_owner: str | None = None,
+    lease_token: str | None = None,
+) -> str:
     """Execute one run of a scheduled task. Returns the TaskRun id."""
     async with SessionLocal() as db:
-        task = await db.get(ScheduledTask, task_id)
+        task = await _load_task(db, task_id, lease_owner, lease_token)
         if task is None:
-            raise ValueError("Task not found")
+            raise ValueError("Task not found or scheduled lease is no longer current")
 
         agent = agents_registry.get_agent(task.agent_id or "") or {}
         # Resolve provider/model + tenant: the agent's, falling back to globals.
@@ -117,6 +172,13 @@ async def run_task(task_id: str, trigger: str = "schedule") -> str:
         )
 
     started = _time.perf_counter()
+    from app.entra.agent_tool import behavioural_graph_tools_blocked
+
+    entra_enabled = bool(
+        agent.get("allow_all_entra", False)
+        or agent.get("entra_tools")
+        or agent.get("entra_bundles")
+    )
     orchestrator = Orchestrator(
         settings,
         provider=turn_provider,
@@ -125,10 +187,18 @@ async def run_task(task_id: str, trigger: str = "schedule") -> str:
         connector_toolset=toolset,
         extra_instructions=extra_instructions,
         write_policy_override=write_override,
+        azure_enabled=bool(agent.get("allow_all_azure", True)),
+        entra_enabled=entra_enabled,
+        entra_blocked_tools=behavioural_graph_tools_blocked(None),
+        azure_tools=agent.get("azure_tools") or [],
+        azure_bundles=agent.get("azure_bundles") or [],
+        entra_tools=agent.get("entra_tools") or [],
+        entra_bundles=agent.get("entra_bundles") or [],
     )
     assistant_text = ""
     activity: list[dict[str, Any]] = []
     usage = {"prompt_tokens": 0, "completion_tokens": 0}
+    tool_routing: dict[str, Any] = {}
     error: str | None = None
     try:
         history = [{"role": "user", "content": prompt}]
@@ -140,6 +210,10 @@ async def run_task(task_id: str, trigger: str = "schedule") -> str:
                 usage["completion_tokens"] = ev.data.get("completion_tokens", 0)
                 if ev.data.get("content"):
                     assistant_text = ev.data["content"] or assistant_text
+                if ev.data.get("tool_routing"):
+                    tool_routing = dict(ev.data["tool_routing"])
+            elif ev.type == "routing":
+                tool_routing = dict(ev.data)
             elif ev.type in ("tool_start", "approval_required"):
                 activity.append(
                     {
@@ -162,7 +236,7 @@ async def run_task(task_id: str, trigger: str = "schedule") -> str:
                 error = ev.data.get("message")
     except Exception as exc:  # noqa: BLE001
         error = format_error(exc)
-        logger.warning("Scheduled task %s failed: %s", task_id, error)
+        logger.warning("Scheduled task execution failed")
     finally:
         orchestrator.close()
 
@@ -170,6 +244,7 @@ async def run_task(task_id: str, trigger: str = "schedule") -> str:
 
     # Persist results + advance the task lifecycle.
     async with SessionLocal() as db:
+        task = await _load_task(db, task_id, lease_owner, lease_token, lock=True)
         assistant = await db.get(Message, assistant_id)
         if assistant is not None:
             # Never leave a blank (or punctuation-only) assistant bubble — it looks like
@@ -185,6 +260,11 @@ async def run_task(task_id: str, trigger: str = "schedule") -> str:
             assistant.content = assistant_text.strip() if meaningful else fallback
             assistant.activity_json = activity or None
             assistant.duration_ms = duration_ms
+        if lease_owner is not None and task is None:
+            # A newer owner reclaimed this occurrence. The stale runner must not publish
+            # completion or mutate schedule history under the new lease.
+            await db.commit()
+            return run_id
         notify_ids: list[str] = []
         task_name = ""
         task_tenant = ""
@@ -195,25 +275,17 @@ async def run_task(task_id: str, trigger: str = "schedule") -> str:
             run.error = error
             run.ended_at = _now()
             run.duration_ms = duration_ms
-        task = await db.get(ScheduledTask, task_id)
         if task is not None:
-            task.completed_runs = (task.completed_runs or 0) + 1
             # Capture notify targets + name before the session closes (used below).
             notify_ids = list(task.notify_connector_ids or [])
             task_name = task.name
             task_tenant = task.tenant_id
-            # Compute next run (or end the task).
-            from app.automations.schedule import compute_next_run
-
-            task_dict = _task_to_dict(task)
-            reached_limit = task.max_runs is not None and task.completed_runs >= task.max_runs
-            nxt = None if reached_limit else compute_next_run(task_dict)
-            task.next_run_at = nxt
-            if nxt is None and task.status == "on":
-                task.status = "ended"
+            _complete_task_schedule(
+                task, lease_owner=lease_owner, lease_token=lease_token
+            )
             if error:
                 # Keep running on schedule but surface failure.
-                logger.info("Task %s run failed; next run at %s", task_id, nxt)
+                logger.info("Scheduled task failed; its next run remains scheduled")
         db.add(
             Usage(
                 tenant_id=task.tenant_id if task else "",
@@ -233,7 +305,11 @@ async def run_task(task_id: str, trigger: str = "schedule") -> str:
                 target=task_id,
                 provider=turn_provider,
                 model=turn_model,
-                metadata_json={"trigger": trigger, "status": "failed" if error else "succeeded"},
+                metadata_json={
+                    "trigger": trigger,
+                    "status": "failed" if error else "succeeded",
+                    "tool_routing": tool_routing,
+                },
             )
         )
         await db.commit()
@@ -249,9 +325,9 @@ async def run_task(task_id: str, trigger: str = "schedule") -> str:
                 notify_ids, f"Scheduled task: {task_name}", summary[:3000], bool(error)
             )
             delivered = sum(1 for r in results if r.get("ok"))
-            logger.info("Task %s notified %d/%d connectors", task_id, delivered, len(results))
-        except Exception as exc:  # noqa: BLE001
-            logger.warning("Task %s notify dispatch failed: %s", task_id, exc)
+            logger.info("Scheduled task notified %d/%d connectors", delivered, len(results))
+        except Exception:  # noqa: BLE001
+            logger.warning("Scheduled task notification dispatch failed")
 
     # Publish to the notification engine so rule-based routing + the in-app center see
     # every task outcome (independent of the task's own notify_connector_ids).
@@ -269,8 +345,8 @@ async def run_task(task_id: str, trigger: str = "schedule") -> str:
             links={"thread_id": chat_id, "task_id": task_id},
             fingerprint=f"task:{task_id}:{'failed' if error else 'ok'}",
         )
-    except Exception as exc:  # noqa: BLE001
-        logger.warning("Task %s event publish failed: %s", task_id, exc)
+    except Exception:  # noqa: BLE001
+        logger.warning("Scheduled task event publication failed")
     return run_id
 
 
@@ -286,19 +362,24 @@ def _task_to_dict(task: ScheduledTask) -> dict[str, Any]:
     }
 
 
-async def run_target_task(task_id: str, trigger: str = "schedule") -> str:
+async def run_target_task(
+    task_id: str,
+    trigger: str = "schedule",
+    *,
+    lease_owner: str | None = None,
+    lease_token: str | None = None,
+) -> str:
     """Execute one run of a non-agent scheduled task (assessment/workbook/playbook).
 
     Creates a TaskRun, dispatches to the matching target executor, advances the task
     lifecycle (next_run_at / completed_runs / end), records audit + a notification, and
     delivers to the task's notify connectors. Returns the TaskRun id."""
-    from app.automations.schedule import compute_next_run
     from app.automations.targets import get_target
 
     async with SessionLocal() as db:
-        task = await db.get(ScheduledTask, task_id)
+        task = await _load_task(db, task_id, lease_owner, lease_token)
         if task is None:
-            raise ValueError("Task not found")
+            raise ValueError("Task not found or scheduled lease is no longer current")
         run = TaskRun(
             task_id=task.id,
             task_name=task.name,
@@ -321,12 +402,17 @@ async def run_target_task(task_id: str, trigger: str = "schedule") -> str:
     target = get_target(target_type)
     # Re-fetch a live ORM row for the executor (targets read task.target_config etc.).
     async with SessionLocal() as db:
-        task = await db.get(ScheduledTask, task_id)
+        task = await _load_task(db, task_id, lease_owner, lease_token)
+        if task is None:
+            raise RuntimeError("Scheduled lease expired before target execution")
         result = await target.execute(task)
     duration_ms = int((_time.perf_counter() - started) * 1000)
     error = result.error if result.status == "failed" else None
 
     async with SessionLocal() as db:
+        task = await _load_task(db, task_id, lease_owner, lease_token, lock=True)
+        if lease_owner is not None and task is None:
+            return run_id
         run = await db.get(TaskRun, run_id)
         if run is not None:
             run.status = result.status
@@ -336,14 +422,10 @@ async def run_target_task(task_id: str, trigger: str = "schedule") -> str:
             run.thread_id = result.thread_id
             run.ended_at = _now()
             run.duration_ms = duration_ms
-        task = await db.get(ScheduledTask, task_id)
         if task is not None:
-            task.completed_runs = (task.completed_runs or 0) + 1
-            reached_limit = task.max_runs is not None and task.completed_runs >= task.max_runs
-            nxt = None if reached_limit else compute_next_run(_task_to_dict(task))
-            task.next_run_at = nxt
-            if nxt is None and task.status == "on":
-                task.status = "ended"
+            _complete_task_schedule(
+                task, lease_owner=lease_owner, lease_token=lease_token
+            )
         db.add(
             AuditLog(
                 tenant_id=task_tenant or "",
@@ -364,8 +446,8 @@ async def run_target_task(task_id: str, trigger: str = "schedule") -> str:
             await deliver_task_result(
                 notify_ids, f"Scheduled {target_type}: {task_name}", summary[:3000], bool(error)
             )
-        except Exception as exc:  # noqa: BLE001
-            logger.warning("Task %s notify dispatch failed: %s", task_id, exc)
+        except Exception:  # noqa: BLE001
+            logger.warning("Scheduled target notification dispatch failed")
 
     try:
         from app.notifications.engine import publish
@@ -381,7 +463,7 @@ async def run_target_task(task_id: str, trigger: str = "schedule") -> str:
             links={"task_id": task_id, **(result.result_ref or {})},
             fingerprint=f"task:{task_id}:{'failed' if error else 'ok'}",
         )
-    except Exception as exc:  # noqa: BLE001
-        logger.warning("Task %s event publish failed: %s", task_id, exc)
+    except Exception:  # noqa: BLE001
+        logger.warning("Scheduled target event publication failed")
     return run_id
 

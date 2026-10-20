@@ -6,11 +6,15 @@ grand_parent: How-to guides
 nav_order: 2
 description: Draw or reverse-engineer diagrams, check drift, manage revisions, generate Memory and Know-Me, and publish reviewed runbooks.
 permalink: /how-to/design-assessment/architectures-know-me/
+feature_ids: [PROACTIVE_NAV:architectures, ROUTE:architectures, PROACTIVE_NAV:knowme, ROUTE:knowme]
 ---
 
 # Build architectures, Memory, and Know-Me
 
 ![Architecture designer]({{ site.baseurl }}/assets/architecture-designer.png)
+
+{: .note }
+**Screenshot note:** The Know-Me views below use synthetic browser-only content in the current native UI. Saved fields are modeled local results, not a published document or real AI output. No AI inference, DNS lookup, SSH probe, or investigation was performed.
 
 ## Prerequisites
 
@@ -71,7 +75,37 @@ Architectures: `/architectures`, `/architectures/{id}`, `/architectures/{id}/mem
 
 **Verification:** Reopen current/history after restore and inspect the downloaded file for scope and sensitive topology.
 
+## How to use preloaded Know-Me field suggestions
+
+1. Open the current Know-Me with write permission. Empty fields without existing useful choices preload in the background, with up to five concurrent requests.
+2. Click a field chip or enter **Guided fill**. Already-loaded options are shared between both interfaces; clicking does not start another AI call for that field.
+3. If the field is still queued/loading, type your own value while its options arrive. Review AI suggestions rather than treating them as agreed customer commitments.
+4. Choose an option or retain your own entry, then **Save**. Preloading alone does not save the document, alter field values or add revisions.
+5. Use **Retry suggestions** on a failed field, or continue with manual entry. Navigating away stops queued preload work; historical/read-only views do not start it.
+
+**Expected result:** Suggestions are ready before most fields are opened, without blocking document reading or replacing human inputs.
+
+**Verification:** Open several previously unfilled fields and confirm options are reused in both the popover and Guided fill. Provider errors should be explicit, and existing platform choices should remain unchanged.
+
+## How to review a Know-Me Composite SLA
+
+1. Generate Know-Me from Memory or build it from a linked workload with a readable Azure connection.
+2. Open **Resiliency & DR** and inspect the Composite SLA snapshot, completeness and missing inputs. Generation continues even when the solution percentage cannot be calculated.
+3. Define a critical user journey and its success boundary. Classify required components, genuine alternative paths and explicitly excluded supporting resources.
+4. Review service eligibility against the displayed configuration and source-linked commitment. Resolve unsupported or missing critical inputs; do not exclude them merely to obtain a percentage.
+5. Record assumptions, including whether a fallback satisfies the same success boundary. Acknowledge that independent failures are a modeling assumption, not a verified property of Azure zones/regions.
+6. Submit the model for server-side calculation. Review the result, evidence and unresolved inputs. Customer contractual SLA and RTO/RPO fields still require human completion.
+7. Export the reviewed document. Use history to inspect or restore the exact prior snapshot; restoring a pre-feature revision does not retain a later calculation.
+8. Refresh after relevant configuration changes. Review the journey again if architecture/scope changed, and heed stale-source notices. The application does not continuously monitor Azure configuration.
+
+**Expected result:** A source-linked modeled availability explanation under the existing Resiliency & DR section, or a precise list of unresolved inputs with no whole-solution percentage.
+
+**Verification:** Compare the expression with a hand-checked topology, confirm that shared dependencies are counted once, and verify that a relevant configuration change changes the matched commitment/result or makes it unresolved. The model is not a contractual SLA, service-credit calculation or observed uptime.
+
 ## How to generate and maintain architecture Memory
+
+{: .note }
+**Current Memory UI:** Memory is a separate source document with section/raw editing, live Markdown preview, and read-only revision preview/diff. Apply raw edits with **Raw → Sections** before saving or exporting. Its PDF-labeled print action prints Markdown text; it is not the Know-Me PDF exporter. A completeness count or saved state does not verify the content.
 
 1. Open **🧠 Memory** from the reviewed diagram.
 2. Select sections/templates and add approved grounding notes.
@@ -99,6 +133,12 @@ Architectures: `/architectures`, `/architectures/{id}`, `/architectures/{id}/mem
 **Expected result:** A human-completed, architecture-grounded support reference is published without replacing reviewed sections unnecessarily.
 
 **Verification:** Required completion passes, field values remain editable, stale-source warning is resolved, and exported content matches the current revision.
+
+{% include screenshot.html file="fdesign-knowme-fill.png" title="Complete a required field with Guided fill" caption="The native Guided fill view contains synthetic rule choices, an assignee, and a review note. Suggest options was not invoked; the example shows human completion rather than an AI-generated answer." %}
+
+{% include screenshot.html file="fdesign-knowme-completed-field.png" title="Review the field after a browser-only save" caption="Save updates only the synthetic browser example, and the completed field remains editable in the support reference. The document is still Draft and unpublished; the filled completion rail is not evidence of approval or durable production persistence." %}
+
+{% include screenshot.html file="fdesign-knowme-section-editor.png" title="Edit a section in the native Markdown editor" caption="The actual Visual/Markdown/Preview editor shows an unsaved synthetic section draft. This is not an AI-generated replacement or a saved section; use Save section deliberately when following the workflow with real reviewed content." %}
 
 ## Safety and rollback
 

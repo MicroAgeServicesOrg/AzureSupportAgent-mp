@@ -117,7 +117,7 @@ export function OwnershipPanel({ tab }: { tab: OwnershipTab }) {
               {/* OU3 — Attestation reads the shared owner directory (connection-independent), so
                   its connection picker was a no-op; hide it there while keeping the scope bar. */}
               {tab !== "attestation" && <ConnectionScopePicker value={connectionId} onChange={onConnectionChange} align="right" />}
-              <OwnershipScopeBar scope={scope} onChange={setScope} connectionId={connectionId} />
+              <OwnershipScopeBar scope={scope} onChange={setScope} connectionId={connectionId} onConnectionChange={onConnectionChange} />
             </div>
           )}
         </div>
@@ -155,7 +155,7 @@ export function OwnershipPanel({ tab }: { tab: OwnershipTab }) {
 
 // Section-wide scope selector (Tenant / Subscription / Workload), consistent with the
 // Proactive Support modules. Tenant = the whole directory (no filter).
-function OwnershipScopeBar({ scope, onChange, connectionId }: { scope: OwnershipScope; onChange: (s: OwnershipScope) => void; connectionId: string }) {
+function OwnershipScopeBar({ scope, onChange, connectionId, onConnectionChange }: { scope: OwnershipScope; onChange: (s: OwnershipScope) => void; connectionId: string; onConnectionChange: (id: string) => void }) {
   const workloadsQ = useQuery({ queryKey: ["workloads", "list"], queryFn: api.workloads });
   const workloads = workloadsQ.data?.workloads ?? [];
   return (
@@ -167,7 +167,7 @@ function OwnershipScopeBar({ scope, onChange, connectionId }: { scope: Ownership
             key={k}
             onClick={() => onChange({ ...scope, kind: k })}
             className={`flex items-center gap-1 rounded-md px-2.5 py-1 capitalize ${
-              scope.kind === k ? "bg-white font-medium text-gray-900 shadow-sm" : "text-gray-500"
+              scope.kind === k ? "bg-white font-medium text-gray-900 shadow-xs" : "text-gray-500"
             }`}
           >
             <AzureIcon kind={k === "tenant" ? "tenant" : k === "subscription" ? "subscription" : "workload"} className="h-3.5 w-3.5" />
@@ -182,7 +182,12 @@ function OwnershipScopeBar({ scope, onChange, connectionId }: { scope: Ownership
           </span>
           <select
             value={scope.workloadId}
-            onChange={(e) => onChange({ ...scope, workloadId: e.target.value })}
+            onChange={(e) => {
+              const workloadId = e.target.value;
+              const workloadConnectionId = workloads.find((workload) => workload.id === workloadId)?.connection_id;
+              if (workloadConnectionId && workloadConnectionId !== connectionId) onConnectionChange(workloadConnectionId);
+              onChange({ ...scope, workloadId });
+            }}
             className="max-w-[220px] rounded-lg border py-1.5 pl-7 pr-2 text-xs"
           >
             <option value="">All workloads…</option>
@@ -259,7 +264,7 @@ function DirectoryTab() {
   }, [owners, dOq, kindFilter, sortBy]);
 
   return (
-    <div className="mx-auto max-w-5xl">
+    <div className="w-full max-w-none">
       <div className="mb-4 flex flex-wrap items-center justify-between gap-2">
         <div className="flex flex-wrap items-center gap-2">
           <InlineSearch q={oq} setQ={setOq} shown={shownOwners.length} total={owners.length} placeholder="Search owners…" width="w-52" />
@@ -377,7 +382,7 @@ function DirectoryTab() {
 function OwnerCard({ owner, onEdit, onDelete }: { owner: Owner; onEdit: () => void; onDelete: () => void }) {
   const linked = owner.source !== "manual";
   return (
-    <div className="rounded-xl border bg-white p-4 shadow-sm">
+    <div className="rounded-xl border bg-white p-4 shadow-xs">
       <div className="flex items-start justify-between">
         <div className="min-w-0">
           <div className="flex items-center gap-2">
@@ -390,11 +395,11 @@ function OwnerCard({ owner, onEdit, onDelete }: { owner: Owner; onEdit: () => vo
       </div>
       <div className="mt-3 flex flex-wrap items-center gap-1.5 text-[11px]">
         {linked && (
-          <span className="rounded bg-emerald-50 px-1.5 py-0.5 text-emerald-700" title="Linked to a directory identity">
+          <span className="rounded-sm bg-emerald-50 px-1.5 py-0.5 text-emerald-700" title="Linked to a directory identity">
             🔗 {owner.source === "app_user" ? "SSO user" : owner.source === "entra" ? "Entra" : owner.source === "oidc_group" ? "OIDC group" : "RBAC"}
           </span>
         )}
-        <span className="rounded bg-indigo-50 px-1.5 py-0.5 text-indigo-700">{owner.assignment_count ?? 0} assigned</span>
+        <span className="rounded-sm bg-indigo-50 px-1.5 py-0.5 text-indigo-700">{owner.assignment_count ?? 0} assigned</span>
       </div>
       <div className="mt-3 flex justify-end gap-3 text-xs">
         <button onClick={onEdit} className="text-gray-600 hover:underline">Edit</button>
@@ -535,7 +540,7 @@ function PeoplePicker({ onPicked }: { onPicked: () => void }) {
         className="w-full rounded-lg border px-3 py-2 text-sm"
       />
       {notes.entra && (
-        <p className="mt-2 rounded bg-amber-50 px-2 py-1 text-xs text-amber-700">
+        <p className="mt-2 rounded-sm bg-amber-50 px-2 py-1 text-xs text-amber-700">
           Live Entra search unavailable: {notes.entra}. SSO users + manual entry still work.
         </p>
       )}
@@ -556,7 +561,7 @@ function PeoplePicker({ onPicked }: { onPicked: () => void }) {
                   <div className="truncate text-xs text-gray-500">{h.email}</div>
                 </div>
                 <div className="flex items-center gap-2">
-                  <span className="rounded bg-gray-100 px-1.5 py-0.5 text-[10px] uppercase text-gray-500">{h.source === "app_user" ? "SSO" : h.source}</span>
+                  <span className="rounded-sm bg-gray-100 px-1.5 py-0.5 text-[10px] uppercase text-gray-500">{h.source === "app_user" ? "SSO" : h.source}</span>
                   <button onClick={() => pick.mutate(h)} disabled={pick.isPending} className="rounded-lg bg-indigo-600 px-2.5 py-1 text-xs font-medium text-white hover:bg-indigo-700 disabled:opacity-50">
                     Add
                   </button>
@@ -582,7 +587,7 @@ function AssignmentsTab({ scope, connectionId }: { scope: OwnershipScope; connec
   const total = subjectsQ.data?.total ?? 0;
 
   return (
-    <div className="mx-auto max-w-5xl">
+    <div className="w-full max-w-none">
       <div className="mb-4 grid grid-cols-3 gap-3">
         <Stat label="Ownable subjects" value={total} />
         <Stat label="Owned" value={owned} tone="emerald" />
@@ -603,10 +608,10 @@ function AssignmentsTab({ scope, connectionId }: { scope: OwnershipScope; connec
                   </div>
                   <div className="mt-0.5 flex items-center gap-2 text-xs">
                     {s.unowned ? (
-                      <span className="rounded bg-rose-100 px-1.5 py-0.5 text-rose-700">Unowned</span>
+                      <span className="rounded-sm bg-rose-100 px-1.5 py-0.5 text-rose-700">Unowned</span>
                     ) : (
                       <>
-                        <span className={`rounded px-1.5 py-0.5 ${SOURCE_BADGE[s.source]?.cls ?? "bg-gray-100 text-gray-600"}`}>{SOURCE_BADGE[s.source]?.label ?? s.source}</span>
+                        <span className={`rounded-sm px-1.5 py-0.5 ${SOURCE_BADGE[s.source]?.cls ?? "bg-gray-100 text-gray-600"}`}>{SOURCE_BADGE[s.source]?.label ?? s.source}</span>
                         <span className="text-gray-600">
                           {s.owners.map((o) => o.display_name).filter(Boolean).join(", ")}
                         </span>
@@ -828,7 +833,7 @@ function CoverageTab({ scope, onScopeChange, connectionId }: { scope: OwnershipS
   const showData = data && !data.never_loaded;
 
   return (
-    <div className="mx-auto max-w-5xl">
+    <div className="w-full max-w-none">
       <div className="mb-4 flex flex-wrap items-center justify-between gap-3 rounded-xl border bg-white px-4 py-3">
         <div className="text-sm text-gray-600">
           {scope.kind === "tenant"
@@ -857,7 +862,7 @@ function CoverageTab({ scope, onScopeChange, connectionId }: { scope: OwnershipS
       {showData && !data!.error && data!.generated_at && (Date.now() - new Date(data!.generated_at).getTime()) > 24 * 3600 * 1000 && (
         <div className="mb-3 flex items-center gap-2 rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-700">
           This coverage snapshot is {Math.floor((Date.now() - new Date(data!.generated_at).getTime()) / (24 * 3600 * 1000))}d old — ownership may have changed.
-          <button onClick={refresh} disabled={busy} className="rounded border border-amber-300 px-1.5 py-0.5 font-medium hover:bg-amber-100 disabled:opacity-50">Rescan</button>
+          <button onClick={refresh} disabled={busy} className="rounded-sm border border-amber-300 px-1.5 py-0.5 font-medium hover:bg-amber-100 disabled:opacity-50">Rescan</button>
         </div>
       )}
 
@@ -875,7 +880,7 @@ function CoverageTab({ scope, onScopeChange, connectionId }: { scope: OwnershipS
         <div className="rounded-xl border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-700">{data!.error}</div>
       ) : (
         <div className="space-y-4">
-          <div className="grid gap-4 lg:grid-cols-[auto,1fr]">
+          <div className="grid gap-4 lg:grid-cols-[auto_1fr]">
             <div className="flex items-center gap-4 rounded-xl border bg-white p-4">
               <Donut pct={data!.coverage_pct} />
               <div>
@@ -938,7 +943,7 @@ function CoverageTab({ scope, onScopeChange, connectionId }: { scope: OwnershipS
                   {data!.by_owner.slice(0, 12).map((b) => (
                     <li key={b.owner_id || b.label} className="flex items-center justify-between py-1.5">
                       <span className="truncate">{b.label}</span>
-                      <span className="rounded bg-indigo-50 px-1.5 py-0.5 text-xs text-indigo-700">{b.count}</span>
+                      <span className="rounded-sm bg-indigo-50 px-1.5 py-0.5 text-xs text-indigo-700">{b.count}</span>
                     </li>
                   ))}
                 </ul>
@@ -989,7 +994,7 @@ function EstateTab() {
   const browse = ownerQ.data?.estates ?? [];
 
   return (
-    <div className="mx-auto max-w-4xl space-y-6">
+    <div className="w-full max-w-none space-y-6">
       <div>
         <h2 className="mb-1 text-sm font-semibold text-gray-700">My estate</h2>
         <p className="mb-3 text-xs text-gray-500">
@@ -1028,16 +1033,16 @@ function EstateCard({ estate }: { estate: OwnerEstate }) {
             <div className="font-medium text-gray-900">{o.display_name}</div>
             {o.email && <div className="text-xs text-gray-500">{o.email}</div>}
           </div>
-          {estate.linked && <span className="rounded bg-emerald-50 px-1.5 py-0.5 text-[11px] text-emerald-700">🔗 linked</span>}
+          {estate.linked && <span className="rounded-sm bg-emerald-50 px-1.5 py-0.5 text-[11px] text-emerald-700">🔗 linked</span>}
         </div>
         <span className="rounded-full bg-indigo-50 px-2.5 py-1 text-sm font-semibold text-indigo-700">{estate.total}</span>
       </div>
       <div className="mt-3 flex flex-wrap gap-1.5 text-[11px]">
         {Object.entries(estate.by_kind).map(([k, n]) => (
-          <span key={k} className="rounded bg-gray-100 px-1.5 py-0.5 text-gray-600">{SUBJECT_ICON[k] ?? "•"} {k}: {n}</span>
+          <span key={k} className="rounded-sm bg-gray-100 px-1.5 py-0.5 text-gray-600">{SUBJECT_ICON[k] ?? "•"} {k}: {n}</span>
         ))}
         {Object.entries(estate.by_role).map(([r, n]) => (
-          <span key={r} className="rounded bg-sky-50 px-1.5 py-0.5 text-sky-700">{ROLE_LABELS[r] ?? r}: {n}</span>
+          <span key={r} className="rounded-sm bg-sky-50 px-1.5 py-0.5 text-sky-700">{ROLE_LABELS[r] ?? r}: {n}</span>
         ))}
       </div>
       {estate.assignments.length > 0 && (
@@ -1075,7 +1080,7 @@ function SuggestionsTab({ scope, connectionId }: { scope: OwnershipScope; connec
   const items = (suggQ.data?.suggestions ?? []).filter((s) => !dismissed.has(s.id));
 
   return (
-    <div className="mx-auto max-w-3xl">
+    <div className="w-full max-w-none">
       {suggQ.data?.note && (
         <div className="mb-3 rounded-lg border border-sky-200 bg-sky-50 px-3 py-2 text-sm text-sky-700">{suggQ.data.note}</div>
       )}
@@ -1145,7 +1150,7 @@ function AttestationTab({ scope }: { scope: OwnershipScope }) {
   const leavers = leaverQ.data?.at_risk ?? [];
 
   return (
-    <div className="mx-auto max-w-4xl space-y-6">
+    <div className="w-full max-w-none space-y-6">
       {leavers.length > 0 && (
         <div className="rounded-xl border border-rose-200 bg-rose-50 p-4">
           <div className="mb-2 text-sm font-semibold text-rose-700">⚠️ {leavers.length} owner(s) at risk (joiner-mover-leaver)</div>

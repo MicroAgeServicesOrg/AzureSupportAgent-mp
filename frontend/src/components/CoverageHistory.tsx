@@ -142,6 +142,7 @@ export function CoverageHistory<T>({
       loading={runsQ.isLoading}
       emptyHint={<>No saved scans yet — click <b>↻ Refresh now</b> to record one.</>}
       testId="coverage-history"
+      storageKey={`azsup.history.coverage.${feature}`}
       showTrash={showTrash}
       onToggleTrash={() => setShowTrash((v) => !v)}
       trashedCount={trashed.length}
@@ -157,8 +158,8 @@ export function CoverageHistory<T>({
         {
           header: "Actions", align: "right", render: (r) => (
             <>
-              <button onClick={() => view(r.id)} disabled={busy === `view:${r.id}`} className="rounded border px-2 py-0.5 text-[11px] hover:bg-gray-50 disabled:opacity-50">View</button>
-              <button onClick={() => del(r.id)} disabled={busy === `del:${r.id}`} className="ml-1 rounded border border-red-200 px-2 py-0.5 text-[11px] text-red-600 hover:bg-red-50 disabled:opacity-50">Delete</button>
+              <button onClick={() => view(r.id)} disabled={busy === `view:${r.id}`} className="rounded-sm border px-2 py-0.5 text-[11px] hover:bg-gray-50 disabled:opacity-50">View</button>
+              <button onClick={() => del(r.id)} disabled={busy === `del:${r.id}`} className="ml-1 rounded-sm border border-red-200 px-2 py-0.5 text-[11px] text-red-600 hover:bg-red-50 disabled:opacity-50">Delete</button>
             </>
           ),
         },
@@ -170,8 +171,8 @@ export function CoverageHistory<T>({
         {
           header: "Actions", align: "right", render: (r) => (
             <>
-              <button onClick={() => void restore(r.id)} disabled={busy === `restore:${r.id}`} className="rounded border border-brand/40 bg-brand/5 px-2 py-0.5 text-[11px] font-medium text-brand hover:bg-brand/10 disabled:opacity-50">↩ Restore</button>
-              <button onClick={() => void purge(r.id)} disabled={busy === `purge:${r.id}`} className="ml-1 rounded border border-red-200 px-2 py-0.5 text-[11px] text-red-600 hover:bg-red-50 disabled:opacity-50">Delete forever</button>
+              <button onClick={() => void restore(r.id)} disabled={busy === `restore:${r.id}`} className="rounded-sm border border-brand/40 bg-brand/5 px-2 py-0.5 text-[11px] font-medium text-brand hover:bg-brand/10 disabled:opacity-50">↩ Restore</button>
+              <button onClick={() => void purge(r.id)} disabled={busy === `purge:${r.id}`} className="ml-1 rounded-sm border border-red-200 px-2 py-0.5 text-[11px] text-red-600 hover:bg-red-50 disabled:opacity-50">Delete forever</button>
             </>
           ),
         },

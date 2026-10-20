@@ -3,7 +3,7 @@ and access review campaigns.
 
 The tests that matter here are the ones about what the product REFUSES to do: auto-approving an
 expired campaign, guessing an actor, emitting a revoke with no rollback, or showing a control as
-passing when nothing measured it. Each of those is a plausible, convenient behaviour that would
+passing when nothing measured it. Each of those is a plausible, convenient behavior that would
 make the feature look better and the evidence worthless.
 """
 from __future__ import annotations
@@ -224,7 +224,7 @@ def _event(**kw):
 
 def test_the_activity_log_window_is_clamped_to_real_retention_and_the_clamp_is_reported():
     """`directoryAudits` REJECTS an over-long filter with a 400 rather than returning less — the
-    whole source is lost if the query is not clamped. Assume the same class of behaviour."""
+    whole source is lost if the query is not clamped. Assume the same class of behavior."""
     _s, _e, note = attribution.clamp_window(365)
     assert note and "90" in note
     _s, _e, quiet = attribution.clamp_window(7)
@@ -326,9 +326,42 @@ def test_every_generated_action_carries_a_rollback():
 def test_the_bundle_contains_a_rollback_section_for_every_action():
     actions = [remediation.revoke_assignment(_row(assignmentId=f"a{i}", effectivePrincipalId=f"p{i}"), "az") for i in range(3)]
     bundle = remediation.build_bundle(actions, "az", title="t")
-    assert bundle["script"].count("ROLLBACK") == 1
+    assert "===== ROLLBACK =====" in bundle["script"]
     for a in actions:
         assert a["rollback"] in bundle["script"]
+
+
+def test_the_revoke_and_undo_halves_are_offered_separately():
+    """They are run at different times by different people. A single blob means whoever reaches
+    for the rollback has to select the right half of it by hand, under pressure."""
+    actions = [remediation.revoke_assignment(_row(assignmentId=f"a{i}", effectivePrincipalId=f"p{i}"), "az") for i in range(3)]
+    b = remediation.build_bundle(actions, "az", title="t")
+
+    # Each half stands alone: no revoke command leaks into the undo, and vice versa.
+    for a in actions:
+        assert a["command"] in b["revoke_script"]
+        assert a["command"] not in b["rollback_script"]
+        assert a["rollback"] in b["rollback_script"]
+        assert a["rollback"] not in b["revoke_script"]
+
+    # Both carry the provenance and the warning, because either can be copied on its own.
+    for half in (b["revoke_script"], b["rollback_script"]):
+        assert remediation.GENERATOR_VERSION in half
+        assert "NOT RUN BY THE PRODUCT" in half
+    # …and the combined document still exists for anything that stored one script.
+    assert b["revoke_script"] in b["script"] and b["rollback_script"] in b["script"]
+
+
+def test_the_undo_runs_in_the_reverse_order_of_the_revoke():
+    """The revoke removes group membership first. Restoring it first would briefly hand back
+    more than the person started with."""
+    direct = remediation.revoke_assignment(_row(accessPath=schema.PATH_DIRECT, effectivePrincipalId="p-d"), "az")
+    via = remediation.revoke_assignment(
+        _row(accessPath=schema.PATH_GROUP, sourceGroupId="g-1", effectivePrincipalId="p-g"), "az"
+    )
+    b = remediation.build_bundle([direct, via], "az", title="t")
+    assert b["revoke_script"].index(via["command"]) < b["revoke_script"].index(direct["command"])
+    assert b["rollback_script"].index(direct["rollback"]) < b["rollback_script"].index(via["rollback"])
 
 
 def test_a_reduce_grants_the_narrower_role_before_revoking_the_wider_one():
@@ -347,7 +380,10 @@ def test_group_derived_access_is_ordered_before_direct_assignments():
     via_group = remediation.revoke_assignment(_row(accessPath=schema.PATH_GROUP), "az")
     assert via_group["order_hint"] < direct["order_hint"]
     bundle = remediation.build_bundle([direct, via_group], "az")
-    assert bundle["actions"][0] is via_group
+    # Compared by plane rather than identity: the bundle folds duplicate memberships and hands
+    # back a copy carrying the list of grants the single step covers.
+    assert bundle["actions"][0]["plane"] == remediation.PLANE_GROUP_MEMBERSHIP
+    assert bundle["actions"][1]["plane"] == remediation.PLANE_AZURE_RBAC
 
 
 def test_broader_scopes_are_ordered_before_narrower_ones():

@@ -5,13 +5,44 @@ parent: Getting Started
 nav_order: 3
 description: Build and deploy the single-container application with explicit control over Azure resources and configuration.
 permalink: /getting-started/manual-deployment/
+redirect_from:
+  - /DEPLOYMENT/
 ---
 
 # Manual deployment
 
-Use manual deployment when you need to control the image build, registry, Container Apps sizing, storage, networking, or release process. The product ships as one image: FastAPI serves both `/api` and the built SPA, while MCP servers run in-process.
+Use manual deployment when you need to control the image build, registry, Container Apps sizing, storage, networking, or release process. The product ships as one image: FastAPI serves both `/api` and the built SPA, while MCP servers run in-process. No separate frontend, database, or Redis container is required.
 
-The supported command sequence, production variables, and platform notes are maintained in the [Manual Deployment Guide]({{ site.baseurl }}/DEPLOYMENT/). Follow that guide rather than copying commands from third-party posts.
+Prefer a guided path? Use [one-click installation]({{ site.baseurl }}/getting-started/one-click-install/).
+
+## How it fits in one container
+
+- **SPA** — built by the repository's multi-stage Dockerfile (`VITE_API_BASE=/api`) and copied into `app/static`. FastAPI serves `/assets/*` and falls back to `index.html` for any non-`/api` path, so deep links and refresh work.
+- **Database** — PostgreSQL for a shared deployment, or SQLite (`DATABASE_URL=sqlite+aiosqlite:///./.data/app.db`) with `./.data` on an Azure Files volume so it survives revisions.
+- **Redis** — not on the request path; omit it.
+- **MCP servers** — spawned in-process over stdio. The production image runs its pinned, build-time Azure MCP installation through `azmcp`; the EntraID FastMCP server uses its isolated image virtual environment. The image includes Node 22 and Azure CLI.
+- **Azure Resource Graph extension** — production bakes `resource-graph` into `/opt/az-extensions` and sets `AZURE_EXTENSION_DIR` to that stable path, so temporary service-principal CLI sessions do not download an extension into each throwaway `AZURE_CONFIG_DIR`.
+- **Dependencies** — pinned in the backend requirements file and installed before `pip install --no-deps .` so every runtime import resolves.
+
+## API prefix
+
+Every backend endpoint is served under `/api` (for example `/api/me`, `/api/chats`, `/api/admin/...`). Only `/healthz` and `/readyz` live at the root. The frontend reads its base from `VITE_API_BASE`, defaulting to `http://localhost:35001/api` for local development. This keeps API routes from colliding with the SPA's client-side routes such as `/inventory`, `/admin`, and `/policy`.
+
+## Azure access modes
+
+| Mode | How |
+| --- | --- |
+| Your `az login` (default, local) | `~/.azure` is mounted into the backend and your own RBAC applies |
+| Service principal | set `AZURE_TENANT_ID`, `AZURE_CLIENT_ID`, and `AZURE_CLIENT_SECRET` |
+| Managed identity (Container Apps) | assign an identity to the Container App; no secret is needed |
+
+The Azure MCP server starts with `--read-only` (`MCP_READ_ONLY=true`). Write-capable tools are classified, approval-gated, and audited.
+
+### Match runtime identity to the application connection
+
+After deployment, configure the corresponding connection under **Settings → Azure Tenants**. The **Host identity** option covers a managed identity in Azure or the host credential chain in a suitable local environment; the form itself does not provision either identity.
+
+{% include screenshot.html file="admin-tenant-host-identity.png" title="Manual deployment handoff — configure the host-identity connection" caption="The unsaved synthetic form shows where the deployed host identity is selected and read-only policy is retained. Assign and verify Azure RBAC separately. No container build, revision rollout, health probe, connection save, or Azure authentication was performed for this image." %}
 
 ## Prerequisites
 
@@ -24,27 +55,76 @@ The supported command sequence, production variables, and platform notes are mai
 
 1. **Choose persistence.** Use PostgreSQL for a shared production database, or place SQLite's `.data` directory on Azure Files. Never rely on an ephemeral container filesystem.
 2. **Choose the identity.** Prefer a Container App managed identity. If using a service principal, store its secret or certificate as a Container App secret.
-3. **Build and tag the image.** Build from the repository root so the frontend and backend are included. Prefer an immutable release tag over relying only on `latest`.
+3. **Build, scan, and publish the image.** Build from the repository root so the frontend and backend are included, scan it before publication, and update the registry's `latest` tag.
 4. **Create the Container Apps environment and application.** Expose port 8000 through HTTPS ingress.
 5. **Set production configuration.** Important settings include the database URL, secure-cookie behavior, bootstrap administrator values, public URL, connection identity, and optional model configuration.
 6. **Attach persistent storage** before allowing production traffic when SQLite is selected.
-7. **Verify health.** Check `/healthz` for liveness and `/readyz` for readiness, then load the SPA through the public URL.
+7. **Verify health.** Check `/healthz` for process-only liveness and `/readyz` for a bounded database plus recent event-loop readiness check, then load the SPA through the public URL.
 8. **Grant Reader** to the application identity at the intended Azure scope.
 9. Complete [First-run setup]({{ site.baseurl }}/getting-started/first-run/).
+
+## Key production environment variables
+
+| Variable | Purpose |
+| --- | --- |
+| `SEED_ADMIN_USERNAME` / `SEED_ADMIN_PASSWORD` | Bootstrap administrator created on first run. Store the password as a Container App **secret**; the user is forced to change it at first sign-in. |
+| `DATABASE_URL` | `sqlite+aiosqlite:///./.data/app.db` on Azure Files, or a PostgreSQL URL (`?ssl=require` for Azure Database for PostgreSQL). |
+| `COOKIE_SECURE` | `true` behind HTTPS ingress. |
+| `AZURE_TENANT_ID` / `AZURE_CLIENT_ID` / `AZURE_CLIENT_SECRET` | Service-principal identity for MCP, or use a managed identity. There is no `~/.azure` mount in Container Apps. |
+| `AZURE_EXTENSION_DIR` | Stable Azure CLI extension location. The production image and Bicep deployment use `/opt/az-extensions`, which already contains `resource-graph`. |
+| `LLM_API_KEY` | Optional. A model provider key can be configured in Settings instead. |
+
+Keep every secret in a Container App secret or an approved secret store. Never bake one into the image or a template parameter file.
+
+## Deploy the supplied template
+
+The production preset keeps secrets out of source control by reading them from the process environment. It enables more expensive resilience controls deliberately; inspect and adjust it before deployment.
+
+```pwsh
+$env:AZSUP_ADMIN_PASSWORD = '<strong-temporary-bootstrap-password>'
+$env:AZSUP_POSTGRES_PASSWORD = '<strong-database-password>'
+$env:AZSUP_ALERT_EMAIL = '<optional-operations-email>'
+
+az deployment group create -g <resource-group> `
+  --template-file deploy/main.bicep `
+  --parameters deploy/production.bicepparam
+```
+
+Use the default template instead for the lower-cost 1-2 replica/Burstable/LRS profile. Keep `containerImage` on `registry/repository:latest`. The template's timestamp-backed `containerRevisionSuffix` creates a fresh revision on every deployment so Azure pulls the current image.
+
+### Production knobs
+
+- PostgreSQL: tier/SKU, 32-32,767 GiB storage, autogrow, 7-35 day retention, geo-backup, HA mode/zones, and custom maintenance window.
+- Container Apps: environment zone redundancy, CPU/memory, minimum/maximum replicas, HTTP concurrency, and startup/liveness/readiness probes.
+- Storage: redundancy, Azure Files quota, and share soft-delete retention.
+- Operations: shared tags, Log Analytics retention, data-service diagnostics, optional metric/log alerts and email receiver, and optional `CanNotDelete` locks.
+- Secrets and supply chain: pre-publication image scanning, a mutable `latest` application tag, system-assigned runtime identity, optional existing user-assigned identity for ACR/Key Vault, and optional Key Vault URIs for database/admin/encryption secrets.
+
+`appMaxReplicas` must be at least `appMinReplicas`. PostgreSQL HA requires a supported General Purpose or Memory Optimized SKU. A private ACR configuration requires an existing user-assigned identity with AcrPull before the initial deployment. Scheduled-query alerts should be enabled on a later deployment, after the Container Apps log tables have received data; platform metric alerts can be enabled initially.
+
+When publishing a new image, scan it first and then move `latest` to that reviewed build. Re-running the supplied template uses a new revision suffix automatically; a direct `az containerapp update` must likewise provide a unique suffix. See [upgrades and uninstall]({{ site.baseurl }}/getting-started/upgrades-uninstall/).
+
+## Cost and scaling
+
+- Lowest-cost posture: Basic ACR plus a Consumption Container App with `--min-replicas 0` (no compute charge while idle) at 0.5 vCPU / 1 GiB. The first request after idle pays a cold start, but the Azure MCP package and Resource Graph extension are already in the image and are not fetched at runtime.
+- Use a **single replica** with SQLite. PostgreSQL plus the current shared leases/state supports multiple replicas; the template defaults to 1-2 for bounded cost and the production preset uses 2-4 for replica resilience.
 
 ## Production guardrails
 
 - Set `COOKIE_SECURE=true` behind HTTPS.
 - Keep the bootstrap password in a platform secret and change it at first sign-in.
 - Protect database credentials and the application's secrets-encryption key.
-- Use one replica when depending on SQLite or in-memory coordination. A shared database alone does not make every in-memory workflow horizontally scalable.
+- Keep one uvicorn worker per replica. Database leases coordinate process-owned schedulers and durable jobs across replicas; extra workers inside one replica only create hidden pools and schedulers.
 - Keep Azure MCP read-only unless a reviewed workflow requires writes; product write paths remain permission- and approval-gated.
+- Keep the root image's `AZURE_EXTENSION_DIR=/opt/az-extensions` setting. The image bakes the `resource-graph` Azure CLI extension there so temporary service-principal sessions do not install it dynamically.
 - Restrict ingress and outbound traffic deliberately if private networking is required.
+- The Azure Files mount uses the Container Apps account-key contract; managed identity does not replace that key. Private mode disables storage public access and uses a private endpoint.
+- Defender for Cloud plans are subscription-level and can add cost. Review them separately; the resource-group template intentionally does not change subscription security plans.
 
 ## Validate the result
 
-- The Container App revision is healthy and serving the expected immutable image.
-- `/healthz` and `/readyz` succeed.
+- The Container App revision is healthy, serving the expected `latest` build, and reports the expected build identity from `/version`.
+- `/healthz` succeeds without touching dependencies; `/readyz` succeeds only when the bounded database probe and recent event-loop criterion are healthy.
 - Refreshing a client-side route such as `/workloads` returns the SPA, not a 404.
 - Database data survives a revision restart.
 - The managed identity or service principal can list only the intended Azure scopes.
@@ -59,10 +139,20 @@ The supported command sequence, production variables, and platform notes are mai
 | Data disappears after a revision | Azure Files mount or PostgreSQL connection; SQLite must not live only in the image filesystem |
 | Deep links return 404 | Requests must reach FastAPI's SPA fallback, not a static host without rewrite rules |
 | Azure tools cannot authenticate | Managed-identity assignment or service-principal variables and RBAC scope |
-| First request is slow | Scale-to-zero cold start and initial MCP process/package startup |
+| `az graph` is missing intermittently | Confirm the current image contains `/opt/az-extensions` and the revision sets `AZURE_EXTENSION_DIR` to it; rebuild rather than dynamically installing into each temporary CLI profile |
+| First request is slow | Scale-to-zero cold start and initial MCP process startup; production packages are already image-baked |
+
+### Build-time gotchas
+
+- `az acr build`'s log streamer can crash locally on Windows with `UnicodeEncodeError: '\u2713'` (colorama on cp1252). The build still runs server-side; poll `az acr task list-runs -r <acr> --top 1 -o table`, or stream logs to a UTF-8 console without piping or redirecting.
+- `az containerapp up --source .` can fail with `'NoneType' object has no attribute 'linux'`. Use the explicit `acr create` → `acr build` → `containerapp create` sequence above instead.
+- The Dockerfile copies `backend/` before `pip install` because `setuptools packages=["app"]` validates the package directory at build time.
+- The container imports the whole API at startup, so a missing dependency crashes uvicorn immediately. Keep `backend/requirements.txt` complete.
+- If `az graph` is reported missing in a service-principal session, verify the revision was built from the root Dockerfile and still sets `AZURE_EXTENSION_DIR=/opt/az-extensions`. Rebuild the image rather than working around it with repeated dynamic installs into temporary config directories.
 
 ## Related pages
 
-- [Canonical manual deployment guide]({{ site.baseurl }}/DEPLOYMENT/)
 - [Overview and prerequisites]({{ site.baseurl }}/getting-started/overview/)
+- [One-click installation]({{ site.baseurl }}/getting-started/one-click-install/)
 - [Upgrades and uninstall]({{ site.baseurl }}/getting-started/upgrades-uninstall/)
+- [Architecture]({{ site.baseurl }}/technical/architecture/)

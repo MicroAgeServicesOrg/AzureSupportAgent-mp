@@ -12,13 +12,13 @@ from app.changeexplorer import identity, insights as insights_mod
 
 # --------------------------------------------------------------------------- classify_actor
 def test_classify_user_by_upn():
-    kind, platform = identity.classify_actor("P-Zeeshan.Mustafa@contoso.com", {"idtyp": "user"})
+    kind, platform = identity.classify_actor("P-Alex.Morgan@contoso.com", {"idtyp": "user"})
     assert kind == "User"
     assert platform is False
 
 
 def test_classify_user_by_idtyp_without_at():
-    kind, _ = identity.classify_actor("Zeeshan Mustafa", {"idtyp": "user"})
+    kind, _ = identity.classify_actor("Alex Morgan", {"idtyp": "user"})
     assert kind == "User"
 
 
@@ -57,7 +57,7 @@ def test_classify_platform_known_appid():
 
 def test_is_guid():
     assert identity.is_guid("e1dd8f92-9741-4a3c-83de-edcc6dc0977a")
-    assert not identity.is_guid("P-Zeeshan.Mustafa@contoso.com")
+    assert not identity.is_guid("P-Alex.Morgan@contoso.com")
     assert not identity.is_guid("")
 
 
@@ -127,6 +127,7 @@ async def test_resolve_display_names_no_token_fails_open(monkeypatch):
         return None, "no graph token"
 
     monkeypatch.setattr("app.azure.credentials.get_graph_token", _no_token)
+    monkeypatch.setattr("app.entra.graphclient.get_graph_token", _no_token)
     identity._CACHE.clear()
     out, note = await identity.resolve_display_names(
         ["aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"], [], {"tenant_id": "t1"})
@@ -143,6 +144,10 @@ async def test_resolve_display_names_success(monkeypatch):
 
     class _Resp:
         status_code = 200
+        content = b"json"
+        headers = {}
+        text = ""
+        reason_phrase = "OK"
 
         def json(self):
             return {"value": [{"id": oid, "displayName": "Network RNM",
@@ -158,13 +163,14 @@ async def test_resolve_display_names_success(monkeypatch):
         async def __aexit__(self, *a):
             return False
 
-        async def post(self, *a, **k):
+        async def request(self, *a, **k):
             return _Resp()
 
-        async def get(self, *a, **k):
-            return _Resp()
+        async def aclose(self):
+            pass
 
     monkeypatch.setattr("app.azure.credentials.get_graph_token", _token)
+    monkeypatch.setattr("app.entra.graphclient.get_graph_token", _token)
     monkeypatch.setattr("httpx.AsyncClient", _Client)
     identity._CACHE.clear()
     out, note = await identity.resolve_display_names([oid], [], {"tenant_id": "t2"})

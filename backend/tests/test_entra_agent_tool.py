@@ -4,9 +4,9 @@ The properties worth protecting are the ones that decide whether chat is a legit
 front door or a way around the permission model:
 
 * a tool refuses what its HTTP route would refuse, and says so in a sentence;
-* asking for behavioural history without the permission is ANSWERED, never silently
+* asking for behavioral history without the permission is ANSWERED, never silently
   dropped — an absence a reader takes for "nothing happened" is worse than an error;
-* the raw Graph behavioural tools are withheld from the same caller, or the first-party
+* the raw Graph behavioral tools are withheld from the same caller, or the first-party
   gate is decorative;
 * every call lands in the audit log, marked as chat-originated.
 """
@@ -71,7 +71,7 @@ def test_no_principal_is_denied_rather_than_treated_as_anonymous_admin():
 # --------------------------------------------------------------------------- the activity split
 @pytest.mark.asyncio
 async def test_asking_for_activity_without_the_permission_is_answered_not_dropped(monkeypatch):
-    """A dossier silently missing its behavioural half reads as 'nothing happened'."""
+    """A dossier silently missing its behavioral half reads as 'nothing happened'."""
     monkeypatch.setattr(at, "_snapshot", lambda _t: {"data": {}, "_analysis": {}})
 
     async def _dossier(_snap, _tenant, needle):
@@ -143,7 +143,7 @@ def test_an_admin_can_deliberately_opt_everyone_back_in(monkeypatch):
 
 # --------------------------------------------------------------------------- tool budget
 def test_only_the_two_high_value_tools_are_on_by_default():
-    """The combined catalogue is already trimmed for request size; every tool costs
+    """The combined catalog is already trimmed for request size; every tool costs
     every turn. See app/agent/github_copilot.py."""
     on = {n for n, v in at.TOOL_DEFAULTS.items() if v}
     assert on == {"identity_investigate", "ca_evaluate"}
@@ -211,12 +211,12 @@ async def test_ca_evaluate_refuses_an_ambiguous_principal_by_naming_the_candidat
 
     monkeypatch.setattr(at, "_snapshot", lambda _t: {"data": {}, "_analysis": {}})
     monkeypatch.setattr(sim, "build_principals", lambda *a, **k: [
-        sim.SimPrincipal(id="1", label="Zeeshan Mustafa", kind="user"),
-        sim.SimPrincipal(id="2", label="Zeeshan Mustafa", kind="user"),
+        sim.SimPrincipal(id="1", label="Alex Morgan", kind="user"),
+        sim.SimPrincipal(id="2", label="Alex Morgan", kind="user"),
     ])
 
     handler = at._make_ca_evaluate("t", _P({"investigate.read"}))
-    out = await handler({}, {"principal": "Zeeshan Mustafa"})
+    out = await handler({}, {"principal": "Alex Morgan"})
     assert _refused(out)
     assert "matches 2 principals" in str(out)
     assert "1" in str(out) and "2" in str(out)

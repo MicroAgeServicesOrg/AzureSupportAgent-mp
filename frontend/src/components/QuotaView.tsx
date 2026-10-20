@@ -129,6 +129,9 @@ function UsageBar({ pctValue, risk }: { pctValue: number | null; risk: string })
 }
 
 export function QuotaMonitorPanel() {
+  const [, setParams] = useSearchParams();
+  const p0 = useRef(new URLSearchParams(window.location.search)).current;
+  const [demo, setDemo] = usePersistedState<boolean>("azsup.quota.demo", p0.get("demo") === "1");
   const [connId, setConnId] = usePersistedState<string>("azsup.quota.connId", "");
   const [subId, setSubId] = usePersistedState<string>("azsup.quota.subId", "");
   const [subName, setSubName] = usePersistedState<string>("azsup.quota.subName", "");
@@ -139,8 +142,6 @@ export function QuotaMonitorPanel() {
 
   // QU3 — display filters are seeded FROM the URL so a shared link / refresh restores the view,
   // and reflected back into the URL by an effect below. (Read once at mount.)
-  const [, setParams] = useSearchParams();
-  const p0 = useRef(new URLSearchParams(window.location.search)).current;
   const [fRegion, setFRegion] = useState(p0.get("region") || "all");
   const [fProvider, setFProvider] = useState(p0.get("provider") || "all");
   const [fCategory, setFCategory] = useState(p0.get("category") || "all");
@@ -165,7 +166,7 @@ export function QuotaMonitorPanel() {
   const [toast, setToast] = useState(""); // QU8 — export confirmation
   const [scanMinimized, setScanMinimized] = useState(false); // QP5 — minimise the progress popup
 
-  const scopeKey = `sub:${subId || "none"}`;
+  const scopeKey = demo ? "demo" : `sub:${subId || "none"}`;
 
   // QP5 — scan state lives in a module-level registry so it survives navigation. The component
   // re-renders on any registry change via useQuotaScanVersion().
@@ -180,6 +181,7 @@ export function QuotaMonitorPanel() {
   // QU3 — reflect the active display filters back into the URL (shareable / back-button aware).
   useEffect(() => {
     const next = new URLSearchParams(window.location.search);
+    if (demo) next.set("demo", "1"); else next.delete("demo");
     const setOrDel = (k: string, v: string, def: string) => { if (v && v !== def) next.set(k, v); else next.delete(k); };
     setOrDel("region", fRegion, "all"); setOrDel("provider", fProvider, "all");
     setOrDel("category", fCategory, "all"); setOrDel("risk", fRisk, "all"); setOrDel("kind", fKind, "all");
@@ -189,7 +191,7 @@ export function QuotaMonitorPanel() {
     if (query.trim()) next.set("q", query.trim()); else next.delete("q");
     setParams(next, { replace: true });
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [fRegion, fProvider, fCategory, fRisk, fKind, fFamilyOnly, usageMin, usageMax, query]);
+  }, [demo, fRegion, fProvider, fCategory, fRisk, fKind, fFamilyOnly, usageMin, usageMax, query]);
 
   // Nothing fetches on mount — the operator clicks "Load" to read the latest cached snapshot, or
   // "Run scan" to collect fresh. `loaded` gates the Azure-/server-hitting queries so opening the
@@ -221,16 +223,16 @@ export function QuotaMonitorPanel() {
     queryFn: () => api.quotaRegions(subId, connId),
     // Region list loads once the user opens the region picker or has loaded/scanned this scope —
     // not automatically on page load.
-    enabled: !!subId && (loaded || showRegions),
+    enabled: !demo && !!subId && (loaded || showRegions),
     staleTime: 10 * 60 * 1000,
   });
 
   // Overview only READS the cache (server-side). Gated behind an explicit Load so the page never
   // auto-fetches on mount. A miss returns never_loaded.
   const overviewQ = useQuery<QuotaSnapshot>({
-    queryKey: ["quota", connId, scopeKey],
-    queryFn: () => api.quotaOverview(subId, connId, false),
-    enabled: !!subId && loaded,
+    queryKey: ["quota", demo, connId, scopeKey],
+    queryFn: () => api.quotaOverview(subId, connId, demo),
+    enabled: (demo || !!subId) && loaded,
   });
   const data = overviewQ.data;
   const results = data?.results ?? [];
@@ -242,9 +244,9 @@ export function QuotaMonitorPanel() {
   }, [scopeKey, connId, loaded, data?.generated_at]);
 
   const runsQ = useQuery<{ runs: QuotaRun[] }>({
-    queryKey: ["quotaRuns", subId],
+    queryKey: ["quotaRuns", demo, subId],
     queryFn: () => api.quotaRuns(subId, 20),
-    enabled: !!subId && loaded,
+    enabled: !demo && !!subId && loaded,
     staleTime: 5 * 60 * 1000,
   });
 
@@ -255,17 +257,17 @@ export function QuotaMonitorPanel() {
   }
 
   // QP5 — kick the scan off in the module-level registry so it survives navigation. The popup is
-  // just a live view of that registry; closing/minimising it doesn't stop the scan.
+  // just a live view of that registry; closing/minimizing it doesn't stop the scan.
   function runScan() {
     if (scanning) return;
     setMsg(null);
     setScanMinimized(false);
     const params: QuotaScanParams = {
-      subscription_id: subId, connection_id: connId, demo: false,
+      subscription_id: subId, connection_id: demo ? "" : connId, demo,
       regions: selRegions, categories: selCats, include_unused: showUnused,
     };
-    startQuotaScan(scopeKey, params, ["quota", connId, scopeKey], {
-      subLabel: subName || subId,
+    startQuotaScan(scopeKey, params, ["quota", demo, connId, scopeKey], {
+      subLabel: demo ? "Demo data" : subName || subId,
       regionLabel: selRegions.length ? `${selRegions.length} region(s)` : "all regions",
     });
   }
@@ -393,8 +395,8 @@ export function QuotaMonitorPanel() {
   const counts = data?.counts ?? {};
   const unregistered = (data?.provider_registration ?? []).filter((p) => !p.registered);
   const neverLoaded = !!data?.never_loaded;
-  const notConfigured = data && !data.connection_configured;
-  const canScan = !!subId;
+  const notConfigured = data && !data.connection_configured && !demo;
+  const canScan = demo || !!subId;
 
   // QU6 — active display filters as removable chips. (Scan-scope region/category pickers are
   // separate; these are the post-load table filters.)
@@ -448,7 +450,7 @@ export function QuotaMonitorPanel() {
     const blob = new Blob([lines.join("\n")], { type: "text/csv;charset=utf-8;" });
     const url = URL.createObjectURL(blob);
     const a = document.createElement("a");
-    a.href = url; a.download = `quota-${subName || subId}-${new Date().toISOString().slice(0, 10)}.csv`; a.click();
+    a.href = url; a.download = `quota-${demo ? "demo" : subName || subId}-${new Date().toISOString().slice(0, 10)}.csv`; a.click();
     URL.revokeObjectURL(url);
     setToast(`Exported ${filtered.length.toLocaleString()} row${filtered.length === 1 ? "" : "s"} to CSV`);
   }
@@ -488,15 +490,21 @@ export function QuotaMonitorPanel() {
             </p>
           </div>
           <div className="flex flex-wrap items-center gap-2">
-            <ConnectionScopePicker value={connId} onChange={(id) => setConnId(id)} />
-            <SubscriptionScopePicker
-              value={subId}
-              valueName={subName}
-              onPick={(id, name) => { setSubId(id); setSubName(name); }}
-              connectionId={connId}
-            />
+            {!demo && <ConnectionScopePicker value={connId} onChange={(id) => setConnId(id)} />}
+            {!demo && (
+              <SubscriptionScopePicker
+                value={subId}
+                valueName={subName}
+                onPick={(id, name) => { setSubId(id); setSubName(name); }}
+                connectionId={connId}
+              />
+            )}
+            <label className="flex items-center gap-1.5 rounded-lg border bg-white px-2.5 py-1.5 text-xs text-gray-600">
+              <input type="checkbox" checked={demo} onChange={(event) => setDemo(event.target.checked)} />
+              Demo data
+            </label>
             {/* Region multi-select */}
-            <div className="relative">
+            {!demo && <div className="relative">
                 <button
                   onClick={() => { setShowRegions((v) => !v); setShowCats(false); }}
                   disabled={!subId}
@@ -517,7 +525,7 @@ export function QuotaMonitorPanel() {
                       value={regionQuery}
                       onChange={(e) => setRegionQuery(e.target.value)}
                       placeholder="Search region / geography…"
-                      className="m-1.5 rounded border px-2 py-1 text-xs"
+                      className="m-1.5 rounded-sm border px-2 py-1 text-xs"
                     />
                     <div className="min-h-0 flex-1 overflow-auto px-1.5 pb-1.5">
                       {regionsQ.isLoading && <div className="px-2 py-1 text-xs text-gray-400">Loading regions…</div>}
@@ -542,17 +550,17 @@ export function QuotaMonitorPanel() {
                             </button>
                           </div>
                           {regs.map((r) => (
-                            <label key={r.name} className="flex items-center gap-2 rounded px-2 py-1 text-xs hover:bg-gray-50">
+                            <label key={r.name} className="flex items-center gap-2 rounded-sm px-2 py-1 text-xs hover:bg-gray-50">
                               <input type="checkbox" checked={selRegions.includes(r.name)} onChange={() => toggleRegion(r.name)} />
                               <span className="min-w-0 flex-1 truncate" title={`${r.name}${r.physical_location ? ` · ${r.physical_location}` : ""}${r.paired_region ? ` · paired: ${r.paired_region}` : ""}`}>
                                 {r.display_name}
                                 {r.physical_location && <span className="ml-1 text-[10px] text-gray-400">{r.physical_location}</span>}
                               </span>
                               {r.has_availability_zones && (
-                                <span className="shrink-0 rounded bg-emerald-50 px-1 py-0.5 text-[9px] font-medium text-emerald-600" title="Availability zones">AZ</span>
+                                <span className="shrink-0 rounded-sm bg-emerald-50 px-1 py-0.5 text-[9px] font-medium text-emerald-600" title="Availability zones">AZ</span>
                               )}
                               {r.category === "Recommended" && (
-                                <span className="shrink-0 rounded bg-blue-50 px-1 py-0.5 text-[9px] font-medium text-blue-600" title="Recommended region">★</span>
+                                <span className="shrink-0 rounded-sm bg-blue-50 px-1 py-0.5 text-[9px] font-medium text-blue-600" title="Recommended region">★</span>
                               )}
                             </label>
                           ))}
@@ -561,9 +569,9 @@ export function QuotaMonitorPanel() {
                     </div>
                   </div>
                 )}
-            </div>
+            </div>}
             {/* Category multi-select */}
-            <div className="relative">
+            {!demo && <div className="relative">
               <button
                 onClick={() => { setShowCats((v) => !v); setShowRegions(false); }}
                 className="rounded-lg border bg-white px-2.5 py-1.5 text-xs text-gray-700 hover:bg-gray-50"
@@ -577,21 +585,21 @@ export function QuotaMonitorPanel() {
                     <button className="text-[11px] text-gray-400 hover:underline" onClick={() => setShowCats(false)}>Close</button>
                   </div>
                   {allCats.map((c) => (
-                    <label key={c} className="flex items-center gap-2 rounded px-2 py-1 text-xs capitalize hover:bg-gray-50">
+                    <label key={c} className="flex items-center gap-2 rounded-sm px-2 py-1 text-xs capitalize hover:bg-gray-50">
                       <input type="checkbox" checked={selCats.includes(c)} onChange={() => toggleCat(c)} />
                       <span>{c}</span>
                     </label>
                   ))}
                 </div>
               )}
-            </div>
-            <label
+            </div>}
+            {!demo && <label
               className="flex items-center gap-1 rounded-lg border bg-white px-2.5 py-1.5 text-xs text-gray-600"
               title="Include zero-usage rows so every VM SKU family / quota shows its limit and headroom (like the portal Quotas blade)."
             >
               <input type="checkbox" checked={showUnused} onChange={(e) => setShowUnused(e.target.checked)} />
               Show unused
-            </label>
+            </label>}
             <button
               onClick={() => loadCached()}
               disabled={scanning || !canScan || overviewQ.isFetching}
@@ -617,11 +625,11 @@ export function QuotaMonitorPanel() {
                 ⚠ stale · rescan
               </button>
             )}
-            {subId ? (
+            {demo || subId ? (
               <div className="flex items-center gap-1">
                 <button onClick={exportFiltered} disabled={!data || filtered.length === 0} title="Export the current filtered view to CSV" className="rounded-lg border bg-white px-2 py-1.5 text-xs text-gray-700 hover:bg-gray-50 disabled:opacity-50">⬇ Export view</button>
-                <a href={api.quotaExportUrl(subId, false, "csv")} title="Full cached snapshot (server)" className="rounded-lg border bg-white px-2 py-1.5 text-xs text-gray-700 hover:bg-gray-50">CSV</a>
-                <a href={api.quotaExportUrl(subId, false, "json")} title="Full cached snapshot (server)" className="rounded-lg border bg-white px-2 py-1.5 text-xs text-gray-700 hover:bg-gray-50">JSON</a>
+                <a href={api.quotaExportUrl(subId, demo, "csv")} title="Full cached snapshot (server)" className="rounded-lg border bg-white px-2 py-1.5 text-xs text-gray-700 hover:bg-gray-50">CSV</a>
+                <a href={api.quotaExportUrl(subId, demo, "json")} title="Full cached snapshot (server)" className="rounded-lg border bg-white px-2 py-1.5 text-xs text-gray-700 hover:bg-gray-50">JSON</a>
               </div>
             ) : null}
           </div>
@@ -635,6 +643,11 @@ export function QuotaMonitorPanel() {
 
       {/* Body */}
       <div ref={bodyRef} className="min-h-0 flex-1 overflow-auto px-5 py-4" style={{ overflowAnchor: "none" }}>
+        {demo && (
+          <div className="mb-3 rounded-md border border-violet-200 bg-violet-50 px-3 py-2 text-xs text-violet-700">
+            Showing deterministic synthetic quota data. No Azure connection or API call is used.
+          </div>
+        )}
         {notConfigured ? (
           <div className="rounded-lg border bg-white p-8 text-center text-sm text-gray-500">
             No Azure connection is configured. Add one in Settings → Connections, then run a scan.
@@ -648,7 +661,7 @@ export function QuotaMonitorPanel() {
         ) : !data ? (
           <div className="rounded-lg border bg-white p-8 text-center text-sm text-gray-500">
             Nothing loaded yet. Click <b>Load</b> to fetch the latest cached scan for
-            {" "}<b>{subName || subId}</b>, or <b>Run scan</b> to collect fresh.
+            {" "}<b>{demo ? "Demo data" : subName || subId}</b>, or <b>Run scan</b> to collect fresh.
           </div>
         ) : neverLoaded ? (
           <div className="rounded-lg border bg-white p-8 text-center text-sm text-gray-500">
@@ -671,7 +684,7 @@ export function QuotaMonitorPanel() {
 
             {/* Meta strip */}
             <div className="mb-3 flex flex-wrap items-center gap-x-4 gap-y-1 text-[11px] text-gray-500">
-              <span>Subscription: <b className="text-gray-700">{data?.subscription_name || subId}</b></span>
+              <span>Subscription: <b className="text-gray-700">{data?.subscription_name || (demo ? "Demo data" : subId)}</b></span>
               <span>Regions scanned: <b className="text-gray-700">{data?.regions_scanned?.length ?? 0}</b></span>
               <span>Last scan: <b className="text-gray-700">{agoText(data?.age_seconds)}</b></span>
               {data?.status && <span>Status: <b className="text-gray-700 capitalize">{data.status}</b></span>}
@@ -748,7 +761,7 @@ export function QuotaMonitorPanel() {
             {/* Table (virtualized) */}
             <div ref={tableScrollRef} className="max-h-[60vh] overflow-auto rounded-lg border bg-white">
               <table className="w-full text-sm">
-                <thead className="sticky top-0 z-10 bg-gray-50 text-left text-[11px] uppercase tracking-wide text-gray-500 shadow-sm">
+                <thead className="sticky top-0 z-10 bg-gray-50 text-left text-[11px] uppercase tracking-wide text-gray-500 shadow-xs">
                   <tr>
                     <Th k="quota" label="Quota" sortKey={sortKey} sortDir={sortDir} onSort={toggleSort} />
                     <Th k="sku_family" label="SKU family" sortKey={sortKey} sortDir={sortDir} onSort={toggleSort} />
@@ -779,7 +792,7 @@ export function QuotaMonitorPanel() {
                       </td>
                       <td className="px-3 py-2 text-xs text-gray-600">
                         {r.sku_family
-                          ? <span className="rounded bg-indigo-50 px-1.5 py-0.5 font-mono text-[10px] text-indigo-700">{r.sku_family}</span>
+                          ? <span className="rounded-sm bg-indigo-50 px-1.5 py-0.5 font-mono text-[10px] text-indigo-700">{r.sku_family}</span>
                           : <span className="text-gray-300">—</span>}
                       </td>
                       <td className="px-3 py-2 text-xs text-gray-600">{r.region || "—"}</td>
@@ -791,7 +804,7 @@ export function QuotaMonitorPanel() {
                       <td className="px-3 py-2 text-xs text-gray-600">{r.adjustable_status}</td>
                       <td className="px-3 py-2 text-[11px] text-gray-500">{SOURCE_LABEL[r.source_type] ?? r.source_type}</td>
                       <td className="px-3 py-2">
-                        <span className={`rounded px-1.5 py-0.5 text-[11px] font-medium ${RISK_BADGE[r.risk_level] ?? "bg-gray-100 text-gray-600"}`}>
+                        <span className={`rounded-sm px-1.5 py-0.5 text-[11px] font-medium ${RISK_BADGE[r.risk_level] ?? "bg-gray-100 text-gray-600"}`}>
                           {RISK_LABEL[r.risk_level] ?? r.risk_level}
                         </span>
                       </td>
@@ -839,7 +852,7 @@ export function QuotaMonitorPanel() {
       </div>
 
       {/* QP5 — scan progress popup (minimisable). The scan runs in a module-level registry, so
-          closing/minimising this overlay does NOT stop it; a header chip lets you reopen it. */}
+          closing/minimizing this overlay does NOT stop it; a header chip lets you reopen it. */}
       {scanning && !scanMinimized && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/30 p-4">
           <div className="w-full max-w-lg overflow-hidden rounded-xl border bg-white shadow-2xl">
@@ -850,20 +863,20 @@ export function QuotaMonitorPanel() {
                 <div className="truncate text-xs text-violet-600">{scan?.status || "Working…"}</div>
               </div>
               <span className="shrink-0 tabular-nums text-xs text-violet-500">{fmtElapsed(scanElapsed)}</span>
-              <button onClick={() => setScanMinimized(true)} title="Run in background" className="shrink-0 rounded border px-2 py-0.5 text-[11px] text-violet-600 hover:bg-violet-50">— Minimise</button>
+              <button onClick={() => setScanMinimized(true)} title="Run in background" className="shrink-0 rounded-sm border px-2 py-0.5 text-[11px] text-violet-600 hover:bg-violet-50">— Minimise</button>
             </div>
             <div className="max-h-72 overflow-y-auto bg-white px-4 py-2 font-mono text-[11px] leading-relaxed text-gray-600">
               {(scan?.log ?? []).map((l, i) => (
                 <div key={i} className="flex gap-2">
                   <span className="shrink-0 text-gray-400">{l.t}</span>
-                  <span className="min-w-0 flex-1 break-words">{l.msg}</span>
+                  <span className="min-w-0 flex-1 wrap-break-word">{l.msg}</span>
                 </div>
               ))}
               <div ref={logEndRef} />
             </div>
             <div className="flex items-center justify-between border-t bg-gray-50 px-4 py-2">
               <span className="truncate text-[11px] text-gray-400">
-                {(subName || subId) + " · " + (selRegions.length ? `${selRegions.length} region(s)` : "all regions")}
+                {(demo ? "Demo data" : subName || subId) + " · " + (selRegions.length ? `${selRegions.length} region(s)` : "all regions")}
               </span>
               <button
                 onClick={cancelScan}
@@ -933,7 +946,7 @@ export function QuotaMonitorPanel() {
             {drawer.raw_provider_response != null && (
               <details className="mt-3">
                 <summary className="cursor-pointer text-xs font-medium text-gray-600">Raw provider response</summary>
-                <pre className="mt-1 max-h-72 overflow-auto rounded bg-gray-900 p-2 text-[10px] leading-relaxed text-gray-100">
+                <pre className="mt-1 max-h-72 overflow-auto rounded-sm bg-gray-900 p-2 text-[10px] leading-relaxed text-gray-100">
                   {JSON.stringify(drawer.raw_provider_response, null, 2)}
                 </pre>
               </details>

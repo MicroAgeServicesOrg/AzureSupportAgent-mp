@@ -6,6 +6,7 @@ grand_parent: How-to guides
 nav_order: 70
 description: Configure, test, verify, and safely operate the Azure Logic Apps connector.
 permalink: /how-to/automations-connectors/connectors-orchestration/
+feature_ids: [CONNECTOR:logicapp]
 ---
 
 # Configure automation and orchestration connectors
@@ -21,6 +22,8 @@ permalink: /how-to/automations-connectors/connectors-orchestration/
 - Open `/automations/connectors`.
 
 ## How to configure Azure Logic Apps
+
+{% include screenshot.html file="fconn-logicapp-http.png" title="Logic Apps — unsaved trigger, headers, and static payload" caption="Native UNSAVED setup with Enabled off and the entire SAS-signed trigger URL left blank; visible URL text is only a placeholder. Fictional non-secret headers use Key: Value lines and static additions use key=value lines, with no authorization header. No connector was saved or tested and no trigger, workflow, or downstream action ran." %}
 
 1. Add **Azure Logic Apps** and enter the secret trigger URL.
 2. Optionally add approved custom headers and static `key=value` payload entries.
@@ -43,7 +46,7 @@ The callback URL contains a SAS signature and must be treated as a secret. Send 
 
 | Symptom | Resolution |
 | --- | --- |
-| Unexpected result | Re-check route, permissions, and latest refresh state before retrying. |
+| Logic App receives a request but runs the wrong branch | Compare the test envelope and headers with the trigger schema, then use a guarded non-production branch before another **Send test**. |
 | Test succeeds but trigger fails | Test checks only field presence. |
 | URL rejected | use HTTPS and the supported `logic.azure.com` callback host. |
 | Run fails | inspect trigger schema, static payload/header parsing, action permissions, and Logic App run history. |

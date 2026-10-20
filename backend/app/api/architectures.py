@@ -10,18 +10,20 @@ import asyncio
 import json
 import logging
 import re
+import uuid
 from datetime import datetime, timezone
 from typing import Any, Awaitable, Callable
 
-from fastapi import APIRouter, Body, Depends, File, HTTPException, UploadFile
+from fastapi import APIRouter, Body, Depends, File, HTTPException, Query, UploadFile
 from pydantic import BaseModel, Field
 from sse_starlette.sse import EventSourceResponse
 
 from app.architectures import catalog
 from app.architectures import registry as arch_registry
-from app.core.azure_connections import resolve_connection
+from app.core.azure_connections import get_connection, resolve_connection
 from app.core.genjob import JobRegistry
 from app.core.security import Principal, require_permission
+from app.knowme import sla
 from app.workloads.registry import get_workload, list_workloads
 
 # KP5/KU4 — background-survivable Know-Me generation. The generate/regenerate run as detached
@@ -78,6 +80,7 @@ class ArchNode(BaseModel):
     subscription_id: str = ""
     location: str = ""
     sku: str = ""
+    pricing_hint: dict[str, Any] = Field(default_factory=dict)
     meta: dict[str, Any] = Field(default_factory=dict)
     group_id: str = ""
     x: float = 0.0
@@ -145,15 +148,51 @@ async def create_generation_jobs_endpoint(
     """Queue one background AI reverse-engineering job per selected workload. Returns the
     job records immediately; poll GET /architectures/jobs for live progress."""
     from app.architectures.jobs import manager
+    from app.core import work_batches
 
     if not payload.workload_ids:
         raise HTTPException(status_code=400, detail="Select at least one workload.")
+    unique_ids = list(dict.fromkeys(payload.workload_ids))
+    if len(unique_ids) > 1:
+        items = []
+        for wid in unique_ids:
+            wl = get_workload(wid)
+            if wl is not None:
+                items.append({
+                    "item_key": wid,
+                    "workload_id": wid,
+                    "workload_name": wl.get("name", "workload"),
+                    "connection_id": payload.connection_id or wl.get("connection_id") or "",
+                })
+        if not items:
+            raise HTTPException(status_code=404, detail="None of the selected workloads were found.")
+        batch, _ = await work_batches.create_batch(
+            tenant_id=principal.tenant_id,
+            feature="architecture",
+            actor=principal.subject,
+            idempotency_key=f"architecture:{uuid.uuid4()}",
+            items=items,
+            config={},
+            trigger="fleet",
+        )
+        jobs = [
+            {
+                "id": item["id"], "workload_id": item["workload_id"],
+                "workload_name": item["workload_name"], "status": item["status"],
+                "phase": "queued", "progress": 0, "message": "Queued in durable batch.",
+                "architecture_id": "", "architecture_name": "", "resource_count": 0,
+                "target_architecture_id": item["id"], "error": "",
+                "created_at": batch["created_at"], "started_at": "", "ended_at": "",
+            }
+            for item in batch["items"]
+        ]
+        return {"jobs": jobs, "queued": len(jobs), "batch_id": batch["id"]}
     created: list[dict[str, Any]] = []
-    for wid in payload.workload_ids:
+    for wid in unique_ids:
         wl = get_workload(wid)
         if wl is None:
             continue
-        job = manager.create(
+        job = await manager.create(
             tenant_id=principal.tenant_id,
             workload_id=wid,
             workload_name=wl.get("name", "workload"),
@@ -170,14 +209,14 @@ async def create_generation_jobs_endpoint(
 async def list_generation_jobs_endpoint(principal: Principal = Depends(get_principal)):
     from app.architectures.jobs import manager
 
-    return {"jobs": manager.list(principal.tenant_id)}
+    return {"jobs": await manager.list(principal.tenant_id)}
 
 
 @router.post("/jobs/{job_id}/cancel")
 async def cancel_generation_job_endpoint(job_id: str, principal: Principal = Depends(_write)):
     from app.architectures.jobs import manager
 
-    if not manager.cancel(job_id, principal.tenant_id):
+    if not await manager.cancel(job_id, principal.tenant_id):
         raise HTTPException(status_code=404, detail="Job not found or already finished.")
     return {"ok": True}
 
@@ -186,7 +225,7 @@ async def cancel_generation_job_endpoint(job_id: str, principal: Principal = Dep
 async def dismiss_generation_job_endpoint(job_id: str, principal: Principal = Depends(_write)):
     from app.architectures.jobs import manager
 
-    if not manager.dismiss(job_id, principal.tenant_id):
+    if not await manager.dismiss(job_id, principal.tenant_id):
         raise HTTPException(status_code=404, detail="Job not found or still running.")
     return {"ok": True}
 
@@ -470,6 +509,36 @@ async def purge_know_me_orphan_endpoint(architecture_id: str, principal: Princip
 
 
 
+@router.get("/{architecture_id}/pricing")
+async def get_architecture_pricing_endpoint(
+    architecture_id: str,
+    currency: str | None = Query(default=None, min_length=3, max_length=3),
+    force: bool = Query(default=False),
+    principal: Principal = Depends(get_principal),
+):
+    """Current public Azure retail/list rates for every node in one architecture."""
+    from app.architectures.pricing import price_architecture
+    from app.backup_manager.costmgmt import known_currency
+
+    arch = _tenant_arch_or_404(architecture_id, principal)
+    resolved_currency = str(currency or "").strip().upper()
+    if not resolved_currency:
+        connection = get_connection(str(arch.get("connection_id") or ""))
+        resolved_currency = (
+            known_currency(connection, tenant_id=principal.tenant_id) if connection else ""
+        ) or "USD"
+    try:
+        return await price_architecture(arch, resolved_currency, force=force)
+    except ValueError:
+        raise HTTPException(
+            status_code=400,
+            detail="Currency must be a three-letter code such as USD or EUR.",
+        ) from None
+    except Exception as exc:  # noqa: BLE001 - public route collapses provider/cache failures
+        logger.debug("Architecture retail pricing failed: %s", type(exc).__name__)
+        raise HTTPException(status_code=503, detail="Retail pricing is temporarily unavailable.") from None
+
+
 @router.get("/{architecture_id}")
 async def get_architecture_endpoint(architecture_id: str, principal: Principal = Depends(get_principal)):
     arch = _tenant_arch_or_404(architecture_id, principal)
@@ -591,7 +660,7 @@ async def rebuild_architecture_endpoint(
     """Queue a background job that re-reverse-engineers this architecture from the current
     Azure state of a workload, overwriting its diagram in place (id/name/state preserved).
     Poll GET /architectures/jobs for live progress; the job's target_architecture_id is this id."""
-    from app.architectures.jobs import manager
+    from app.core import work_batches
 
     arch = _tenant_arch_or_404(architecture_id, principal)
     workload_id = payload.workload_id or arch.get("workload_id") or ""
@@ -608,15 +677,29 @@ async def rebuild_architecture_endpoint(
         arch_registry.set_workload(
             architecture_id, workload_id, wl.get("name", ""), _actor(principal)
         )
-    job = manager.create(
+    batch, _ = await work_batches.create_batch(
         tenant_id=principal.tenant_id,
-        workload_id=workload_id,
-        workload_name=wl.get("name", "workload"),
-        connection_id=payload.connection_id or wl.get("connection_id") or "",
-        created_by=_actor(principal),
-        target_architecture_id=architecture_id,
+        feature="architecture",
+        actor=principal.subject,
+        idempotency_key=f"architecture-rebuild:{uuid.uuid4()}",
+        items=[{
+            "item_key": workload_id,
+            "workload_id": workload_id,
+            "workload_name": wl.get("name", "workload"),
+            "connection_id": payload.connection_id or wl.get("connection_id") or "",
+        }],
+        config={"target_architecture_id": architecture_id},
+        trigger="rebuild",
     )
-    return {"job": job}
+    item = batch["items"][0]
+    return {"job": {
+        "id": batch["id"], "workload_id": workload_id, "workload_name": item["workload_name"],
+        "status": item["status"], "phase": "queued", "progress": 0,
+        "message": "Queued in durable batch.", "architecture_id": architecture_id,
+        "architecture_name": arch.get("name", ""), "resource_count": 0,
+        "target_architecture_id": architecture_id, "error": "",
+        "created_at": batch["created_at"], "started_at": "", "ended_at": "",
+    }, "batch_id": batch["id"]}
 
 
 # ------------------------------------------------------------- Architecture Memory (CRUD)
@@ -682,13 +765,28 @@ class KnowMeSectionGenerateRequest(BaseModel):
 
 
 def _know_me_response(architecture_id: str, arch: dict[str, Any], km_doc: dict[str, Any]) -> dict[str, Any]:
+    from app.architectures import memory as mem
     from app.knowme import sections as km
+    from app.knowme.sla import CALCULATOR_VERSION, source_fingerprint
+    from app.knowme.sla_catalog import CATALOG_VERSION
+
+    snapshot = km_doc.get("composite_sla")
+    workload = get_workload(arch.get("workload_id") or km_doc.get("workload_id") or "")
+    stale = bool(snapshot and (
+        snapshot.get("source_fingerprint") != source_fingerprint(arch, workload)
+        or snapshot.get("catalog_version") != CATALOG_VERSION
+        or snapshot.get("calculator_version") != CALCULATOR_VERSION
+    ))
 
     wl_name = arch.get("workload_name", "") or km_doc.get("workload_name", "")
+    memory = mem.get_memory(architecture_id)
     return {
         "id": km_doc.get("id"),
         "know_me": km_doc,
-        "markdown": km.render_markdown(km_doc, wl_name),
+        "composite_sla_stale": stale,
+        "has_memory": memory is not None,
+        "memory_updated_at": (memory or {}).get("updated_at", ""),
+        "markdown": km.render_markdown({**km_doc, "composite_sla_stale": stale}, wl_name),
         "architecture": _arch_meta(architecture_id, arch),
     }
 
@@ -881,6 +979,7 @@ async def generate_memory_stream_endpoint(
             wl = get_workload(workload_id) if workload_id else None
             wl_name = arch.get("workload_name", "") or (wl or {}).get("name", "")
             resources: list[dict[str, Any]] = []
+            context: dict[str, Any] = {}
             if wl is not None:
                 yield {"event": "status", "data": json.dumps({"phase": "query", "message": "Querying Azure Resource Graph for live resources…"})}
                 from app.architectures.reverse import dump_resources
@@ -888,6 +987,7 @@ async def generate_memory_stream_endpoint(
                 conn = resolve_connection(connection_id or wl.get("connection_id") or None)
                 dump = await dump_resources(wl, conn)
                 resources = dump.get("resources") or []
+                context = dump.get("context") or {}
             else:
                 yield {"event": "status", "data": json.dumps({"phase": "query", "message": "No linked workload — drafting from the diagram only…"})}
 
@@ -933,7 +1033,8 @@ async def generate_memory_stream_endpoint(
                     "confidence": result.get("confidence"),
                     "generated_at": datetime.now(timezone.utc).isoformat(),
                     "generated_by": _actor(principal),
-                    "resource_count": len(resources),
+                    "resource_count": int(context.get("total_resource_count") or len(resources)),
+                    "context": context,
                 },
                 tenant_id=principal.tenant_id,
                 actor=_actor(principal),
@@ -969,12 +1070,14 @@ async def generate_memory_section_endpoint(
     wl = get_workload(workload_id) if workload_id else None
     wl_name = arch.get("workload_name", "") or (wl or {}).get("name", "")
     resources: list[dict[str, Any]] = []
+    context: dict[str, Any] = {}
     if wl is not None:
         from app.architectures.reverse import dump_resources
 
         conn = resolve_connection(connection_id or wl.get("connection_id") or None)
         dump = await dump_resources(wl, conn)
         resources = dump.get("resources") or []
+        context = dump.get("context") or {}
 
     result = await generate_memory(
         arch, resources, weakness_signals, wl_name,
@@ -1001,6 +1104,14 @@ async def generate_memory_section_endpoint(
         workload_id=workload_id,
         sections=sections,
         source="hybrid" if existing is not None else "ai",
+        ai={
+            **((existing or {}).get("ai") or {}),
+            "confidence": (result or {}).get("confidence"),
+            "generated_at": datetime.now(timezone.utc).isoformat(),
+            "generated_by": _actor(principal),
+            "resource_count": int(context.get("total_resource_count") or len(resources)),
+            "context": context,
+        },
         tenant_id=principal.tenant_id,
         actor=_actor(principal),
         reason=f"Regenerated section: {mem.section_label(section_key)}",
@@ -1080,6 +1191,53 @@ async def upsert_know_me_endpoint(km_id: str, payload: KnowMeUpsert, principal: 
         tenant_id=principal.tenant_id,
         actor=_actor(principal),
     )
+    if saved is None:
+        raise HTTPException(status_code=409, detail="Know-Me was removed while saving.")
+    return _know_me_response(km_doc.get("architecture_id", ""), arch, saved)
+
+
+class CompositeSlaReviewRequest(BaseModel):
+    model_config = {"extra": "forbid"}
+    model: dict[str, Any] | None = None
+
+
+@router.post("/know-me/{km_id}/composite-sla")
+async def review_composite_sla_endpoint(
+    km_id: str, payload: CompositeSlaReviewRequest,
+    principal: Principal = Depends(_write),
+):
+    from pydantic import ValidationError
+
+    from app.knowme import registry as kreg
+    from app.knowme.sla import Journey, generate_snapshot
+
+    km_doc, arch = _km_or_404(km_id, principal)
+    if not arch or arch.get("deleted_at") or (arch.get("tenant_id") or "") not in ("", principal.tenant_id):
+        raise HTTPException(status_code=409, detail="A current linked architecture is required.")
+    model = None
+    if payload.model is not None:
+        try:
+            model = Journey.model_validate(payload.model)
+        except ValidationError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+    workload = get_workload(arch.get("workload_id") or "")
+    # Workload tenant_id is the Azure directory, not the app tenant. Document/architecture
+    # authorization above and the admin-managed connection govern access to its scope.
+    snapshot = await generate_snapshot(
+        arch, workload, arch.get("connection_id") or (workload or {}).get("connection_id") or "",
+        previous=km_doc.get("composite_sla"), model=model, actor=_actor(principal),
+    )
+    current, current_arch = _km_or_404(km_id, principal)
+    current_workload = get_workload(current_arch.get("workload_id") or "")
+    if (current.get("composite_sla") != km_doc.get("composite_sla")
+            or sla.source_fingerprint(current_arch, current_workload) != snapshot["source_fingerprint"]):
+        raise HTTPException(status_code=409, detail="SLA sources or review changed while calculating. Refresh and retry.")
+    saved = kreg.update_know_me(
+        km_id, composite_sla=snapshot, tenant_id=principal.tenant_id,
+        actor=_actor(principal), reason="Reviewed Composite SLA" if model else "Refreshed Composite SLA",
+    )
+    if saved is None:
+        raise HTTPException(status_code=409, detail="Know-Me was removed while calculating.")
     return _know_me_response(km_doc.get("architecture_id", ""), arch, saved)
 
 
@@ -1179,7 +1337,10 @@ async def export_know_me_endpoint(
 
     km_doc, arch = _km_or_404(km_id, principal, allow_deleted=True)
     wl_name = arch.get("workload_name", "") or km_doc.get("workload_name", "")
-    markdown = km.render_markdown(km_doc, wl_name, cover=True)
+    response = _know_me_response(km_doc.get("architecture_id", ""), arch, km_doc)
+    markdown = km.render_markdown(
+        {**km_doc, "composite_sla_stale": response["composite_sla_stale"]}, wl_name, cover=True,
+    )
     base = re.sub(r"[^a-z0-9]+", "-", (km_doc.get("title") or wl_name or "know-me").lower()).strip("-") or "know-me"
     if format == "pdf":
         from app.connectors import chat_pdf
@@ -1266,11 +1427,12 @@ async def delete_know_me_asset_endpoint(km_id: str, asset_id: str, principal: Pr
 
 @router.post("/know-me/{km_id}/fields/{field_id}/suggest")
 async def suggest_know_me_field_endpoint(
-    km_id: str, field_id: str, principal: Principal = Depends(_write)
+    km_id: str, field_id: str, principal: Principal = Depends(_write),
+    preload: bool = Query(False),
 ):
     """AI-infer a short list of realistic answer OPTIONS for one human-completion field
-    (P3, on-demand). Returns ``{choices: [...]}`` and caches them onto the field so the UI can
-    offer a dropdown. Best-effort — returns the field's existing choices on any failure."""
+    Returns ``{choices: [...]}``. Preloads are read-only and cached in process memory;
+    legacy on-demand calls atomically cache only this field. Provider failures are explicit."""
     from app.knowme import context as kctx
     from app.knowme import generator as kgen
     from app.knowme import registry as kreg
@@ -1281,6 +1443,19 @@ async def suggest_know_me_field_endpoint(
     todo = next((t for t in todos if str(t.get("id")) == field_id), None)
     if todo is None:
         raise HTTPException(status_code=404, detail="Field not found.")
+    if todo.get("choices") or todo.get("suggestions"):
+        return {"choices": todo.get("choices") or todo.get("suggestions") or [],
+                "choice_source": todo.get("choice_source") or ""}
+
+    def source(doc: dict[str, Any], field: dict[str, Any], architecture: dict[str, Any]) -> str:
+        return json.dumps([
+            (doc.get("ai") or {}).get("generated_at"), architecture.get("updated_at"),
+            [field.get(key) for key in ("label", "field_key", "section_key", "type")],
+            [row.get("content") for row in doc.get("sections", [])
+             if row.get("key") == field.get("section_key")],
+        ], sort_keys=True)
+
+    field_source = source(km_doc, todo, arch)
 
     workload_id = arch.get("workload_id") or km_doc.get("workload_id") or ""
     connection_id = arch.get("connection_id") or km_doc.get("connection_id") or ""
@@ -1291,35 +1466,29 @@ async def suggest_know_me_field_endpoint(
     known = await kctx.gather_known_facts(wl, arch, principal.tenant_id, connection_id, facts)
     evidence = await kctx.gather_evidence(km_doc.get("architecture_id", ""), workload_id, principal.tenant_id, connection_id)
 
-    options = await kgen.suggest_field_choices(
-        label=str(todo.get("label") or ""),
-        field_key=str(todo.get("field_key") or ""),
-        section_label=section_label,
-        workload_name=wl_name,
-        known_block=known.get("block", ""),
-        evidence_block=evidence.get("block", ""),
-    )
-    if not options:
-        return {"choices": todo.get("choices") or [], "choice_source": todo.get("choice_source") or ""}
+    try:
+        options = await kgen.suggest_field_choices(
+            label=str(todo.get("label") or ""), field_key=str(todo.get("field_key") or ""),
+            section_label=section_label, workload_name=wl_name,
+            known_block=known.get("block", ""), evidence_block=evidence.get("block", ""),
+            cache_scope=json.dumps([principal.tenant_id, km_id, field_id, field_source]),
+        )
+    except asyncio.TimeoutError as exc:
+        raise HTTPException(status_code=504, detail="AI suggestions timed out. Retry this field.") from exc
+    except Exception as exc:
+        logger.exception("Know-Me field suggestion failed")
+        raise HTTPException(status_code=502, detail="AI suggestions are unavailable. Check the provider and retry this field.") from exc
 
-    # Merge AI options after any existing choices (preserve order, dedup) + persist.
-    merged: list[str] = []
-    for v in [*(todo.get("choices") or []), *options]:
-        s = str(v).strip()
-        if s and s not in merged:
-            merged.append(s)
-    merged = merged[:12]
-    for t in todos:
-        if str(t.get("id")) == field_id:
-            t["choices"] = merged
-            t["allow_custom"] = True
-            if not t.get("choice_source"):
-                t["choice_source"] = "ai"
-    kreg.update_know_me(
-        km_id, todos=todos, source="edited",
-        tenant_id=principal.tenant_id, actor=_actor(principal), reason="Suggested field options",
-    )
-    return {"choices": merged, "choice_source": "ai"}
+    current, current_arch = _km_or_404(km_id, principal)
+    field = next((row for row in current.get("todos", []) if row.get("id") == field_id), None)
+    if field is None or source(current, field, current_arch) != field_source:
+        raise HTTPException(status_code=409, detail="The field changed while loading suggestions. Refresh the document.")
+    if preload or not options:
+        return {"choices": options, "choice_source": "ai"}
+    saved = kreg.cache_field_choices(km_id, field_id, options, field, _actor(principal))
+    if saved is None:
+        raise HTTPException(status_code=409, detail="The field changed while saving suggestions.")
+    return {"choices": saved.get("choices") or [], "choice_source": saved.get("choice_source") or ""}
 
 
 async def _run_generate_know_me(
@@ -1353,6 +1522,13 @@ async def _run_generate_know_me(
     known = await kctx.gather_known_facts(wl, arch, tenant_id, connection_id, facts)
     await progress("evidence", "📊 Pulling posture evidence (assessments, coverage, profiler)…")
     evidence = await kctx.gather_evidence(architecture_id, workload_id, tenant_id, connection_id)
+    existing = kreg.get_know_me(target_km_id) if target_km_id else None
+    await progress("sla", "Resolving service commitments and Composite SLA inputs…")
+    composite_sla = await sla.generate_snapshot(
+        arch, wl, connection_id, previous=(existing or {}).get("composite_sla"),
+    )
+    await progress("sla", "Composite SLA calculated." if composite_sla["status"] == "calculated"
+                   else "Composite SLA withheld: review unresolved inputs in Resiliency & DR.")
 
     await progress("ai", "Transforming the architecture memory into a Know-Me…")
     queue: asyncio.Queue[dict[str, str]] = asyncio.Queue()
@@ -1378,7 +1554,6 @@ async def _run_generate_know_me(
         raise RuntimeError("The AI could not draft the Know-Me. Try again.")
 
     await progress("save", "💾 Validating sections & saving…")
-    existing = kreg.get_know_me(target_km_id) if target_km_id else None
     sections = kreg.merge_ai_sections((existing or {}).get("sections"), result["sections"])
     todos, autofilled = _finalize_know_me_todos(sections, existing, known)
     if autofilled:
@@ -1395,6 +1570,7 @@ async def _run_generate_know_me(
         km_doc = kreg.update_know_me(
             target_km_id, workload_id=workload_id, workload_name=wl_name, connection_id=connection_id,
             sections=sections, todos=todos, source="hybrid", ai=ai_meta,
+            composite_sla=composite_sla,
             tenant_id=tenant_id, actor=_actor(principal), reason="Generated with AI",
         )
     else:
@@ -1405,8 +1581,11 @@ async def _run_generate_know_me(
         km_doc = kreg.update_know_me(
             km_doc["id"], workload_id=workload_id, workload_name=wl_name, connection_id=connection_id,
             sections=sections, todos=todos, source="ai", ai=ai_meta,
+            composite_sla=composite_sla,
             tenant_id=tenant_id, actor=_actor(principal), reason="Generated with AI",
         )
+    if km_doc is None:
+        raise RuntimeError("Know-Me was removed while generation was saving.")
     return _know_me_response(architecture_id, arch, km_doc)
 
 
@@ -1428,8 +1607,8 @@ async def generate_know_me_stream_endpoint(
             extra_context=extra_context, target_km_id=None,
         )
 
-    _knowme_jobs.start(key, _runner)
-    return EventSourceResponse(_knowme_jobs.stream(key))
+    await _knowme_jobs.start(key, _runner, tenant_id=principal.tenant_id)
+    return EventSourceResponse(_knowme_jobs.stream(key, tenant_id=principal.tenant_id))
 
 
 @router.post("/know-me/{km_id}/generate/stream")
@@ -1452,8 +1631,8 @@ async def regenerate_know_me_stream_endpoint(
             extra_context=extra_context, target_km_id=km_id,
         )
 
-    _knowme_jobs.start(key, _runner)
-    return EventSourceResponse(_knowme_jobs.stream(key))
+    await _knowme_jobs.start(key, _runner, tenant_id=principal.tenant_id)
+    return EventSourceResponse(_knowme_jobs.stream(key, tenant_id=principal.tenant_id))
 
 
 @router.get("/know-me/{km_id}/generate/job")
@@ -1461,7 +1640,8 @@ async def know_me_generate_job_endpoint(km_id: str, principal: Principal = Depen
     """KP5/KU4 — current generation-job status for a Know-Me doc (for reconnect on page visit).
     Returns ``{job: null}`` when nothing is running/recent so the client can resume tailing a
     generation that started before it navigated here."""
-    return {"job": _knowme_jobs.public_job(_knowme_jobs.get_job(f"km:{km_id}"))}
+    job = await _knowme_jobs.get_job(f"km:{km_id}", tenant_id=principal.tenant_id)
+    return {"job": _knowme_jobs.public_job(job)}
 
 
 def _finalize_know_me_todos(
@@ -1539,6 +1719,14 @@ async def generate_know_me_section_stream_endpoint(
             known = await kctx.gather_known_facts(wl, arch, tenant_id, connection_id, facts)
             yield {"event": "status", "data": json.dumps({"phase": "evidence", "message": "📊 Pulling posture evidence (assessments, coverage, profiler)…"})}
             evidence = await kctx.gather_evidence(architecture_id, workload_id, tenant_id, connection_id)
+            composite_sla = None
+            if section_key == "resiliency_dr":
+                yield {"event": "status", "data": json.dumps({
+                    "phase": "sla", "message": "Refreshing Composite SLA configuration…",
+                })}
+                composite_sla = await sla.generate_snapshot(
+                    arch, wl, connection_id, previous=cur.get("composite_sla"),
+                )
 
             queue: asyncio.Queue[dict[str, str]] = asyncio.Queue()
 
@@ -1577,9 +1765,12 @@ async def generate_know_me_section_stream_endpoint(
             saved = kreg.update_know_me(
                 km_id, workload_id=workload_id, workload_name=wl_name, connection_id=connection_id,
                 sections=sections, todos=todos, source="hybrid",
+                composite_sla=composite_sla,
                 tenant_id=tenant_id, actor=_actor(principal),
                 reason=f"Regenerated section: {label}",
             )
+            if saved is None:
+                raise RuntimeError("Know-Me was removed while section generation was saving.")
             yield {"event": "done", "data": json.dumps(_know_me_response(architecture_id, arch, saved))}
         except Exception as exc:  # noqa: BLE001
             logger.exception("Know-Me section regeneration failed")
@@ -1645,8 +1836,10 @@ async def _run_know_me_from_workload(
         resources = dump["resources"] or []
         if not resources:
             raise RuntimeError("No resources found in this workload's scope — cannot reverse-engineer an architecture.")
-        await progress("architecture", f"🤖 Reverse-engineering an architecture from {len(resources)} resource(s)…")
-        ares = await generate_architecture(wl_name, resources)
+        context = dump.get("context") or {}
+        represented = int(context.get("represented_resource_count") or len(resources))
+        await progress("architecture", f"🤖 Reverse-engineering an architecture representing {represented} resource(s)…")
+        ares = await generate_architecture(wl_name, resources, context=context)
         if ares is None:
             raise RuntimeError("The AI could not infer an architecture from this workload. Try again.")
         arch = arch_registry.upsert_architecture(
@@ -1661,7 +1854,8 @@ async def _run_know_me_from_workload(
                 "nodes": ares["nodes"], "edges": ares["edges"], "groups": ares["groups"],
                 "ai": {
                     "rationale": ares["rationale"], "confidence": ares["confidence"],
-                    "resource_count": len(resources), "generated_by": _actor(principal),
+                    "resource_count": int(context.get("total_resource_count") or len(resources)),
+                    "context": context, "generated_by": _actor(principal),
                 },
                 "created_by": _actor(principal),
             },
@@ -1681,6 +1875,7 @@ async def _run_know_me_from_workload(
         conn = resolve_connection(conn_id or None)
         dump = await dump_resources(wl, conn)
         resources = dump.get("resources") or []
+        context = dump.get("context") or {}
 
         async def _mprog(_phase: str, message: str) -> None:
             await progress("memory", message)
@@ -1698,17 +1893,25 @@ async def _run_know_me_from_workload(
             ai={
                 "confidence": mres.get("confidence"),
                 "generated_at": datetime.now(timezone.utc).isoformat(),
-                "generated_by": _actor(principal), "resource_count": len(resources),
+                "generated_by": _actor(principal),
+                "resource_count": int(context.get("total_resource_count") or len(resources)),
+                "context": context,
             },
             tenant_id=tenant_id, actor=_actor(principal), reason="Generated with AI (Know-Me pipeline)",
         )
 
     # 3) Transform the Memory into a Know-Me.
+    if memory is None:
+        raise RuntimeError("Architecture Memory could not be saved.")
     await progress("knowme", "📄 Transforming the Memory into a Know-Me…")
     facts = km.scope_facts(wl, arch)
     await progress("knowme", "🔎 Resolving platform-known values & posture evidence…")
     known = await kctx.gather_known_facts(wl, arch, tenant_id, conn_id, facts)
     evidence = await kctx.gather_evidence(architecture_id, workload_id, tenant_id, conn_id)
+    await progress("sla", "Resolving service commitments and Composite SLA inputs…")
+    composite_sla = await sla.generate_snapshot(arch, wl, conn_id)
+    await progress("sla", "Composite SLA withheld pending dependency review."
+                   if composite_sla["status"] != "calculated" else "Composite SLA calculated.")
 
     async def _kprog(_phase: str, message: str) -> None:
         await progress("knowme", message)
@@ -1733,6 +1936,7 @@ async def _run_know_me_from_workload(
     km_doc = kreg.update_know_me(
         new_km["id"], workload_id=workload_id, workload_name=workload_name, connection_id=conn_id,
         sections=sections, todos=todos, source="ai",
+        composite_sla=composite_sla,
         ai={
             "confidence": kres.get("confidence"),
             "passes": kres.get("passes"),
@@ -1743,6 +1947,8 @@ async def _run_know_me_from_workload(
         },
         tenant_id=tenant_id, actor=_actor(principal), reason="Generated with AI (from workload)",
     )
+    if km_doc is None:
+        raise RuntimeError("Know-Me was removed while generation was saving.")
     return _know_me_response(architecture_id, arch, km_doc)
 
 
@@ -1781,8 +1987,8 @@ async def know_me_from_workload_stream_endpoint(
             principal=principal,
         )
 
-    _knowme_jobs.start(key, _runner)
-    return EventSourceResponse(_knowme_jobs.stream(key))
+    await _knowme_jobs.start(key, _runner, tenant_id=tenant_id)
+    return EventSourceResponse(_knowme_jobs.stream(key, tenant_id=tenant_id))
 
 
 @router.get("/know-me/from-workload/active")
@@ -1792,7 +1998,7 @@ async def know_me_from_workload_active_endpoint(principal: Principal = Depends(g
     include the built document id under ``result`` so the tray can offer an Open link."""
     prefix = _wlkm_key(principal.tenant_id, "")
     jobs: list[dict[str, Any]] = []
-    for job in _knowme_jobs.jobs_with_prefix(prefix):
+    for job in await _knowme_jobs.jobs_with_prefix(prefix, tenant_id=principal.tenant_id):
         pub = _knowme_jobs.public_job(job)
         if pub is None:
             continue
@@ -1875,7 +2081,12 @@ async def workload_inventory_endpoint(workload_id: str, _: Principal = Depends(g
         raise HTTPException(status_code=404, detail="Workload not found.")
     conn = resolve_connection(wl.get("connection_id") or None)
     dump = await dump_resources(wl, conn)
-    return {"count": dump["count"], "error": dump["error"], "resources": dump["resources"]}
+    return {
+        "count": dump["count"], "known_total": dump.get("known_total"),
+        "complete": dump.get("complete"), "partial": dump.get("partial"),
+        "context": dump.get("context") or {}, "warnings": dump.get("warnings") or [],
+        "error": dump["error"], "resources": dump["resources"],
+    }
 
 
 # ----------------------------------------------- AI: reverse-engineer from a workload
@@ -1912,10 +2123,12 @@ async def from_workload_endpoint(payload: FromWorkloadRequest, principal: Princi
                 yield {"event": "error", "data": json.dumps({"message": "No resources found in this workload's scope."})}
                 return
 
-            yield {"event": "status", "data": json.dumps({"phase": "ai", "message": f"Reverse-engineering architecture from {len(resources)} resource(s)…"})}
+            context = dump.get("context") or {}
+            represented = int(context.get("represented_resource_count") or len(resources))
+            yield {"event": "status", "data": json.dumps({"phase": "ai", "message": f"Reverse-engineering architecture representing {represented} resource(s)…"})}
             from app.architectures.designer import generate_architecture
 
-            result = await generate_architecture(wl_name, resources)
+            result = await generate_architecture(wl_name, resources, context=context)
             if result is None:
                 yield {"event": "error", "data": json.dumps({"message": "The AI could not infer an architecture. Try again."})}
                 return
@@ -1934,7 +2147,8 @@ async def from_workload_endpoint(payload: FromWorkloadRequest, principal: Princi
                 "ai": {
                     "rationale": result["rationale"],
                     "confidence": result["confidence"],
-                    "resource_count": len(resources),
+                    "resource_count": int(context.get("total_resource_count") or len(resources)),
+                    "context": context,
                     "generated_by": _actor(principal),
                 },
             }
@@ -1965,12 +2179,14 @@ async def enhance_architecture_endpoint(
 
     arch = _tenant_arch_or_404(architecture_id, principal)
     resources: list[dict[str, Any]] = []
+    context: dict[str, Any] = {}
     wl = get_workload(arch.get("workload_id") or "")
     if wl is not None:
         conn = resolve_connection(arch.get("connection_id") or wl.get("connection_id") or None)
         dump = await dump_resources(wl, conn)
         resources = dump["resources"]
-    result = await enhance_architecture(arch, resources, payload.goal)
+        context = dump.get("context") or {}
+    result = await enhance_architecture(arch, resources, payload.goal, context=context)
     if result is None:
         raise HTTPException(status_code=502, detail="The AI could not enhance this diagram. Try again.")
     saved = arch_registry.upsert_architecture({
@@ -1981,7 +2197,10 @@ async def enhance_architecture_endpoint(
         "edges": result["edges"],
         "groups": result["groups"],
         "source": "ai",
-        "ai": {**(arch.get("ai") or {}), "rationale": result["rationale"], "confidence": result["confidence"]},
+        "ai": {
+            **(arch.get("ai") or {}), "rationale": result["rationale"],
+            "confidence": result["confidence"], "context": context,
+        },
     }, actor=_actor(principal), reason="AI enhanced")
     return {"architecture": saved}
 
@@ -2020,7 +2239,7 @@ async def architecture_drift_endpoint(
     When the architecture is linked to a workload, drift is scoped to that workload. Otherwise
     (e.g. an older reverse-engineered diagram with no workload link) it falls back to the
     (subscription, resource group) scope the diagram's own ARM-id nodes already live in."""
-    from app.architectures.reverse import dump_resources, live_resources_in_diagram_scope
+    from app.architectures.reverse import collect_workload_inventory, live_resources_in_diagram_scope
 
     arch = _tenant_arch_or_404(architecture_id, principal)
     nodes = arch.get("nodes") or []
@@ -2029,9 +2248,14 @@ async def architecture_drift_endpoint(
 
     if wl is not None:
         conn = resolve_connection(arch.get("connection_id") or wl.get("connection_id") or None)
-        dump = await dump_resources(wl, conn)
+        dump = await collect_workload_inventory(wl, conn)
         if dump.get("error"):
             raise HTTPException(status_code=502, detail=str(dump["error"]))
+        if dump.get("partial"):
+            raise HTTPException(
+                status_code=409,
+                detail="Live workload inventory is partial; drift was not computed because it could report false removals.",
+            )
         live = dump.get("resources") or []
     else:
         # No workload link — derive the comparison scope from the diagram's own resources.

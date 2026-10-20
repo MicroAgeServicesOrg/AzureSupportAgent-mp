@@ -34,8 +34,8 @@ from app.core.llm_config import (
     OPENAI_FALLBACK_MODELS,
     OPENROUTER_FALLBACK_MODELS,
     load_config,
+    mutate_config,
     public_config,
-    save_config,
     set_provider_enabled,
 )
 from app.core.security import Principal, require_permission
@@ -55,10 +55,13 @@ from app.schemas import ApprovalDecision, ApprovalOut, ToolCallOut
 
 router = APIRouter(prefix="/admin", tags=["admin"])
 
-# Existing `require_admin` call sites now enforce a fine-grained capability (admins always
-# pass through require_permission). Admin config remains admin-only because only the admin
-# role carries settings.write. See app.auth.permissions for the catalog.
+# Keep write-oriented legacy call sites on settings.write, while read endpoints below use
+# their explicit catalog capabilities. This makes operator/auditor read roles real instead
+# of advertising permissions that every endpoint ignored.
 require_admin = require_permission("settings.write")
+require_settings_read = require_permission("settings.read")
+require_audit_read = require_permission("audit.read")
+require_monitor_view = require_permission("monitor.view")
 settings = get_settings()
 
 
@@ -103,6 +106,14 @@ class AppSettingsUpdate(BaseModel):
     max_tool_iterations: int | None = None
     tool_result_limit: int | None = None
     tool_discovery_limit: int | None = None
+    tool_routing_enabled: bool | None = None
+    tool_initial_budget: int | None = Field(default=None, ge=4, le=96)
+    tool_max_per_turn: int | None = Field(default=None, ge=4, le=128)
+    tool_search_page_size: int | None = Field(default=None, ge=1, le=12)
+    azure_mcp_disabled_tools: list[str] | None = None
+    entra_mcp_disabled_tools: list[str] | None = None
+    agent_skills_enabled: bool | None = None
+    openai_native_tool_search_enabled: bool | None = None
     request_timeout_seconds: int | None = None
     expensive_requests_per_user_hour: int | None = Field(default=None, ge=0, le=100000)
     expensive_requests_per_tenant_hour: int | None = Field(default=None, ge=0, le=1000000)
@@ -114,6 +125,11 @@ class AppSettingsUpdate(BaseModel):
     assessment_severity_weights: dict[str, int] | None = None
     assessment_score_good: int | None = None
     assessment_score_warn: int | None = None
+    # Recovery Readiness. Contributing to the Reliability pillar moves an existing tenant's
+    # score, so it is opt-in rather than a silent change to a number people track.
+    assessments_include_recovery: bool | None = None
+    resiliency_tools_enabled: bool | None = None
+    cost_tools_enabled: bool | None = None
     architecture_category_colors: dict[str, str] | None = None
     # Policy exemption guardrails (enforced on create/extend).
     policy_exemption_require_justification: bool | None = None
@@ -127,10 +143,16 @@ class AppSettingsUpdate(BaseModel):
     arg_rate_limit_enabled: bool | None = None
     arg_max_queries_per_window: int | None = Field(default=None, ge=1, le=100)
     arg_rate_window_seconds: int | None = Field(default=None, ge=1, le=60)
+    # Performance Profiler fleet/metric safety controls.
+    perfprofile_fleet_concurrency: int | None = Field(default=None, ge=1, le=3)
+    perfprofile_fleet_start_delay_ms: int | None = Field(default=None, ge=0, le=30000)
+    perfprofile_metric_concurrency: int | None = Field(default=None, ge=1, le=12)
+    perfprofile_metric_max_attempts: int | None = Field(default=None, ge=1, le=6)
+    perfprofile_workload_timeout_s: int | None = Field(default=None, ge=60, le=7200)
 
 
 @router.get("/settings")
-async def get_app_settings(_: Principal = Depends(require_admin)):
+async def get_app_settings(_: Principal = Depends(require_settings_read)):
     from app.core.app_settings import ALLOWED_COMMAND_BINARIES, RESPONSE_STYLES, load_settings
 
     return {
@@ -169,7 +191,7 @@ class AiPromptsUpdate(BaseModel):
 
 
 @router.get("/ai-prompts")
-async def get_ai_prompts(_: Principal = Depends(require_admin)):
+async def get_ai_prompts(_: Principal = Depends(require_settings_read)):
     from app.core.ai_prompts import list_prompts
 
     return {"prompts": list_prompts()}
@@ -239,7 +261,7 @@ class LLMConfigUpdate(BaseModel):
 
 
 @router.get("/llm/config")
-async def get_llm_config(_: Principal = Depends(require_admin)):
+async def get_llm_config(_: Principal = Depends(require_settings_read)):
     """Current LLM configuration (keys masked)."""
     return public_config()
 
@@ -255,43 +277,46 @@ async def update_llm_config(
     An empty/omitted api_key leaves the existing key untouched (so the masked key
     in the UI doesn't overwrite the real secret).
     """
-    cfg = load_config()
-    if payload.active_provider:
-        if payload.active_provider not in cfg.get("providers", {}):
-            raise HTTPException(status_code=400, detail="Unknown provider")
-        cfg["active_provider"] = payload.active_provider
-    if payload.providers:
-        for name, upd in payload.providers.items():
-            prov = cfg.setdefault("providers", {}).setdefault(name, {})
-            if upd.model is not None:
-                prov["model"] = upd.model
-            if upd.base_url is not None:
-                prov["base_url"] = upd.base_url
-            if upd.api_version is not None:
-                prov["api_version"] = upd.api_version
-            if upd.free_only is not None:
-                prov["free_only"] = upd.free_only
-            if upd.disabled is not None:
-                prov["disabled"] = upd.disabled
-            if upd.hidden_models is not None:
-                # De-duplicate + sort so the file stays stable on disk.
-                prov["hidden_models"] = sorted({m.strip() for m in upd.hidden_models if isinstance(m, str) and m.strip()})
-            # Only replace the key when a non-empty new value is provided.
-            if upd.api_key:
-                prov["api_key"] = upd.api_key
-            # Setting up a provider auto-enables it: a fresh install ships every
-            # provider disabled, and saving a credential (an API key, or a base URL for
-            # a local provider) is what "sets it up". An explicit disabled flag in the
-            # same request always wins.
-            if upd.disabled is None:
-                credential_added = bool(upd.api_key) or (
-                    name in LOCAL_PROVIDERS
-                    and upd.base_url is not None
-                    and upd.base_url.strip() != ""
-                )
-                if credential_added:
-                    prov["disabled"] = False
-    save_config(cfg)
+    def _mutate(cfg: dict[str, Any]) -> None:
+        if payload.active_provider:
+            if payload.active_provider not in cfg.get("providers", {}):
+                raise HTTPException(status_code=400, detail="Unknown provider")
+            cfg["active_provider"] = payload.active_provider
+        if payload.providers:
+            for name, upd in payload.providers.items():
+                prov = cfg.setdefault("providers", {}).setdefault(name, {})
+                if upd.model is not None:
+                    prov["model"] = upd.model
+                if upd.base_url is not None:
+                    prov["base_url"] = upd.base_url
+                if upd.api_version is not None:
+                    prov["api_version"] = upd.api_version
+                if upd.free_only is not None:
+                    prov["free_only"] = upd.free_only
+                if upd.disabled is not None:
+                    prov["disabled"] = upd.disabled
+                if upd.hidden_models is not None:
+                    # De-duplicate + sort so the file stays stable on disk.
+                    prov["hidden_models"] = sorted(
+                        {m.strip() for m in upd.hidden_models if isinstance(m, str) and m.strip()}
+                    )
+                # Only replace the key when a non-empty new value is provided.
+                if upd.api_key:
+                    prov["api_key"] = upd.api_key
+                # Setting up a provider auto-enables it: a fresh install ships every
+                # provider disabled, and saving a credential (an API key, or a base URL for
+                # a local provider) is what "sets it up". An explicit disabled flag in the
+                # same request always wins.
+                if upd.disabled is None:
+                    credential_added = bool(upd.api_key) or (
+                        name in LOCAL_PROVIDERS
+                        and upd.base_url is not None
+                        and upd.base_url.strip() != ""
+                    )
+                    if credential_added:
+                        prov["disabled"] = False
+
+    cfg = mutate_config(_mutate)
     db.add(
         AuditLog(
             tenant_id=principal.tenant_id,
@@ -310,7 +335,7 @@ async def list_llm_models(
     provider: str,
     free_only: bool | None = None,
     include_hidden: bool = False,
-    _: Principal = Depends(require_admin),
+    _: Principal = Depends(require_settings_read),
 ):
     """List available models for a provider. Fetches live where possible, with a
     curated fallback list. Uses the saved key for that provider.
@@ -333,7 +358,7 @@ async def list_llm_models(
 async def _fetch_provider_models(
     provider: str, prov: dict[str, Any], free_only: bool | None
 ) -> dict[str, Any]:
-    """Internal: fetch the raw model catalogue for a provider (live + fallback).
+    """Internal: fetch the raw model catalog for a provider (live + fallback).
     Caller is responsible for applying the per-provider hidden-models filter."""
     base_url = (prov.get("base_url") or "").strip()
     if base_url:
@@ -867,7 +892,7 @@ async def test_llm_provider_stream(
 
 # --- Staged "Refresh models" diagnostics (SSE) ----------------------------------------
 # Same shape as the Test connection stream, but the terminal phase fetches the model
-# catalogue from the provider so the admin sees where the list came from and how many
+# catalog from the provider so the admin sees where the list came from and how many
 # models were returned. The final `done` payload includes `models: [...]` so the UI can
 # update the model dropdown with the freshly-fetched list.
 
@@ -963,12 +988,12 @@ async def _diagnose_models(provider: str, free_only: bool | None):
         except Exception as exc:  # noqa: BLE001
             yield _ev("connect", "warn", f"Reached {host}, unusual response", str(exc)[:200], _ms_since(t0))
 
-    # ---- 4. Fetch model catalogue ----------------------------------------------
+    # ---- 4. Fetch model catalog ----------------------------------------------
     t0 = time.perf_counter()
     ids: list[str] = []
     fetch_err: str | None = None
     try:
-        # Always fetch the full catalogue here (include hidden) — the admin needs to
+        # Always fetch the full catalog here (include hidden) — the admin needs to
         # see every model to manage visibility; chat-picker filtering happens elsewhere.
         prov_cfg = load_config().get("providers", {}).get(provider, {})
         res = await _fetch_provider_models(provider, prov_cfg, free_only)
@@ -1034,7 +1059,7 @@ async def refresh_llm_models_stream(
 
 
 @router.get("/llm/oauth/chatgpt/status")
-async def chatgpt_oauth_status(_: Principal = Depends(require_admin)):
+async def chatgpt_oauth_status(_: Principal = Depends(require_settings_read)):
     """Report ChatGPT (Codex) sign-in / token status for the admin UI."""
     return chatgpt_oauth.status()
 
@@ -1092,7 +1117,7 @@ async def chatgpt_oauth_complete(
 
 
 @router.get("/llm/oauth/claude/status")
-async def claude_oauth_status(_: Principal = Depends(require_admin)):
+async def claude_oauth_status(_: Principal = Depends(require_settings_read)):
     """Report Claude (Pro/Max) sign-in / token status for the admin UI."""
     return claude_oauth.status()
 
@@ -1264,13 +1289,13 @@ async def github_copilot_signout(
 
 
 @router.get("/llm/oauth/github/status")
-async def github_copilot_status(_: Principal = Depends(require_admin)):
+async def github_copilot_status(_: Principal = Depends(require_settings_read)):
     """Report GitHub Copilot sign-in / token status for the admin UI."""
     return github_copilot_auth.status()
 
 
 @router.get("/mcp/tools")
-async def list_mcp_tools(_: Principal = Depends(require_admin)):
+async def list_mcp_tools(_: Principal = Depends(require_settings_read)):
     """Discover the tools exposed by the Azure MCP server, with read/write class."""
     client = build_mcp_client(settings)
     try:
@@ -1279,13 +1304,34 @@ async def list_mcp_tools(_: Principal = Depends(require_admin)):
         raise HTTPException(status_code=502, detail=f"MCP unavailable: {exc}") from exc
     finally:
         client.close()
-    return [
-        {"name": t.name, "description": t.description, "kind": t.kind} for t in tools
-    ]
+    from app.agent.provider import ToolSpec
+    from app.agent.tool_catalog import make_entry
+    from app.core.app_settings import load_settings
+
+    disabled = {str(v) for v in (load_settings().get("azure_mcp_disabled_tools") or [])}
+    enriched = []
+    for tool in tools:
+        entry = make_entry(
+            ToolSpec(tool.name, tool.description, tool.parameters, kind=tool.kind),
+            source_hint="azure_mcp",
+            kind=tool.kind,
+        )
+        enriched.append({
+            **entry.public(),
+            "active": tool.name not in disabled and tool.available,
+            "disabled": tool.name in disabled,
+            "runtime_available": tool.available,
+            "unavailable_reason": tool.unavailable_reason,
+        })
+    return {
+        "disabled": sorted(disabled),
+        "bundles": sorted({b for item in enriched for b in item.get("bundles", [])}),
+        "tools": enriched,
+    }
 
 
 @router.get("/builtin/tools")
-async def list_builtin_tools(_: Principal = Depends(require_admin)):
+async def list_builtin_tools(_: Principal = Depends(require_settings_read)):
     """The first-party built-in utility tools (web fetch + network diagnostics) and
     whether they're enabled for the agent."""
     from app.agent.builtins import builtin_tool_catalog
@@ -1307,7 +1353,7 @@ async def list_builtin_tools(_: Principal = Depends(require_admin)):
 
 
 @router.get("/entra/tools")
-async def list_entra_tools(_: Principal = Depends(require_admin)):
+async def list_entra_tools(principal: Principal = Depends(require_settings_read)):
     """Discover the tools exposed by the EntraID (Microsoft Graph) MCP server, with
     read/write class. Authenticates with the default Azure connection's service
     principal (the same identity the agent uses for directory queries)."""
@@ -1323,13 +1369,209 @@ async def list_entra_tools(_: Principal = Depends(require_admin)):
         raise HTTPException(status_code=502, detail=f"EntraID MCP unavailable: {exc}") from exc
     finally:
         client.close()
-    enabled = bool(load_settings().get("entra_mcp_enabled", False))
+    app_settings = load_settings()
+    enabled = bool(app_settings.get("entra_mcp_enabled", False))
+    disabled = {str(v) for v in (app_settings.get("entra_mcp_disabled_tools") or [])}
+    from app.agent.provider import ToolSpec
+    from app.agent.tool_catalog import make_entry
+    from app.entra.agent_tool import behavioural_graph_tools_blocked
+
+    blocked = behavioural_graph_tools_blocked(principal)
+    enriched = []
+    for tool in tools:
+        entry = make_entry(
+            ToolSpec(tool.name, tool.description, tool.parameters, kind=tool.kind),
+            source_hint="entra_mcp",
+            kind=tool.kind,
+        )
+        enriched.append({
+            **entry.public(),
+            "active": enabled and tool.name not in disabled and tool.name not in blocked,
+            "disabled": tool.name in disabled,
+            "permission_withheld": tool.name in blocked,
+        })
     return {
         "enabled": enabled,
         "connection_configured": connection is not None,
-        "tools": [
-            {"name": t.name, "description": t.description, "kind": t.kind} for t in tools
-        ],
+        "disabled": sorted(disabled),
+        "permission_withheld": sorted(blocked),
+        "bundles": sorted({b for item in enriched for b in item.get("bundles", [])}),
+        "tools": enriched,
+    }
+
+
+@router.get("/tool-routing/diagnostics")
+async def tool_routing_diagnostics(
+    query: str = "",
+    agent_id: str = "",
+    principal: Principal = Depends(require_settings_read),
+):
+    """Measure the effective catalog and preview deterministic bounded selection."""
+    from app.agent.provider import ToolSpec
+    from app.agent.provider_capabilities import capabilities_for
+    from app.agent.tool_catalog import ToolCatalog, make_entry
+    from app.agent.tool_router import internal_tool_specs, route_initial
+    from app.automations import agents as agents_registry
+    from app.connectors.registry import build_toolset
+    from app.core.app_settings import agent_runtime_params, load_settings
+    from app.core.azure_connections import get_default_connection
+    from app.core.llm_config import get_active
+    from app.entra.agent_tool import (
+        behavioural_graph_tools_blocked,
+        register_entra_identity_tools,
+    )
+    from app.iam.agent_tool import register_iam_tools
+    from app.advisor.agent_tool import register_advisor_tools
+    from app.cost.agent_tool import register_cost_tools
+    from app.mcp.client import build_entra_mcp_client
+    from app.ownership.agent_tool import register_ownership_tools
+
+    app_settings = load_settings()
+    rt = agent_runtime_params()
+    connection = get_default_connection()
+    agent = agents_registry.get_agent(agent_id) if agent_id else None
+    allow_azure = bool(agent.get("allow_all_azure", True)) if agent else True
+    azure_names = {str(v) for v in ((agent or {}).get("azure_tools") or [])}
+    azure_bundles = {str(v) for v in ((agent or {}).get("azure_bundles") or [])}
+    allow_entra = (
+        bool(agent.get("allow_all_entra", False))
+        if agent
+        else bool(app_settings.get("entra_mcp_enabled", False))
+    )
+    entra_names = {str(v) for v in ((agent or {}).get("entra_tools") or [])}
+    entra_bundles = {str(v) for v in ((agent or {}).get("entra_bundles") or [])}
+    allow_entra = bool(allow_entra or entra_names or entra_bundles)
+
+    entries = []
+    errors: dict[str, str] = {}
+    azure_client = build_mcp_client(settings, connection=connection)
+    try:
+        azure_discovered = await azure_client.list_tools()
+    except Exception:  # noqa: BLE001 - diagnostics report partial catalogs
+        azure_discovered = []
+        # This response is operator-facing but still an external API boundary. MCP exceptions
+        # can contain child-process tracebacks, command lines, paths, or provider payloads.
+        errors["azure_mcp"] = "Azure MCP catalog is temporarily unavailable."
+    finally:
+        azure_client.close()
+    disabled_azure = {
+        str(v) for v in (app_settings.get("azure_mcp_disabled_tools") or [])
+    }
+    for tool in azure_discovered:
+        if tool.name in disabled_azure or not tool.available:
+            continue
+        entry = make_entry(
+            ToolSpec(tool.name, tool.description, tool.parameters, kind=tool.kind),
+            source_hint="azure_mcp",
+            kind=tool.kind,
+        )
+        if allow_azure or entry.name in azure_names or azure_bundles.intersection(entry.bundles):
+            entries.append(entry)
+
+    if allow_entra:
+        entra_client = build_entra_mcp_client(settings, connection=connection)
+        try:
+            entra_discovered = await entra_client.list_tools()
+        except Exception:  # noqa: BLE001
+            entra_discovered = []
+            errors["entra_mcp"] = "Entra MCP catalog is temporarily unavailable."
+        finally:
+            entra_client.close()
+        disabled = {str(v) for v in (app_settings.get("entra_mcp_disabled_tools") or [])}
+        blocked = behavioural_graph_tools_blocked(principal)
+        for tool in entra_discovered:
+            if tool.name in disabled or tool.name in blocked:
+                continue
+            entry = make_entry(
+                ToolSpec(tool.name, tool.description, tool.parameters, kind=tool.kind),
+                source_hint="entra_mcp",
+                kind=tool.kind,
+            )
+            scoped = not (entra_names or entra_bundles) or (
+                entry.name in entra_names or entra_bundles.intersection(entry.bundles)
+            )
+            if scoped:
+                entries.append(entry)
+
+    toolset = build_toolset(
+        (agent or {}).get("connector_tools") if agent else None,
+        include_connectors=bool(agent),
+    )
+    tenant_id = str((connection or {}).get("tenant_id") or principal.tenant_id or "default")
+    register_iam_tools(toolset, tenant_id=tenant_id)
+    register_ownership_tools(toolset, tenant_id=principal.tenant_id)
+    register_entra_identity_tools(
+        toolset,
+        tenant_id=tenant_id,
+        principal=principal,
+        connection=connection,
+    )
+    register_cost_tools(
+        toolset,
+        tenant_id=tenant_id,
+        principal=principal,
+        connection=connection,
+    )
+    register_advisor_tools(
+        toolset,
+        tenant_id=tenant_id,
+        connection=connection,
+    )
+    from app.agent.inventory_tool import register_inventory_tool
+
+    register_inventory_tool(toolset, mcp_client=azure_client)
+    from app.agent.public_exposure_tool import register_public_exposure_tool
+
+    register_public_exposure_tool(toolset, connection=connection)
+    for spec in toolset.specs():
+        entries.append(make_entry(
+            ToolSpec(
+                spec["name"], spec["description"], spec["parameters"],
+                kind=spec.get("kind", "read"),
+            ),
+            source_hint=spec.get("source", "connector"),
+            kind=spec.get("kind", "read"),
+        ))
+    entries.extend(make_entry(spec, source_hint="internal") for spec in internal_tool_specs())
+    catalog = ToolCatalog(entries)
+    preview_query = query.strip() or "Investigate the requested Azure or Entra support issue"
+    surface = route_initial(
+        preview_query,
+        catalog,
+        initial_budget=(
+            rt["tool_initial_budget"]
+            if rt["tool_routing_enabled"]
+            else rt["tool_max_per_turn"]
+        ),
+        max_per_turn=rt["tool_max_per_turn"],
+        search_page_size=rt["tool_search_page_size"],
+        explicit_names=tuple(azure_names | entra_names),
+        explicit_bundles=tuple(azure_bundles | entra_bundles),
+        fill_to_budget=not rt["tool_routing_enabled"],
+    )
+    active = get_active(
+        (agent or {}).get("provider") or None,
+        (agent or {}).get("model") or None,
+    )
+    caps = capabilities_for(active.get("provider"), active.get("model"))
+    selected = set(surface.active_names)
+    return {
+        "query": preview_query,
+        "agent_id": agent_id or None,
+        "provider": {
+            "id": caps.provider,
+            "model": caps.model,
+            "max_tool_definitions": caps.max_tool_definitions,
+            "native_tool_search": caps.native_tool_search,
+            "api": caps.api,
+            "supports_responses": caps.supports_responses,
+            "responses_required_for_tools": caps.responses_required_for_tools,
+            "chat_tools_reasoning_effort_none": caps.chat_tools_reasoning_effort_none,
+            "capability_source": caps.capability_source,
+        },
+        "routing": surface.diagnostics(),
+        "errors": errors,
+        "tools": [entry.public(selected=entry.name in selected) for entry in catalog.entries()],
     }
 
 
@@ -1388,7 +1630,7 @@ async def decide_approval(
 
 @router.get("/tool-calls", response_model=list[ToolCallOut])
 async def list_tool_calls(
-    principal: Principal = Depends(require_admin),
+    principal: Principal = Depends(require_monitor_view),
     db: AsyncSession = Depends(get_db),
     limit: int = 100,
 ):
@@ -1403,7 +1645,7 @@ async def list_tool_calls(
 
 @router.get("/usage")
 async def usage_summary(
-    principal: Principal = Depends(require_admin),
+    principal: Principal = Depends(require_monitor_view),
     db: AsyncSession = Depends(get_db),
 ):
     result = await db.execute(
@@ -1435,7 +1677,7 @@ async def usage_summary(
 
 @router.get("/audit")
 async def audit_log(
-    principal: Principal = Depends(require_admin),
+    principal: Principal = Depends(require_audit_read),
     db: AsyncSession = Depends(get_db),
     limit: int = 25,
     offset: int = 0,
@@ -1495,7 +1737,7 @@ def _siem_audit_target(values: dict[str, Any]) -> str:
 
 
 @router.get("/siem-export")
-async def get_siem_export(_: Principal = Depends(require_admin)):
+async def get_siem_export(_: Principal = Depends(require_audit_read)):
     from app.core.siem_export import list_destinations
 
     return list_destinations()
@@ -1626,7 +1868,7 @@ async def reset_siem_cursor(
 async def monitor_overview(
     days: int | None = None,
     workload_id: str | None = None,
-    principal: Principal = Depends(require_admin),
+    principal: Principal = Depends(require_monitor_view),
     db: AsyncSession = Depends(get_db),
 ):
     """Central monitoring dashboard: one aggregated snapshot of everything happening
@@ -2299,7 +2541,7 @@ async def build_monitor_overview(
     try:
         from app.agent.turn_runner import registry as _turn_registry
 
-        snapshot = _turn_registry.live_snapshot()
+        snapshot = await _turn_registry.live_snapshot(tenant_id=tid)
         if snapshot:
             owned = (
                 await db.execute(
@@ -2392,7 +2634,7 @@ class MonitorDashboardUpsert(BaseModel):
 
 
 @router.get("/monitor/dashboards")
-async def list_monitor_dashboards(principal: Principal = Depends(require_admin)):
+async def list_monitor_dashboards(principal: Principal = Depends(require_monitor_view)):
     """All saved Monitor dashboards for this tenant (default first)."""
     from app.monitor import registry as dash_registry
 
@@ -2400,7 +2642,7 @@ async def list_monitor_dashboards(principal: Principal = Depends(require_admin))
 
 
 @router.get("/monitor/dashboards/{dashboard_id}")
-async def get_monitor_dashboard(dashboard_id: str, _: Principal = Depends(require_admin)):
+async def get_monitor_dashboard(dashboard_id: str, _: Principal = Depends(require_monitor_view)):
     from app.monitor import registry as dash_registry
 
     dash = dash_registry.get_dashboard(dashboard_id)
@@ -2466,7 +2708,7 @@ class AiDashboardRequest(BaseModel):
 
 
 @router.get("/monitor/datasources")
-async def monitor_datasources(_: Principal = Depends(require_admin)):
+async def monitor_datasources(_: Principal = Depends(require_monitor_view)):
     """Catalog of data sources + widget types (powers the editor + grounds the AI)."""
     from app.monitor.catalog import DATASOURCE_CATALOG, WIDGET_CATALOG
 
@@ -2475,7 +2717,7 @@ async def monitor_datasources(_: Principal = Depends(require_admin)):
 
 @router.post("/monitor/widgets/run")
 async def run_monitor_widget(
-    payload: WidgetRunRequest, principal: Principal = Depends(require_admin)
+    payload: WidgetRunRequest, principal: Principal = Depends(require_monitor_view)
 ):
     """Resolve one widget's data binding to a normalized table (cached). Live refresh
     and the editor's preview both call this."""
@@ -2558,7 +2800,7 @@ async def ai_build_dashboard(
 
 @router.get("/monitor/dashboards/{dashboard_id}/versions")
 async def monitor_dashboard_versions(
-    dashboard_id: str, _: Principal = Depends(require_admin)
+    dashboard_id: str, _: Principal = Depends(require_monitor_view)
 ):
     from app.monitor import registry as dash_registry
 

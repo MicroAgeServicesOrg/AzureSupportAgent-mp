@@ -15,6 +15,17 @@ updates:
       msgraph:
         patterns:
           - "msgraph-*"
+    ignore:
+      # mcp 2.0 is a TRANSPORT REWRITE, not a routine major: it swaps the httpx stack for
+      # httpx2/httpcore2 and splits the schema out into a new mcp-types package. pip resolves
+      # it cleanly anyway, so a green install proves nothing -- fastmcp-slim declares
+      # `mcp<2.0` only under its client/server/mcp EXTRAS, which are not installed. Meanwhile
+      # third_party/entraid-mcp-server pins `mcp[cli]<2` and is built into its OWN venv, so
+      # taking 2.x would split the two halves of the MCP integration across incompatible
+      # majors while app/mcp/client.py uses ClientSession/stdio_client directly.
+      # Scoped to major ONLY so 1.x security patches (e.g. CVE-2026-59950) still arrive.
+      - dependency-name: "mcp"
+        update-types: ["version-update:semver-major"]
 
   - package-ecosystem: "npm"
     directory: "/frontend"
@@ -35,6 +46,24 @@ updates:
       # advisory is not reachable. The only "fix" is a major bump to 8.x.
       # Re-evaluate if SSR/RSC is ever adopted. Major bumps still surface here.
       - dependency-name: "react-router-dom"
+        update-types: ["version-update:semver-major"]
+      # react-grid-layout v2 is a REWRITE that silently breaks the Monitor dashboard.
+      # Evaluated and rejected in PR #44 (release 8): the call-site migration is
+      # mechanical (v2 redefines `Layout` as the ARRAY and `LayoutItem` as the element,
+      # and moves the v1 flat-props API to the `react-grid-layout/legacy` subpath) and it
+      # TYPE-CHECKS AND BUILDS 100% CLEAN -- yet at runtime v2 applied neither grid
+      # snapping nor vertical compaction, producing 9 overlapping tile pairs on a 12-widget
+      # dashboard where v1.5.4 produces 0. Do not take this major on a green build alone;
+      # it must be re-verified by driving the dashboard in a browser ABOVE the lg (1200px)
+      # breakpoint, since below it every tile is full-width and the breakage is invisible.
+      # Scoped to major ONLY so 1.x patch/security updates still arrive.
+      - dependency-name: "react-grid-layout"
+        update-types: ["version-update:semver-major"]
+      # @types/react-grid-layout is paired with the above. Its v2 is a DEPRECATED STUB
+      # (react-grid-layout v2 ships its own types), so a v2 bump here is never wanted on
+      # its own -- it only makes sense as part of a deliberate v2 migration, which would
+      # drop this dependency entirely rather than bump it.
+      - dependency-name: "@types/react-grid-layout"
         update-types: ["version-update:semver-major"]
 
   - package-ecosystem: "npm"

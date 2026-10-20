@@ -21,6 +21,8 @@ These two tabs are one mechanism seen from two ends. The signal registry evaluat
 
 The Findings tab answers *what is wrong right now*. The Scanners tab answers *what changed since this check last looked*.
 
+**Screenshot notes:** These synthetic browser fixtures contain example findings and scanner cards, not a live collection or backend signal evaluation. Scanner names, selections and counts are illustrative rather than the shipped catalog or defaults. No scanner run or finding-state change was performed for the captures.
+
 ## Prerequisites and data sources
 
 - Product permission `iam.read`. Changing a finding's state additionally requires `iam.write`, so an auditor can read a review without being able to suppress the findings they are auditing.
@@ -31,7 +33,7 @@ The Findings tab answers *what is wrong right now*. The Scanners tab answers *wh
 
 ### Findings
 
-Served by `GET /api/iam/findings`, with the posture score from `GET /api/iam/score` and — only when you group by check — the signal catalogue from `GET /api/iam/signals`.
+Served by `GET /api/iam/findings`, with the posture score from `GET /api/iam/score` and — only when you group by check — the signal catalog from `GET /api/iam/signals`.
 
 **The score card, always with its coverage.** The score is never returned without the share of weighted checks that were actually measured, and the letter grade is genuinely absent below the coverage floor rather than shown with an asterisk. A grade derived from a third of the checks would be quoted without the caveat, so the card renders "No grade" and the reason instead. Each pillar shows a number or its state — `not measured` for a pillar whose inputs were not collected, `not built` for one no check exists for yet — and never a 0 or a 100 standing in for either.
 
@@ -61,7 +63,9 @@ The distinction matters: a header count that shrank as you scrolled would be wor
 
 **Finding detail and state.** Expanding a card shows why it matters, what to do, any framework references, and the raw evidence. Four states are available: `open`, `in_progress`, `accepted`, `suppressed`. State is stored against the finding's fingerprint, so it survives re-evaluation — a collection run never clears somebody's risk acceptance. Suppressed and accepted findings are dimmed and are excluded from the list unless **Show suppressed** is ticked. Where the affected object is a resolvable principal, an investigate affordance links to the identity view.
 
-The page is capped; a banner states `Showing the first N of M findings` when the cap bites.
+The UI requests the first 200 findings and has no paging control. The API permits 1–500 per page with an offset. Compare shown cards with server totals even when no truncation banner appears; use narrower filters or the workbook for a larger review.
+
+{% include screenshot.html file="fid2-iam-inbox-finding-evidence.png" title="Findings: coverage, affected identity and expanded evidence" caption="No grouping was selected to expose the example card; the defaults are severity, then check, with groups collapsed. Read the unmeasured-check warning before the evidence and triage controls. Not measured usage is not unused access, and displaying a state button does not mean a decision was recorded." %}
 
 ### Scanners
 
@@ -88,6 +92,8 @@ The severity floor is inclusive and works downwards from critical: a floor of `w
 
 **A card that did report still names what it could not check.** A count drawn from three of eight checks is not the same fact as a count drawn from eight of eight, and an expandable line beneath the counts says which, listing each unmeasured check and its reason. It is worded *these are not passes*.
 
+{% include screenshot.html file="fid2-iam-scanner-measurement.png" title="Scanners: saved deltas, blocked counts and unmeasured checks" caption="Compare the example card's new and total counts with its named usage gap. The blocked card withholds counts because its source is unreadable; that is unknown, not zero. These saved fixture states do not demonstrate a Run now action or a newly recorded baseline." %}
+
 **Card counts, in the order they appear:**
 
 | Figure | Meaning |
@@ -107,7 +113,7 @@ The severity floor is inclusive and works downwards from critical: a floor of `w
 
 ### Delivery
 
-Running a scanner can publish its delta to the notification centre; both run endpoints take a `notify` flag that defaults to on. The delivery policy is:
+Running a scanner can publish its delta to the notification center; both run endpoints take a `notify` flag that defaults to on. The delivery policy is:
 
 - a new finding whose signal is on the always-immediate list is published on its own, at its own severity, as soon as it appears;
 - everything else new is published as one digest per scanner, with an exact count and a capped number of worked examples;
@@ -128,7 +134,7 @@ Neither tab honours the scope and workload filter rail; both are tenant-wide for
 2. Open **Findings**. Read the coverage figure on the score card and open the unmeasured panel before reading the list. A short list on a tenant with half its checks unmeasured is a coverage problem, not a clean result.
 3. Group by severity, then by check. Work the critical section first; the collapsed headers are the summary.
 4. Expand a finding for its evidence, then verify the claim against Azure or Entra before acting on it.
-5. Record a state on anything you have decided about. Use `accepted` for a risk somebody owns and `suppressed` for a finding that is wrong or irrelevant, with a reason in both cases.
+5. Record a state on anything you have decided about. Use `accepted` for owned risk and `suppressed` for an irrelevant finding. The current buttons send an empty reason; the API accepts an optional reason up to 1,000 stored characters. Record the rationale through the API or an approved change record rather than expecting a reason dialog.
 6. Open **Scanners** and run the scanners relevant to what you just changed, so the next run's delta is measured from a baseline you understand.
 
 ## Interpretation of results
@@ -136,7 +142,7 @@ Neither tab honours the scope and workload filter rail; both are tenant-wide for
 - **An empty findings list is never an all-clear.** The empty state says so explicitly and points at the unmeasured panel.
 - **`new: 0` means nothing changed, not that nothing is wrong.** Read `total` beside it.
 - **A blocked scanner is a coverage defect**, not a passing check. Fix the collection, then re-run.
-- **Severity is the signal registry's classification.** It is a prioritisation aid; the evidence on the card is what supports a decision.
+- **Severity is the signal registry's classification.** It is a prioritization aid; the evidence on the card is what supports a decision.
 - **Suppressing a finding changes only this product.** Nothing is written to Azure and nothing is exempted anywhere else.
 - **Sub-group counts are page counts.** When a section says `showing N`, treat every count inside it as a floor.
 
@@ -151,6 +157,7 @@ Neither tab honours the scope and workload filter rail; both are tenant-wide for
 ## Safety and limitations
 
 - Neither tab writes to Azure. A scanner run writes only this product's own baseline, and a state change writes only this product's own workflow record.
+- Suppression/acceptance hides a finding from the default list but does not alter the IAM score or raw scanner selection. A scanner may continue reporting accepted risk; do not confuse workflow state with detector resolution.
 - Running a scanner is gated on `iam.read`, the same permission as viewing the tab. Changing a finding's state is the stricter `iam.write`.
 - Findings inherit every limitation of the snapshot they were computed from: uncollected scopes, missing Graph context, unreadable data-plane authorization and unsupported access surfaces all reduce what can be measured, and are reported as unmeasured rather than absorbed into a pass.
 - The findings page is capped and paged; broad reading should be done through the workbook rather than by scrolling.
@@ -168,7 +175,7 @@ Neither tab honours the scope and workload filter rail; both are tenant-wide for
 | The score shows "No grade" | Coverage is below the floor required for a grade. The card states the reason and the percentage; increase coverage rather than reading the number as a bad score. |
 | A pillar section says "not measured" with no findings | The inputs for that pillar's checks were never collected. Check Diagnostics for the collectors that could not read. |
 | Section counts do not add up to the number of cards on screen | The section header is a server tally over the whole filtered set; the cards are one page of it. The `showing N` marker beside the header states the difference. |
-| A sub-section count looks too low | It is counted from the page and is labelled `N shown` whenever its parent section was truncated. Narrow the filter to make the section complete. |
+| A sub-section count looks too low | It is counted from the page and is labeled `N shown` whenever its parent section was truncated. Narrow the filter to make the section complete. |
 | Severity chips read `—` | The findings query has not resolved. That is deliberately not a zero. |
 | Changing a finding's state returns a permission error | State changes require `iam.write`; viewing requires only `iam.read`. |
 

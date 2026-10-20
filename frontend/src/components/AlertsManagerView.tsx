@@ -88,9 +88,9 @@ function PagedView<T>({ rows, page, onPage, children }: { rows: T[]; page: numbe
     {rows.length > PAGE_SIZE && <div className="flex items-center justify-between rounded-lg border bg-white px-3 py-2 text-xs text-gray-600">
       <span>Showing {start + 1}–{Math.min(start + PAGE_SIZE, rows.length)} of {rows.length} · 100 per page</span>
       <div className="flex items-center gap-2">
-        <button disabled={current <= 1} onClick={() => onPage(current - 1)} className="rounded border px-2.5 py-1 disabled:opacity-40">Previous</button>
+        <button disabled={current <= 1} onClick={() => onPage(current - 1)} className="rounded-sm border px-2.5 py-1 disabled:opacity-40">Previous</button>
         <span>Page {current} of {pageCount}</span>
-        <button disabled={current >= pageCount} onClick={() => onPage(current + 1)} className="rounded border px-2.5 py-1 disabled:opacity-40">Next</button>
+        <button disabled={current >= pageCount} onClick={() => onPage(current + 1)} className="rounded-sm border px-2.5 py-1 disabled:opacity-40">Next</button>
       </div>
     </div>}
   </div>;
@@ -103,7 +103,7 @@ function PageBar({ total, page, pageSize, onPage }: { total: number; page: numbe
   if (total <= pageSize) return null;
   return <div className="flex items-center justify-between rounded-lg border bg-white px-3 py-2 text-xs text-gray-600">
     <span>Showing {start + 1}–{Math.min(start + pageSize, total)} of {total} · {pageSize} per page</span>
-    <div className="flex items-center gap-2"><button disabled={current <= 1} onClick={() => onPage(current - 1)} className="rounded border px-2.5 py-1 disabled:opacity-40">Previous</button><span>Page {current} of {pageCount}</span><button disabled={current >= pageCount} onClick={() => onPage(current + 1)} className="rounded border px-2.5 py-1 disabled:opacity-40">Next</button></div>
+    <div className="flex items-center gap-2"><button disabled={current <= 1} onClick={() => onPage(current - 1)} className="rounded-sm border px-2.5 py-1 disabled:opacity-40">Previous</button><span>Page {current} of {pageCount}</span><button disabled={current >= pageCount} onClick={() => onPage(current + 1)} className="rounded-sm border px-2.5 py-1 disabled:opacity-40">Next</button></div>
   </div>;
 }
 
@@ -147,7 +147,7 @@ function AnalysisProgress({ state, compact = false }: { state?: AlertAnalysisRef
     <div className="flex items-start gap-3 px-4 py-3">
       <span className={`mt-1 h-2.5 w-2.5 flex-none rounded-full ${running ? "animate-pulse bg-sky-500" : job.status === "done" ? "bg-emerald-500" : "bg-red-500"}`} />
       <div className="min-w-0 flex-1">
-        <div className="flex flex-wrap items-center gap-2"><span className="text-xs font-semibold capitalize text-gray-900">{phase.replaceAll("_", " ")}</span><span className="text-[10px] tabular-nums text-gray-500">Elapsed {elapsedText(job.started_at, job.finished_at)}</span>{running && <span className="rounded bg-sky-100 px-2 py-0.5 text-[10px] font-medium text-sky-700">Running on server</span>}</div>
+        <div className="flex flex-wrap items-center gap-2"><span className="text-xs font-semibold capitalize text-gray-900">{phase.replaceAll("_", " ")}</span><span className="text-[10px] tabular-nums text-gray-500">Elapsed {elapsedText(job.started_at, job.finished_at)}</span>{running && <span className="rounded-sm bg-sky-100 px-2 py-0.5 text-[10px] font-medium text-sky-700">Running on server</span>}</div>
         <p className="mt-0.5 text-xs text-gray-700">{current}</p>
         <p className="mt-1 text-[10px] text-gray-500">This analysis continues in the background if you navigate away or close this page. Return to reconnect to its progress.</p>
       </div>
@@ -230,7 +230,7 @@ function sortActionGroups<T extends AlertAnalysisActionGroup>(rows: T[], sortCol
   });
 }
 
-function Overview({ overlaps, gaps, rules, costSummary, activityLogCoverage }: { overlaps: AlertAnalysisOverlap[]; gaps: AlertAnalysisGap[]; rules: AlertAnalysisRule[]; costSummary?: AlertAnalysisSnapshot["cost_summary"]; activityLogCoverage: ReactNode }) {
+function Overview({ overlaps, gaps, overview, totals, costSummary, activityLogCoverage }: { overlaps: AlertAnalysisOverlap[]; gaps: AlertAnalysisGap[]; overview?: AlertAnalysisSnapshot["overview"]; totals?: AlertAnalysisSnapshot["section_totals"]; costSummary?: AlertAnalysisSnapshot["cost_summary"]; activityLogCoverage: ReactNode }) {
   const top = [
     ...overlaps.map((item) => ({
       key: item.id,
@@ -247,57 +247,61 @@ function Overview({ overlaps, gaps, rules, costSummary, activityLogCoverage }: {
       risk: item.risk,
     })),
   ].slice(0, 12);
-  const clean = rules.filter((rule) => rule.finding_status === "ok").length;
+  const clean = overview?.clean_rules ?? 0;
   const currency = costSummary?.currency ?? "USD";
-  const confidenceCounts = rules.reduce<Record<string, number>>((counts, rule) => {
-    const confidence = rule.cost?.confidence ?? "none";
-    counts[confidence] = (counts[confidence] ?? 0) + 1;
-    return counts;
-  }, {});
+  const [costDetailsExpanded, setCostDetailsExpanded] = usePersistedState("azsup.alertsManager.costDetailsExpanded", false);
+  const confidenceCounts = overview?.cost_confidence_counts ?? {};
   return (
-    <div className="space-y-4">
-      <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
-        <div className="rounded-xl border bg-white p-4">
-          <div className="text-xs font-medium uppercase tracking-wide text-gray-400">Rationalization opportunity</div>
-          <div className="mt-2 text-3xl font-semibold text-amber-600">{overlaps.length}</div>
-          <p className="mt-1 text-xs text-gray-500">Rule groups that may evaluate the same symptom.</p>
+    <div className="space-y-3">
+      <div className="grid gap-2 sm:grid-cols-2 xl:grid-cols-4">
+        <div className="rounded-lg border bg-white p-3">
+          <div className="text-[10px] font-medium uppercase text-gray-400">Rationalization opportunity</div>
+          <div className="mt-1 text-xl font-semibold leading-5 text-amber-600">{totals?.overlaps ?? overlaps.length}</div>
+          <p className="mt-1 truncate text-[10px] leading-4 text-gray-500" title="Rule groups that may evaluate the same symptom.">Rule groups that may evaluate the same symptom.</p>
         </div>
-        <div className="rounded-xl border bg-white p-4">
-          <div className="text-xs font-medium uppercase tracking-wide text-gray-400">Coverage & routing gaps</div>
-          <div className="mt-2 text-3xl font-semibold text-red-600">{gaps.length}</div>
-          <p className="mt-1 text-xs text-gray-500">Missing baselines, disabled rules, or ineffective notification paths.</p>
+        <div className="rounded-lg border bg-white p-3">
+          <div className="text-[10px] font-medium uppercase text-gray-400">Coverage & routing gaps</div>
+          <div className="mt-1 text-xl font-semibold leading-5 text-red-600">{totals?.gaps ?? gaps.length}</div>
+          <p className="mt-1 truncate text-[10px] leading-4 text-gray-500" title="Missing baselines, disabled rules, or ineffective notification paths.">Missing baselines, disabled rules, or ineffective notification paths.</p>
         </div>
-        <div className="rounded-xl border bg-white p-4">
-          <div className="text-xs font-medium uppercase tracking-wide text-gray-400">Clean rules</div>
-          <div className="mt-2 text-3xl font-semibold text-emerald-600">{clean}</div>
-          <p className="mt-1 text-xs text-gray-500">No overlap or routing issue detected in this snapshot.</p>
+        <div className="rounded-lg border bg-white p-3">
+          <div className="text-[10px] font-medium uppercase text-gray-400">Clean rules</div>
+          <div className="mt-1 text-xl font-semibold leading-5 text-emerald-600">{clean}</div>
+          <p className="mt-1 truncate text-[10px] leading-4 text-gray-500" title="No overlap or routing issue detected in this snapshot.">No overlap or routing issue detected in this snapshot.</p>
         </div>
-        <div className="rounded-xl border border-sky-200 bg-gradient-to-br from-sky-50 to-white p-4">
-          <div className="text-xs font-medium uppercase tracking-wide text-sky-600">Estimated monthly total</div>
-          <div className="mt-2 text-3xl font-semibold tabular-nums text-sky-700">{costSummary ? formatCost(costSummary.current.monthly_usd, currency) : "—"}</div>
-          <p className="mt-1 text-xs text-gray-500">{costSummary ? `${costRange(costSummary.current.monthly_min_usd, costSummary.current.monthly_max_usd, currency)} estimated range` : "Run a new analysis to calculate rule costs."}</p>
+        <div className="rounded-lg border border-sky-200 bg-sky-50/60 p-3">
+          <div className="text-[10px] font-medium uppercase text-sky-600">Estimated monthly total</div>
+          <div className="mt-1 text-xl font-semibold leading-5 tabular-nums text-sky-700">{costSummary ? formatCost(costSummary.current.monthly_usd, currency) : "—"}</div>
+          <p className="mt-1 truncate text-[10px] leading-4 text-gray-500" title={costSummary ? `${costRange(costSummary.current.monthly_min_usd, costSummary.current.monthly_max_usd, currency)} estimated range` : "Run a new analysis to calculate rule costs."}>{costSummary ? `${costRange(costSummary.current.monthly_min_usd, costSummary.current.monthly_max_usd, currency)} estimated range` : "Run a new analysis to calculate rule costs."}</p>
         </div>
       </div>
       {costSummary && <section className="overflow-hidden rounded-xl border bg-white">
-        <div className="flex flex-wrap items-start justify-between gap-3 border-b px-4 py-3">
+        <div className="flex flex-wrap items-start justify-between gap-3 border-b px-3 py-2">
           <div><h2 className="text-sm font-semibold text-gray-900">Alert rule cost estimate</h2><p className="text-xs text-gray-500">Reference alert-rule charges only; this is not an Azure billing quote.</p></div>
-          <div className="text-right text-[10px] text-gray-500"><div className="font-medium text-gray-700">{currency} · per {costSummary.period}</div><div>Catalog {costSummary.catalog_effective_date || "date unavailable"}</div></div>
+          <div className="flex items-center gap-3">
+            <div className="text-right text-[10px] text-gray-500"><div className="font-medium text-gray-700">{currency} · per {costSummary.period}</div><div>Catalog {costSummary.catalog_effective_date || "date unavailable"}</div></div>
+            <button type="button" onClick={() => setCostDetailsExpanded(!costDetailsExpanded)} aria-expanded={costDetailsExpanded} className="rounded-sm border bg-white px-2 py-1 text-[10px] font-medium text-gray-600 hover:bg-gray-50">
+              {costDetailsExpanded ? "▾ Hide breakdown" : "▸ Show breakdown"}
+            </button>
+          </div>
         </div>
-        <div className="grid gap-3 border-b bg-gray-50/60 p-4 sm:grid-cols-2 lg:grid-cols-4">
-          <div className="rounded-lg border bg-white p-3"><div className="text-[10px] font-medium uppercase tracking-wide text-gray-400">Current enabled spend</div><div className="mt-1 text-lg font-semibold tabular-nums text-gray-900">{formatCost(costSummary.current.monthly_usd, currency)}</div><div className="text-[10px] text-gray-500">{costRange(costSummary.current.monthly_min_usd, costSummary.current.monthly_max_usd, currency)}</div></div>
-          <div className="rounded-lg border bg-white p-3"><div className="text-[10px] font-medium uppercase tracking-wide text-gray-400">Potential disabled spend</div><div className="mt-1 text-lg font-semibold tabular-nums text-indigo-700">{formatCost(costSummary.potential_disabled_monthly, currency)}</div><div className="text-[10px] text-gray-500">If disabled rules were enabled · {costRange(costSummary.potential_disabled_monthly_min, costSummary.potential_disabled_monthly_max, currency)}</div></div>
-          <div className="rounded-lg border bg-white p-3"><div className="text-[10px] font-medium uppercase tracking-wide text-gray-400">Estimate coverage</div><div className="mt-1 text-lg font-semibold tabular-nums text-gray-900">{costSummary.priced_count} priced</div><div className={`text-[10px] ${costSummary.unknown_count ? "text-rose-600" : "text-emerald-600"}`}>{costSummary.unknown_count} unknown / unpriced</div></div>
-          <div className="rounded-lg border bg-white p-3"><div className="text-[10px] font-medium uppercase tracking-wide text-gray-400">Confidence</div><div className="mt-2 flex flex-wrap gap-1">{(["high", "medium", "low", "none"] as const).filter((level) => confidenceCounts[level]).map((level) => <span key={level} className={`rounded px-2 py-0.5 text-[10px] font-medium ${COST_CONFIDENCE_STYLE[level]}`}>{confidenceCounts[level]} {level}</span>)}</div><div className="mt-1 text-[10px] text-gray-500">Varies by rule and observable cardinality.</div></div>
+        <div className="grid border-b bg-gray-50/60 px-3 py-2 sm:grid-cols-2 lg:grid-cols-4 lg:divide-x">
+          <div className="min-w-0 px-2 py-0.5"><div className="text-[10px] font-medium uppercase text-gray-400">Current enabled spend</div><div className="mt-0.5 text-base font-semibold tabular-nums text-gray-900">{formatCost(costSummary.current.monthly_usd, currency)}</div><div className="truncate text-[10px] text-gray-500">{costRange(costSummary.current.monthly_min_usd, costSummary.current.monthly_max_usd, currency)}</div></div>
+          <div className="min-w-0 px-2 py-0.5"><div className="text-[10px] font-medium uppercase text-gray-400">Potential disabled spend</div><div className="mt-0.5 text-base font-semibold tabular-nums text-indigo-700">{formatCost(costSummary.potential_disabled_monthly, currency)}</div><div className="truncate text-[10px] text-gray-500" title={`If disabled rules were enabled · ${costRange(costSummary.potential_disabled_monthly_min, costSummary.potential_disabled_monthly_max, currency)}`}>If enabled · {costRange(costSummary.potential_disabled_monthly_min, costSummary.potential_disabled_monthly_max, currency)}</div></div>
+          <div className="min-w-0 px-2 py-0.5"><div className="text-[10px] font-medium uppercase text-gray-400">Estimate coverage</div><div className="mt-0.5 text-base font-semibold tabular-nums text-gray-900">{costSummary.priced_count} priced</div><div className={`text-[10px] ${costSummary.unknown_count ? "text-rose-600" : "text-emerald-600"}`}>{costSummary.unknown_count} unknown / unpriced</div></div>
+          <div className="min-w-0 px-2 py-0.5"><div className="text-[10px] font-medium uppercase text-gray-400">Confidence</div><div className="mt-1 flex flex-wrap gap-1">{(["high", "medium", "low", "none"] as const).filter((level) => confidenceCounts[level]).map((level) => <span key={level} className={`rounded-sm px-1.5 py-0.5 text-[9px] font-medium ${COST_CONFIDENCE_STYLE[level]}`}>{confidenceCounts[level]} {level}</span>)}</div><div className="mt-0.5 text-[10px] text-gray-500">Varies by rule</div></div>
         </div>
+        {costDetailsExpanded && <>
         <div className="grid divide-y lg:grid-cols-2 lg:divide-x lg:divide-y-0">
-          <div className="p-4"><h3 className="text-xs font-semibold text-gray-800">Family breakdown</h3><div className="mt-2 space-y-2">{Object.entries(costSummary.by_family).map(([family, item]) => <div key={family} className="grid grid-cols-[minmax(0,1fr)_auto_auto] items-center gap-3 text-xs"><div className="min-w-0"><span className="font-medium text-gray-700">{COST_FAMILY_LABELS[family] ?? family.replaceAll("_", " ")}</span><span className="ml-1 text-[10px] text-gray-400">{item.rule_count} rule{item.rule_count === 1 ? "" : "s"}{item.unknown_count ? ` · ${item.unknown_count} unknown` : ""}</span></div><div className="text-right"><div className="tabular-nums text-gray-700">{formatCost(item.current.monthly_usd, currency)}</div><div className="text-[9px] text-gray-400">enabled</div></div><div className="min-w-[72px] text-right"><div className="tabular-nums text-indigo-600">{formatCost(item.disabled.monthly_usd, currency)}</div><div className="text-[9px] text-gray-400">disabled</div></div></div>)}</div></div>
-          <div className="p-4"><h3 className="text-xs font-semibold text-gray-800">Top-cost rules</h3>{costSummary.top_rules.length ? <div className="mt-2 space-y-2">{costSummary.top_rules.slice(0, 6).map((rule, index) => <div key={rule.rule_id || `${rule.rule_name}-${index}`} className="flex items-center gap-2 text-xs"><span className="w-4 text-[10px] text-gray-400">{index + 1}</span><div className="min-w-0 flex-1"><div className="truncate font-medium text-gray-700" title={rule.rule_name}>{rule.rule_name || "Unnamed rule"}</div><div className="text-[9px] capitalize text-gray-400">{COST_FAMILY_LABELS[rule.family] ?? rule.family} · {costStatusLabel(rule)} · {rule.confidence} confidence{rule.enabled ? "" : " · disabled"}</div></div><span className="whitespace-nowrap font-medium tabular-nums text-gray-800">{formatCost(rule.monthly_usd, currency)}</span></div>)}</div> : <div className="mt-4 text-xs text-gray-400">No priced rules in this snapshot.</div>}</div>
+          <div className="p-3"><h3 className="text-xs font-semibold text-gray-800">Family breakdown</h3><div className="mt-1.5 space-y-1.5">{Object.entries(costSummary.by_family).map(([family, item]) => <div key={family} className="grid grid-cols-[minmax(0,1fr)_auto_auto] items-center gap-3 text-xs"><div className="min-w-0"><span className="font-medium text-gray-700">{COST_FAMILY_LABELS[family] ?? family.replaceAll("_", " ")}</span><span className="ml-1 text-[10px] text-gray-400">{item.rule_count} rule{item.rule_count === 1 ? "" : "s"}{item.unknown_count ? ` · ${item.unknown_count} unknown` : ""}</span></div><div className="text-right"><div className="tabular-nums text-gray-700">{formatCost(item.current.monthly_usd, currency)}</div><div className="text-[9px] text-gray-400">enabled</div></div><div className="min-w-[72px] text-right"><div className="tabular-nums text-indigo-600">{formatCost(item.disabled.monthly_usd, currency)}</div><div className="text-[9px] text-gray-400">disabled</div></div></div>)}</div></div>
+          <div className="p-3"><h3 className="text-xs font-semibold text-gray-800">Top-cost rules</h3>{costSummary.top_rules.length ? <div className="mt-1.5 space-y-1.5">{costSummary.top_rules.slice(0, 6).map((rule, index) => <div key={rule.rule_id || `${rule.rule_name}-${index}`} className="flex items-center gap-2 text-xs"><span className="w-4 text-[10px] text-gray-400">{index + 1}</span><div className="min-w-0 flex-1"><div className="truncate font-medium text-gray-700" title={rule.rule_name}>{rule.rule_name || "Unnamed rule"}</div><div className="text-[9px] capitalize text-gray-400">{COST_FAMILY_LABELS[rule.family] ?? rule.family} · {costStatusLabel(rule)} · {rule.confidence} confidence{rule.enabled ? "" : " · disabled"}</div></div><span className="whitespace-nowrap font-medium tabular-nums text-gray-800">{formatCost(rule.monthly_usd, currency)}</span></div>)}</div> : <div className="mt-4 text-xs text-gray-400">No priced rules in this snapshot.</div>}</div>
         </div>
-        <details className="border-t px-4 py-3 text-xs"><summary className="cursor-pointer font-medium text-gray-700">Pricing status, scope, and assumptions</summary><div className="mt-2 max-w-4xl space-y-1 text-[11px] leading-5 text-gray-500"><p>{costSummary.catalog_scope}</p>{costSummary.assumptions.map((assumption) => <p key={assumption}>• {assumption}</p>)}<a href={costSummary.catalog_source} target="_blank" rel="noreferrer" className="inline-block text-brand hover:underline">Pricing catalog source ↗</a><div className="font-mono text-[9px] text-gray-400">{costSummary.catalog_version}</div></div></details>
+        <details className="border-t px-3 py-2 text-xs"><summary className="cursor-pointer font-medium text-gray-700">Pricing status, scope, and assumptions</summary><div className="mt-2 max-w-4xl space-y-1 text-[11px] leading-5 text-gray-500"><p>{costSummary.catalog_scope}</p>{costSummary.assumptions.map((assumption) => <p key={assumption}>• {assumption}</p>)}<a href={costSummary.catalog_source} target="_blank" rel="noreferrer" className="inline-block text-brand hover:underline">Pricing catalog source ↗</a><div className="font-mono text-[9px] text-gray-400">{costSummary.catalog_version}</div></div></details>
+        </>}
       </section>}
       {activityLogCoverage}
       <section className="overflow-hidden rounded-xl border bg-white">
-        <div className="border-b px-4 py-3">
+        <div className="border-b px-3 py-2">
           <h2 className="text-sm font-semibold text-gray-900">Priority review queue</h2>
           <p className="text-xs text-gray-500">Highest-confidence overlaps and actionable gaps first.</p>
         </div>
@@ -306,8 +310,8 @@ function Overview({ overlaps, gaps, rules, costSummary, activityLogCoverage }: {
         ) : (
           <div className="divide-y">
             {top.map((item) => (
-              <div key={item.key} className="flex items-start gap-3 px-4 py-3">
-                <span className={`mt-0.5 rounded px-2 py-0.5 text-[10px] font-medium ${RISK_STYLE[item.risk] ?? RISK_STYLE.warning}`}>{item.kind}</span>
+              <div key={item.key} className="flex items-start gap-3 px-3 py-2">
+                <span className={`mt-0.5 rounded-sm px-2 py-0.5 text-[10px] font-medium ${RISK_STYLE[item.risk] ?? RISK_STYLE.warning}`}>{item.kind}</span>
                 <div className="min-w-0 flex-1">
                   <div className="truncate text-sm font-medium text-gray-800">{item.title || "Unnamed finding"}</div>
                   <div className="mt-0.5 text-xs text-gray-500">{item.detail}</div>
@@ -331,12 +335,12 @@ function OverlapsTable({ rows, sortColumn, sortDirection, onSort, onDismiss }: {
         <tbody className="divide-y">
           {rows.map((row) => (
             <tr key={row.id} className="align-top hover:bg-gray-50">
-              <td className="px-3 py-3"><span className={`rounded px-2 py-0.5 font-medium ${row.confidence === "high" ? "bg-red-50 text-red-700" : "bg-amber-50 text-amber-700"}`}>{row.confidence} · {row.type}</span></td>
-              <td className="max-w-xs px-3 py-3"><div className="font-medium text-gray-800">{row.signal_name}</div><div className="mt-1 break-all text-[10px] text-gray-400">{row.target_id}</div></td>
-              <td className="px-3 py-3"><div className="space-y-1">{row.rule_names.map((name) => <div key={name} className="rounded bg-gray-50 px-2 py-1 text-gray-700">{name}</div>)}</div></td>
+              <td className="px-3 py-3"><span className={`rounded-sm px-2 py-0.5 font-medium ${row.confidence === "high" ? "bg-red-50 text-red-700" : "bg-amber-50 text-amber-700"}`}>{row.confidence} · {row.type}</span></td>
+              <td className="max-w-xs px-3 py-3"><div className="font-medium text-gray-800">{row.signal_name}</div><div className="mt-1 break-all text-[10px] text-gray-400">{row.target_id}</div>{(row.target_count ?? 1) > 1 && <div className="mt-1 text-[10px] font-medium text-indigo-600">{row.target_count} matching targets{row.targets_truncated ? " · sample shown" : ""}</div>}</td>
+              <td className="px-3 py-3"><div className="space-y-1">{row.rule_names.map((name) => <div key={name} className="rounded-sm bg-gray-50 px-2 py-1 text-gray-700">{name}</div>)}</div></td>
               <td className="px-3 py-3">{row.notification_overlap ? <span className="font-medium text-red-600">{row.shared_recipient_count} shared destination{row.shared_recipient_count === 1 ? "" : "s"}</span> : <span className="text-gray-400">No shared destination</span>}</td>
               <td className="max-w-sm px-3 py-3 text-gray-600">{row.recommendation}</td>
-              <td className="px-3 py-3"><button onClick={() => onDismiss(row.id)} className="whitespace-nowrap rounded border px-2 py-1 text-[10px] text-indigo-600 hover:bg-indigo-50">Accept overlap</button></td>
+              <td className="px-3 py-3"><button onClick={() => onDismiss(row.id)} className="whitespace-nowrap rounded-sm border px-2 py-1 text-[10px] text-indigo-600 hover:bg-indigo-50">Accept overlap</button></td>
             </tr>
           ))}
         </tbody>
@@ -398,8 +402,8 @@ function GapsTable({ rows, selectedRows, selectedIds, plansByGap, canPlan, group
   }
   return (
     <div className="overflow-hidden rounded-xl border bg-white">
-      {groupBySignal && <div className="flex items-center justify-end gap-2 border-b bg-gray-50 px-3 py-2"><span className="mr-auto text-[10px] text-gray-500">{Object.keys(signalCounts).length} signal group{Object.keys(signalCounts).length === 1 ? "" : "s"}</span><button type="button" disabled={collapsedSignals.size === Object.keys(signalCounts).length} onClick={() => setCollapsedSignals(new Set(Object.keys(signalCounts)))} className="rounded border bg-white px-2.5 py-1 text-[10px] font-medium text-gray-700 hover:bg-gray-100 disabled:opacity-40">Collapse all</button><button type="button" disabled={collapsedSignals.size === 0} onClick={() => setCollapsedSignals(new Set())} className="rounded border bg-white px-2.5 py-1 text-[10px] font-medium text-gray-700 hover:bg-gray-100 disabled:opacity-40">Expand all</button></div>}
-      {selectedIds.size > 0 && <div className="flex flex-wrap items-center gap-3 border-b border-indigo-200 bg-indigo-50 px-4 py-3" data-testid="gap-selection-bar"><div><div className="text-xs font-semibold text-indigo-900">{selectedIds.size} gap{selectedIds.size === 1 ? "" : "s"} selected</div><div className="text-[10px] text-indigo-700">{resourceCount} resource{resourceCount === 1 ? "" : "s"}{severitySummary ? ` · ${severitySummary}` : ""}</div></div><div className="ml-auto flex gap-2"><button onClick={() => onSelectionChange(new Set())} className="rounded border border-indigo-200 bg-white px-3 py-1.5 text-xs text-indigo-700 hover:bg-indigo-100">Clear</button><button data-action="create-gaps-plan" disabled={!canPlan} onClick={onCreatePlan} className="rounded bg-gray-900 px-3 py-1.5 text-xs font-medium text-white hover:bg-gray-700 disabled:opacity-40">Create remediation plan</button></div></div>}
+      {groupBySignal && <div className="flex items-center justify-end gap-2 border-b bg-gray-50 px-3 py-2"><span className="mr-auto text-[10px] text-gray-500">{Object.keys(signalCounts).length} signal group{Object.keys(signalCounts).length === 1 ? "" : "s"}</span><button type="button" disabled={collapsedSignals.size === Object.keys(signalCounts).length} onClick={() => setCollapsedSignals(new Set(Object.keys(signalCounts)))} className="rounded-sm border bg-white px-2.5 py-1 text-[10px] font-medium text-gray-700 hover:bg-gray-100 disabled:opacity-40">Collapse all</button><button type="button" disabled={collapsedSignals.size === 0} onClick={() => setCollapsedSignals(new Set())} className="rounded-sm border bg-white px-2.5 py-1 text-[10px] font-medium text-gray-700 hover:bg-gray-100 disabled:opacity-40">Expand all</button></div>}
+      {selectedIds.size > 0 && <div className="flex flex-wrap items-center gap-3 border-b border-indigo-200 bg-indigo-50 px-4 py-3" data-testid="gap-selection-bar"><div><div className="text-xs font-semibold text-indigo-900">{selectedIds.size} gap{selectedIds.size === 1 ? "" : "s"} selected</div><div className="text-[10px] text-indigo-700">{resourceCount} resource{resourceCount === 1 ? "" : "s"}{severitySummary ? ` · ${severitySummary}` : ""}</div></div><div className="ml-auto flex gap-2"><button onClick={() => onSelectionChange(new Set())} className="rounded-sm border border-indigo-200 bg-white px-3 py-1.5 text-xs text-indigo-700 hover:bg-indigo-100">Clear</button><button data-action="create-gaps-plan" disabled={!canPlan} onClick={onCreatePlan} className="rounded-sm bg-gray-900 px-3 py-1.5 text-xs font-medium text-white hover:bg-gray-700 disabled:opacity-40">Create remediation plan</button></div></div>}
       <div className="overflow-auto">
       <table className="w-full min-w-[980px] text-left text-xs">
         <thead className="sticky top-0 bg-gray-50 text-gray-500"><tr><th className="px-3 py-2"><input type="checkbox" aria-label="Select all visible actionable gaps" checked={allVisibleSelected} disabled={!canPlan || !visibleIds.length} onChange={toggleAllVisible} /></th><SortableHeader column="risk" label="Risk" sortColumn={sortColumn} sortDirection={sortDirection} onSort={onSort} /><SortableHeader column="gap" label="Gap type" sortColumn={sortColumn} sortDirection={sortDirection} onSort={onSort} /><SortableHeader column="resource" label="Resource / rule" sortColumn={sortColumn} sortDirection={sortDirection} onSort={onSort} /><SortableHeader column="signal" label="Signal" sortColumn={sortColumn} sortDirection={sortDirection} onSort={onSort} /><SortableHeader column="recommendation" label="Recommended action" sortColumn={sortColumn} sortDirection={sortDirection} onSort={onSort} /><th className="px-3 py-2" /></tr></thead>
@@ -417,12 +421,12 @@ function GapsTable({ rows, selectedRows, selectedIds, plansByGap, canPlan, group
             {showSignalHeader && <tr className="bg-sky-50/80"><th colSpan={7} scope="rowgroup" className="p-0 text-left text-[11px] font-semibold text-sky-800"><button type="button" aria-expanded={!collapsed} onClick={() => setCollapsedSignals((current) => { const next = new Set(current); if (next.has(signal)) next.delete(signal); else next.add(signal); return next; })} className="flex w-full items-center gap-2 px-3 py-2 text-left hover:bg-sky-100"><span aria-hidden="true" className="w-3 text-center">{collapsed ? "▸" : "▾"}</span><span>Signal: {signal}</span><span className="font-normal text-sky-600">{signalCounts[signal]} gap{signalCounts[signal] === 1 ? "" : "s"} on this page</span></button></th></tr>}
             {!collapsed && <tr key={id} data-testid={`gap-row-${id}`} className={`align-top hover:bg-gray-50 ${selectedIds.has(id) ? "bg-indigo-50/60" : ""}`}>
               <td className="px-3 py-3"><input type="checkbox" aria-label={`Select ${row.signal || row.resource_name || "gap"}`} checked={selectedIds.has(id)} disabled={!canPlan || !actionable} title={!actionable ? activePlan ? "This gap already has an active deployment plan." : "Bulk remediation currently supports metric baseline gaps first." : undefined} onChange={(event) => { const next = new Set(selectedIds); if (event.target.checked) next.add(id); else next.delete(id); onSelectionChange(next); }} /></td>
-              <td className="px-3 py-3"><span className={`rounded px-2 py-0.5 font-medium ${RISK_STYLE[row.risk] ?? RISK_STYLE.warning}`}>{row.risk}</span></td>
-              <td className="px-3 py-3 font-medium capitalize text-gray-700"><div>{row.type.replaceAll("_", " ")}</div>{plan && plan.status !== "none" && <button onClick={() => onOpenPlan(plan.plan_id)} className={`mt-1 rounded px-2 py-0.5 text-[10px] ${plan.status === "rejected" || plan.status === "failed" || plan.status === "stale" ? "bg-rose-50 text-rose-700" : plan.status === "applied" || plan.status === "approved" ? "bg-emerald-50 text-emerald-700" : "bg-amber-50 text-amber-700"}`}>{plan.status} plan ↗</button>}</td>
+              <td className="px-3 py-3"><span className={`rounded-sm px-2 py-0.5 font-medium ${RISK_STYLE[row.risk] ?? RISK_STYLE.warning}`}>{row.risk}</span></td>
+              <td className="px-3 py-3 font-medium capitalize text-gray-700"><div>{row.type.replaceAll("_", " ")}</div>{plan && plan.status !== "none" && <button onClick={() => onOpenPlan(plan.plan_id)} className={`mt-1 rounded-sm px-2 py-0.5 text-[10px] ${plan.status === "rejected" || plan.status === "failed" || plan.status === "stale" ? "bg-rose-50 text-rose-700" : plan.status === "applied" || plan.status === "approved" ? "bg-emerald-50 text-emerald-700" : "bg-amber-50 text-amber-700"}`}>{plan.status} plan ↗</button>}</td>
               <td className="max-w-xs px-3 py-3"><div className="font-medium text-gray-800">{row.rule_name || row.resource_name || "—"}</div><div className="mt-0.5 break-all text-[10px] text-gray-400">{row.rule_id || row.resource_id}</div></td>
               <td className="px-3 py-3 text-gray-600">{row.signal || "—"}</td>
               <td className="max-w-sm px-3 py-3 text-gray-600">{row.recommendation}</td>
-              <td className="px-3 py-3"><div className="flex items-center gap-2"><PortalLink id={row.rule_id || row.resource_id} />{onCreateRule && row.resource_id && row.signal && <button disabled={activePlan} title={activePlan ? "An active deployment plan already covers this gap." : "Create a separate reviewed alert-rule change"} onClick={() => onCreateRule(row)} className="whitespace-nowrap rounded border px-2 py-1 text-[10px] text-green-700 hover:bg-green-50 disabled:cursor-not-allowed disabled:opacity-40">Create reviewed rule</button>}</div></td>
+              <td className="px-3 py-3"><div className="flex items-center gap-2"><PortalLink id={row.rule_id || row.resource_id} />{onCreateRule && row.resource_id && row.signal && <button disabled={activePlan} title={activePlan ? "An active deployment plan already covers this gap." : "Create a separate reviewed alert-rule change"} onClick={() => onCreateRule(row)} className="whitespace-nowrap rounded-sm border px-2 py-1 text-[10px] text-green-700 hover:bg-green-50 disabled:cursor-not-allowed disabled:opacity-40">Create reviewed rule</button>}</div></td>
             </tr>}
           </Fragment>;})}
         </tbody>
@@ -443,17 +447,17 @@ function RulesTable({ rows, sortColumn, sortDirection, onSort, onDecision }: { r
             const condition = rule.conditions[0];
             return (
               <tr key={rule.id} className="align-top hover:bg-gray-50">
-                <td className="px-3 py-3"><span className={`rounded px-2 py-0.5 font-medium ${STATUS_STYLE[rule.finding_status]}`}>{rule.finding_status}</span>{!rule.enabled && <div className="mt-1 text-[10px] text-gray-400">disabled</div>}</td>
+                <td className="px-3 py-3"><span className={`rounded-sm px-2 py-0.5 font-medium ${STATUS_STYLE[rule.finding_status]}`}>{rule.finding_status}</span>{!rule.enabled && <div className="mt-1 text-[10px] text-gray-400">disabled</div>}</td>
                 <td className="max-w-xs px-3 py-3"><div className="font-medium text-gray-800">{rule.name}</div><div className="mt-0.5 text-[10px] text-gray-400">{rule.type.split("/").pop()} · sev {rule.severity}</div>{rule.issues.length > 0 && <div className="mt-1 text-[10px] text-red-500">{rule.issues.join(" · ")}</div>}</td>
                 <td className="px-3 py-3"><div className="font-medium text-gray-700">{condition?.signal_name || "—"}</div><div className="mt-0.5 text-gray-400">{condition ? `${condition.aggregation} ${condition.operator} ${condition.threshold ?? "dynamic"}` : ""}</div><div className="text-[10px] text-gray-400">{condition?.window} / {condition?.frequency}</div></td>
                 <td className="px-3 py-3"><div className="font-medium text-gray-700">{rule.effective_target_count}</div><div className="max-w-[180px] truncate text-[10px] text-gray-400" title={rule.scopes.join("\n")}>{rule.scopes[0] || "No declared scope"}</div></td>
                 <td className="px-3 py-3 text-gray-600">{rule.action_group_names.join(", ") || "—"}</td>
                 <td className="min-w-[145px] px-3 py-3">
                   {rule.cost?.status === "direct_free" ? <div className="font-medium text-emerald-700">Free</div> : rule.cost?.monthly_usd == null ? <div className="font-medium text-gray-500">Unpriced</div> : <><div className="font-medium tabular-nums text-gray-800">{formatCost(rule.cost.monthly_usd, rule.cost.currency)}<span className="text-[9px] font-normal text-gray-400"> / mo</span></div>{(rule.cost.status === "range_estimate" || rule.cost.status === "partial_estimate" || rule.cost.monthly_min_usd !== rule.cost.monthly_max_usd) && <div className="mt-0.5 text-[9px] tabular-nums text-gray-500">{costRange(rule.cost.monthly_min_usd, rule.cost.monthly_max_usd, rule.cost.currency)} {rule.cost.status === "partial_estimate" ? "lower bound" : "range"}</div>}</>}
-                  <div className="mt-1 flex flex-wrap items-center gap-1"><span className={`rounded px-1.5 py-0.5 text-[9px] font-medium ${rule.cost?.status === "direct_free" ? "bg-emerald-50 text-emerald-700" : rule.cost?.status === "unknown" || !rule.cost ? "bg-gray-100 text-gray-600" : "bg-sky-50 text-sky-700"}`}>{costStatusLabel(rule.cost)}</span>{rule.cost && <span title={rule.cost.assumptions.join("\n\n") || "No additional assumptions."} className={`cursor-help rounded px-1.5 py-0.5 text-[9px] font-medium ${COST_CONFIDENCE_STYLE[rule.cost.confidence]}`}>{rule.cost.confidence} confidence ⓘ</span>}</div>
+                  <div className="mt-1 flex flex-wrap items-center gap-1"><span className={`rounded-sm px-1.5 py-0.5 text-[9px] font-medium ${rule.cost?.status === "direct_free" ? "bg-emerald-50 text-emerald-700" : rule.cost?.status === "unknown" || !rule.cost ? "bg-gray-100 text-gray-600" : "bg-sky-50 text-sky-700"}`}>{costStatusLabel(rule.cost)}</span>{rule.cost && <span title={rule.cost.assumptions.join("\n\n") || "No additional assumptions."} className={`cursor-help rounded-sm px-1.5 py-0.5 text-[9px] font-medium ${COST_CONFIDENCE_STYLE[rule.cost.confidence]}`}>{rule.cost.confidence} confidence ⓘ</span>}</div>
                 </td>
                 <td className="px-3 py-3 tabular-nums text-gray-600"><div>{rule.firing_7d ?? 0} / 7d</div><div className="text-[10px] text-gray-400">{rule.firing_30d ?? 0} / 30d</div>{rule.last_fired && <div className="text-[10px] text-gray-400">last {new Date(rule.last_fired).toLocaleDateString()}</div>}</td>
-                <td className="px-3 py-3"><div className="flex flex-wrap gap-1"><PortalLink id={rule.id} /><button onClick={() => onDecision(rule, "keep_rule")} className="rounded border px-2 py-1 text-[10px] text-indigo-600 hover:bg-indigo-50">Keep</button><button onClick={() => onDecision(rule, "exempt_rule")} className="rounded border px-2 py-1 text-[10px] text-gray-600 hover:bg-gray-50">Exempt</button></div></td>
+                <td className="px-3 py-3"><div className="flex flex-wrap gap-1"><PortalLink id={rule.id} /><button onClick={() => onDecision(rule, "keep_rule")} className="rounded-sm border px-2 py-1 text-[10px] text-indigo-600 hover:bg-indigo-50">Keep</button><button onClick={() => onDecision(rule, "exempt_rule")} className="rounded-sm border px-2 py-1 text-[10px] text-gray-600 hover:bg-gray-50">Exempt</button></div></td>
               </tr>
             );
           })}
@@ -473,9 +477,9 @@ function ActionGroupsTable({ rows, sortColumn, sortDirection, onSort }: { rows: 
           {rows.map((group) => (
             <tr key={group.id} className="align-top hover:bg-gray-50">
               <td className="px-3 py-3"><div className="font-medium text-gray-800">{group.name}</div><div className="text-[10px] text-gray-400">{group.resource_group}</div></td>
-              <td className="px-3 py-3"><span className={`rounded px-2 py-0.5 ${group.enabled && group.active_receiver_count > 0 ? "bg-green-50 text-green-700" : "bg-red-50 text-red-700"}`}>{group.enabled ? "enabled" : "disabled"}</span></td>
+              <td className="px-3 py-3"><span className={`rounded-sm px-2 py-0.5 ${group.enabled && group.active_receiver_count > 0 ? "bg-green-50 text-green-700" : "bg-red-50 text-red-700"}`}>{group.enabled ? "enabled" : "disabled"}</span></td>
               <td className="px-3 py-3 tabular-nums text-gray-600">{group.active_receiver_count} active / {group.receiver_count} total</td>
-              <td className="px-3 py-3"><div className="flex flex-wrap gap-1">{group.receivers.map((receiver) => <span key={`${receiver.type}:${receiver.fingerprint}`} className="rounded bg-gray-100 px-2 py-0.5 text-[10px] text-gray-600" title={`Fingerprint ${receiver.fingerprint}`}>{receiver.type} · {receiver.destination || receiver.masked}</span>)}</div></td>
+              <td className="px-3 py-3"><div className="flex flex-wrap gap-1">{group.receivers.map((receiver) => <span key={`${receiver.type}:${receiver.fingerprint}`} className="rounded-sm bg-gray-100 px-2 py-0.5 text-[10px] text-gray-600" title={`Fingerprint ${receiver.fingerprint}`}>{receiver.type} · {receiver.destination || receiver.masked}</span>)}</div></td>
               <td className="px-3 py-3"><PortalLink id={group.id} /></td>
             </tr>
           ))}
@@ -494,13 +498,13 @@ function FiredAlertsTable({ rows, canManage, busy, onState }: { rows: FiredAlert
         <tbody className="divide-y">
           {rows.map((row) => (
             <tr key={row.id} className="align-top hover:bg-gray-50">
-              <td className="px-3 py-3"><span className={`rounded px-2 py-0.5 font-medium ${row.severity === "Sev0" || row.severity === "Sev1" ? "bg-red-50 text-red-700" : row.severity === "Sev2" ? "bg-amber-50 text-amber-700" : "bg-sky-50 text-sky-700"}`}>{row.severity || "—"}</span></td>
+              <td className="px-3 py-3"><span className={`rounded-sm px-2 py-0.5 font-medium ${row.severity === "Sev0" || row.severity === "Sev1" ? "bg-red-50 text-red-700" : row.severity === "Sev2" ? "bg-amber-50 text-amber-700" : "bg-sky-50 text-sky-700"}`}>{row.severity || "—"}</span></td>
               <td className="max-w-sm px-3 py-3"><div className="font-medium text-gray-800">{row.rule_name || row.name}</div><div className="mt-1 line-clamp-2 text-[10px] text-gray-500">{row.description || row.monitor_condition}</div></td>
-              <td className="px-3 py-3"><span className={`rounded px-2 py-0.5 ${row.state === "Closed" ? "bg-gray-100 text-gray-600" : row.state === "Acknowledged" ? "bg-indigo-50 text-indigo-700" : "bg-rose-50 text-rose-700"}`}>{row.state}</span></td>
+              <td className="px-3 py-3"><span className={`rounded-sm px-2 py-0.5 ${row.state === "Closed" ? "bg-gray-100 text-gray-600" : row.state === "Acknowledged" ? "bg-indigo-50 text-indigo-700" : "bg-rose-50 text-rose-700"}`}>{row.state}</span></td>
               <td className="px-3 py-3 text-gray-600"><div>{row.monitor_service || "—"}</div><div className="text-[10px] text-gray-400">{row.signal_type}</div></td>
               <td className="px-3 py-3 text-gray-600">{row.fired_at ? new Date(row.fired_at).toLocaleString() : "—"}</td>
               <td className="max-w-xs px-3 py-3"><div className="truncate text-[10px] text-gray-500" title={row.target_ids.join("\n")}>{row.target_ids[0] || "—"}</div></td>
-              <td className="px-3 py-3"><div className="flex flex-wrap gap-1"><PortalLink id={row.target_ids[0]} />{canManage && row.state !== "Acknowledged" && <button disabled={busy === row.id} onClick={() => onState(row, "Acknowledged")} className="rounded border px-2 py-1 text-[10px] text-indigo-700 disabled:opacity-50">Acknowledge</button>}{canManage && row.state !== "Closed" && <button disabled={busy === row.id} onClick={() => onState(row, "Closed")} className="rounded border px-2 py-1 text-[10px] text-gray-700 disabled:opacity-50">Close</button>}{canManage && row.state !== "New" && <button disabled={busy === row.id} onClick={() => onState(row, "New")} className="rounded border px-2 py-1 text-[10px] text-rose-700 disabled:opacity-50">Reopen</button>}</div></td>
+              <td className="px-3 py-3"><div className="flex flex-wrap gap-1"><PortalLink id={row.target_ids[0]} />{canManage && row.state !== "Acknowledged" && <button disabled={busy === row.id} onClick={() => onState(row, "Acknowledged")} className="rounded-sm border px-2 py-1 text-[10px] text-indigo-700 disabled:opacity-50">Acknowledge</button>}{canManage && row.state !== "Closed" && <button disabled={busy === row.id} onClick={() => onState(row, "Closed")} className="rounded-sm border px-2 py-1 text-[10px] text-gray-700 disabled:opacity-50">Close</button>}{canManage && row.state !== "New" && <button disabled={busy === row.id} onClick={() => onState(row, "New")} className="rounded-sm border px-2 py-1 text-[10px] text-rose-700 disabled:opacity-50">Reopen</button>}</div></td>
             </tr>
           ))}
         </tbody>
@@ -529,11 +533,11 @@ function ManagedActionGroupsTable({ rows, sortColumn, sortDirection, onSort, cap
             {azureRows.map((group) => (
               <tr key={group.id} className="align-top hover:bg-gray-50">
                 <td className="px-3 py-3"><div className="font-medium text-gray-800">{group.name}</div><div className="text-[10px] text-gray-400">{group.resource_group} · {group.location} · {group.short_name}</div></td>
-                <td className="px-3 py-3"><span className={`rounded px-2 py-0.5 ${group.enabled ? "bg-green-50 text-green-700" : "bg-gray-100 text-gray-600"}`}>{group.enabled ? "enabled" : "disabled"}</span></td>
+                <td className="px-3 py-3"><span className={`rounded-sm px-2 py-0.5 ${group.enabled ? "bg-green-50 text-green-700" : "bg-gray-100 text-gray-600"}`}>{group.enabled ? "enabled" : "disabled"}</span></td>
                 <td className="px-3 py-3 text-gray-600">{group.active_receiver_count} active / {group.receiver_count} total</td>
-                <td className="px-3 py-3"><span className={`rounded px-2 py-0.5 ${group.dependency_count ? "bg-indigo-50 text-indigo-700" : "bg-gray-100 text-gray-500"}`}>{group.dependency_count} Azure alert rule{group.dependency_count === 1 ? "" : "s"}</span>{group.dependencies.slice(0, 3).map((dep) => <div key={`${dep.type}:${dep.id}`} className="mt-1 max-w-[220px] truncate text-[10px] text-gray-400" title={`${dep.type}: ${dep.id}`}>{dep.name}</div>)}</td>
-                <td className="px-3 py-3"><div className="flex max-w-sm flex-wrap gap-1">{group.receivers.map((receiver) => <span key={`${receiver.type}:${receiver.fingerprint}`} className="rounded bg-gray-100 px-2 py-0.5 text-[10px] text-gray-600">{receiver.type} · {receiver.destination || receiver.masked}</span>)}</div></td>
-                <td className="px-3 py-3"><div className="flex flex-wrap gap-1"><PortalLink id={group.id} />{caps?.can_manage_action_groups && !caps.read_only && <><button disabled={!!busy} onClick={() => onEdit(group)} className="rounded border px-2 py-1 text-[10px] text-indigo-700 disabled:opacity-50">Edit</button><button disabled={!!busy} onClick={() => onClone(group)} className="rounded border px-2 py-1 text-[10px] text-indigo-700 disabled:opacity-50">Clone</button><button disabled={!!busy} onClick={() => onToggle(group)} className="rounded border px-2 py-1 text-[10px] text-gray-700 disabled:opacity-50">{group.enabled ? "Disable" : "Enable"}</button></>}{caps?.can_test_notifications && !caps.read_only && group.receiver_count > 0 && <button disabled={!!busy} onClick={() => onTest(group)} className="rounded border px-2 py-1 text-[10px] text-amber-700 disabled:opacity-50">Test</button>}{caps?.can_delete && !caps.read_only && <button disabled={!!busy || group.dependency_count > 0} title={group.dependency_count ? "Detach this Action Group from all Azure alert rules before deleting it." : "Request deletion"} onClick={() => onDelete(group)} className="rounded border px-2 py-1 text-[10px] text-red-700 disabled:opacity-40">Delete</button>}</div></td>
+                <td className="px-3 py-3"><span className={`rounded-sm px-2 py-0.5 ${group.dependency_count ? "bg-indigo-50 text-indigo-700" : "bg-gray-100 text-gray-500"}`}>{group.dependency_count} Azure alert rule{group.dependency_count === 1 ? "" : "s"}</span>{group.dependencies.slice(0, 3).map((dep) => <div key={`${dep.type}:${dep.id}`} className="mt-1 max-w-[220px] truncate text-[10px] text-gray-400" title={`${dep.type}: ${dep.id}`}>{dep.name}</div>)}</td>
+                <td className="px-3 py-3"><div className="flex max-w-sm flex-wrap gap-1">{group.receivers.map((receiver) => <span key={`${receiver.type}:${receiver.fingerprint}`} className="rounded-sm bg-gray-100 px-2 py-0.5 text-[10px] text-gray-600">{receiver.type} · {receiver.destination || receiver.masked}</span>)}</div></td>
+                <td className="px-3 py-3"><div className="flex flex-wrap gap-1"><PortalLink id={group.id} />{caps?.can_manage_action_groups && !caps.read_only && <><button disabled={!!busy} onClick={() => onEdit(group)} className="rounded-sm border px-2 py-1 text-[10px] text-indigo-700 disabled:opacity-50">Edit</button><button disabled={!!busy} onClick={() => onClone(group)} className="rounded-sm border px-2 py-1 text-[10px] text-indigo-700 disabled:opacity-50">Clone</button><button disabled={!!busy} onClick={() => onToggle(group)} className="rounded-sm border px-2 py-1 text-[10px] text-gray-700 disabled:opacity-50">{group.enabled ? "Disable" : "Enable"}</button></>}{caps?.can_test_notifications && !caps.read_only && group.receiver_count > 0 && <button disabled={!!busy} onClick={() => onTest(group)} className="rounded-sm border px-2 py-1 text-[10px] text-amber-700 disabled:opacity-50">Test</button>}{caps?.can_delete && !caps.read_only && <button disabled={!!busy || group.dependency_count > 0} title={group.dependency_count ? "Detach this Action Group from all Azure alert rules before deleting it." : "Request deletion"} onClick={() => onDelete(group)} className="rounded-sm border px-2 py-1 text-[10px] text-red-700 disabled:opacity-40">Delete</button>}</div></td>
               </tr>
             ))}
           </tbody>
@@ -659,7 +663,7 @@ function ChangesTable({ rows, total, actionableCount, connectionId, view, sort, 
   return (
     <div className="overflow-hidden rounded-xl border bg-white">
       {busy === "bulk" && <div className="flex items-center gap-2 border-b border-sky-200 bg-sky-50 px-4 py-3 text-xs font-medium text-sky-800"><span className="h-2 w-2 animate-pulse rounded-full bg-sky-500" />Preparing {preparingCount} managed change request{preparingCount === 1 ? "" : "s"} with up to 6 concurrent Azure lookups… Approval and rejection controls will appear when validation completes.</div>}
-      {selectedRows.length > 0 && <div className="flex flex-wrap items-center gap-3 border-b bg-indigo-50 px-4 py-3"><div><div className="text-sm font-semibold text-indigo-900">{requestedIds.size} requested · {dependencyResolution?.counts.prerequisites ?? Math.max(0, selectedRows.length - requestedIds.size)} prerequisites added · {selectedRows.length} selected</div><div className="mt-0.5 text-xs text-indigo-700">{pendingRows.length} pending · {approvedRows.length} approved · {appliedRows.length} applied{applyingIds.size ? ` · ${applyingIds.size} applying` : ""}</div><div className={`mt-1 text-[10px] ${closureErrors ? "text-red-700" : "text-indigo-600"}`}>{dependencyStatus}</div></div><div className="ml-auto flex flex-wrap gap-2"><button disabled={!!busy} onClick={resetSelection} className="rounded border border-indigo-200 bg-white px-3 py-1.5 text-xs text-indigo-700 disabled:opacity-40">Clear selection</button>{caps?.can_approve && <><button disabled={!!busy || resolvingDependencies || !pendingRows.length} onClick={() => void runDecision("approved")} className="rounded border border-green-300 bg-white px-3 py-1.5 text-xs text-green-700 disabled:opacity-40">Approve ({pendingRows.length})</button><button disabled={!!busy || resolvingDependencies || !rejectableRows.length} title="Reject pending or approved changes that have not been applied" onClick={() => void runDecision("rejected")} className="rounded border border-red-300 bg-white px-3 py-1.5 text-xs text-red-700 disabled:opacity-40">Reject ({rejectableRows.length})</button><button disabled={!!busy || resolvingDependencies || closureErrors || !approvedRows.length} title={closureErrors ? "Resolve dependency errors before applying." : undefined} onClick={() => void runApply()} className="rounded bg-gray-900 px-3 py-1.5 text-xs text-white disabled:opacity-40">{busy === "bulk-apply" ? "Applying dependency closure…" : `Apply to Azure (${approvedRows.length})`}</button></>}</div></div>}
+      {selectedRows.length > 0 && <div className="flex flex-wrap items-center gap-3 border-b bg-indigo-50 px-4 py-3"><div><div className="text-sm font-semibold text-indigo-900">{requestedIds.size} requested · {dependencyResolution?.counts.prerequisites ?? Math.max(0, selectedRows.length - requestedIds.size)} prerequisites added · {selectedRows.length} selected</div><div className="mt-0.5 text-xs text-indigo-700">{pendingRows.length} pending · {approvedRows.length} approved · {appliedRows.length} applied{applyingIds.size ? ` · ${applyingIds.size} applying` : ""}</div><div className={`mt-1 text-[10px] ${closureErrors ? "text-red-700" : "text-indigo-600"}`}>{dependencyStatus}</div></div><div className="ml-auto flex flex-wrap gap-2"><button disabled={!!busy} onClick={resetSelection} className="rounded-sm border border-indigo-200 bg-white px-3 py-1.5 text-xs text-indigo-700 disabled:opacity-40">Clear selection</button>{caps?.can_approve && <><button disabled={!!busy || resolvingDependencies || !pendingRows.length} onClick={() => void runDecision("approved")} className="rounded-sm border border-green-300 bg-white px-3 py-1.5 text-xs text-green-700 disabled:opacity-40">Approve ({pendingRows.length})</button><button disabled={!!busy || resolvingDependencies || !rejectableRows.length} title="Reject pending or approved changes that have not been applied" onClick={() => void runDecision("rejected")} className="rounded-sm border border-red-300 bg-white px-3 py-1.5 text-xs text-red-700 disabled:opacity-40">Reject ({rejectableRows.length})</button><button disabled={!!busy || resolvingDependencies || closureErrors || !approvedRows.length} title={closureErrors ? "Resolve dependency errors before applying." : undefined} onClick={() => void runApply()} className="rounded-sm bg-gray-900 px-3 py-1.5 text-xs text-white disabled:opacity-40">{busy === "bulk-apply" ? "Applying dependency closure…" : `Apply to Azure (${approvedRows.length})`}</button></>}</div></div>}
       <div className="overflow-auto">
       <table className="w-full min-w-[1000px] text-left text-xs">
         <thead className="sticky top-0 bg-gray-50 text-gray-500"><tr><th className="px-3 py-2"><input type="checkbox" aria-label="Select all actionable managed changes across all pages" title="Select all actionable managed changes across all pages" checked={allSelected} disabled={selectingAll || !selectableRows.length} onChange={(event) => void toggleAllPages(event.target.checked)} /></th><th className="px-3 py-2">Status</th><th className="px-3 py-2">Change</th><th className="px-3 py-2">Risk</th><th className="px-3 py-2">Safe summary</th><th className="px-3 py-2">Requested</th><th className="px-3 py-2">Actions</th></tr></thead>
@@ -667,19 +671,19 @@ function ChangesTable({ rows, total, actionableCount, connectionId, view, sort, 
           {rows.map((row) => (
             <tr key={row.id} className="align-top hover:bg-gray-50">
               <td className="px-3 py-3"><input type="checkbox" aria-label={`Select ${row.target_name}`} disabled={resolvingDependencies || (row.status !== "pending" && row.status !== "approved")} checked={selected.has(row.id)} onChange={(event) => void toggleRow(row, event.target.checked)} /></td>
-              <td className="px-3 py-3">{applyingIds.has(row.id) && row.status === "approved" ? <span className="inline-flex items-center gap-1.5 rounded bg-sky-50 px-2 py-0.5 text-sky-700"><span className="h-2 w-2 animate-pulse rounded-full bg-sky-500" />applying</span> : <span className={`rounded px-2 py-0.5 ${row.status === "applied" ? "bg-green-50 text-green-700" : row.status === "failed" || row.status === "stale" || row.status === "rejected" ? "bg-red-50 text-red-700" : row.status === "approved" ? "bg-indigo-50 text-indigo-700" : "bg-amber-50 text-amber-700"}`}>{row.status}</span>}{row.error_message && <div className="mt-1 max-w-xs text-[10px] text-red-600">{row.error_message}</div>}</td>
+              <td className="px-3 py-3">{applyingIds.has(row.id) && row.status === "approved" ? <span className="inline-flex items-center gap-1.5 rounded-sm bg-sky-50 px-2 py-0.5 text-sky-700"><span className="h-2 w-2 animate-pulse rounded-full bg-sky-500" />applying</span> : <span className={`rounded-sm px-2 py-0.5 ${row.status === "applied" ? "bg-green-50 text-green-700" : row.status === "failed" || row.status === "stale" || row.status === "rejected" ? "bg-red-50 text-red-700" : row.status === "approved" ? "bg-indigo-50 text-indigo-700" : "bg-amber-50 text-amber-700"}`}>{row.status}</span>}{row.error_message && <div className="mt-1 max-w-xs text-[10px] text-red-600">{row.error_message}</div>}</td>
               <td className="px-3 py-3"><div className="font-medium capitalize text-gray-800">{row.operation} · {row.target_name}</div><div className="mt-1 font-mono text-[10px] text-gray-400">{row.id}</div>{row.rollback_of && <div className="text-[10px] text-indigo-500">rollback of {row.rollback_of}</div>}</td>
-              <td className="px-3 py-3"><span className={`rounded px-2 py-0.5 ${row.risk === "critical" ? "bg-red-100 text-red-700" : row.risk === "high" ? "bg-orange-100 text-orange-700" : "bg-amber-100 text-amber-700"}`}>{row.risk}</span></td>
+              <td className="px-3 py-3"><span className={`rounded-sm px-2 py-0.5 ${row.risk === "critical" ? "bg-red-100 text-red-700" : row.risk === "high" ? "bg-orange-100 text-orange-700" : "bg-amber-100 text-amber-700"}`}>{row.risk}</span></td>
               <td className="max-w-sm px-3 py-3 text-gray-600"><div>{row.summary.reason || "No reason provided"}</div>{row.summary.clone_source_id && <div className="mt-1 text-[10px] text-indigo-600" title={row.summary.clone_source_id}>Cloned from {row.summary.clone_source_name || row.summary.clone_source_id}</div>}<div className="mt-1 text-[10px] text-gray-400">Sensitive destinations, callbacks, and query payloads are encrypted and omitted from this audit view.</div></td>
               <td className="px-3 py-3 text-gray-600"><div>{new Date(row.requested_at).toLocaleString()}</div><div className="text-[10px] text-gray-400">by {row.requested_by}</div></td>
-              <td className="px-3 py-3"><div className="flex flex-wrap gap-1">{row.status === "pending" && caps?.can_approve && <><button disabled={!!busy} onClick={() => onDecision(row, "approved")} className="rounded border border-green-300 px-2 py-1 text-[10px] text-green-700">Approve</button><button disabled={!!busy} onClick={() => onDecision(row, "rejected")} className="rounded border border-red-300 px-2 py-1 text-[10px] text-red-700">Reject</button><button disabled={!!busy} onClick={() => void showDetails(row)} className="rounded border px-2 py-1 text-[10px] text-gray-700">Details</button></>}{(row.status === "approved" || row.can_retry) && caps?.can_approve && <><button disabled={!!busy} onClick={() => onApply(row)} className="rounded bg-gray-900 px-2 py-1 text-[10px] text-white disabled:opacity-60">{applyingIds.has(row.id) ? "Applying…" : row.can_retry ? "Retry clone" : "Apply to Azure"}</button>{row.status === "approved" && <button disabled={!!busy} title="Reject this approved change instead of applying it" onClick={() => onDecision(row, "rejected")} className="rounded border border-red-300 px-2 py-1 text-[10px] text-red-700 disabled:opacity-60">Reject</button>}<button disabled={!!busy} onClick={() => void showDetails(row)} className="rounded border px-2 py-1 text-[10px] text-gray-700">Details</button></>}{row.status === "applied" && caps?.can_delete && <button disabled={!!busy} onClick={() => onRollback(row)} className="rounded border px-2 py-1 text-[10px] text-indigo-700">Prepare rollback</button>}{row.evidence_id && <a href="/evidence" className="rounded border px-2 py-1 text-[10px] text-gray-600">Evidence</a>}</div></td>
+              <td className="px-3 py-3"><div className="flex flex-wrap gap-1">{row.status === "pending" && caps?.can_approve && <><button disabled={!!busy} onClick={() => onDecision(row, "approved")} className="rounded-sm border border-green-300 px-2 py-1 text-[10px] text-green-700">Approve</button><button disabled={!!busy} onClick={() => onDecision(row, "rejected")} className="rounded-sm border border-red-300 px-2 py-1 text-[10px] text-red-700">Reject</button><button disabled={!!busy} onClick={() => void showDetails(row)} className="rounded-sm border px-2 py-1 text-[10px] text-gray-700">Details</button></>}{(row.status === "approved" || row.can_retry) && caps?.can_approve && <><button disabled={!!busy} onClick={() => onApply(row)} className="rounded-sm bg-gray-900 px-2 py-1 text-[10px] text-white disabled:opacity-60">{applyingIds.has(row.id) ? "Applying…" : row.can_retry ? "Retry clone" : "Apply to Azure"}</button>{row.status === "approved" && <button disabled={!!busy} title="Reject this approved change instead of applying it" onClick={() => onDecision(row, "rejected")} className="rounded-sm border border-red-300 px-2 py-1 text-[10px] text-red-700 disabled:opacity-60">Reject</button>}<button disabled={!!busy} onClick={() => void showDetails(row)} className="rounded-sm border px-2 py-1 text-[10px] text-gray-700">Details</button></>}{row.status === "applied" && caps?.can_delete && <button disabled={!!busy} onClick={() => onRollback(row)} className="rounded-sm border px-2 py-1 text-[10px] text-indigo-700">Prepare rollback</button>}{row.evidence_id && <a href="/evidence" className="rounded-sm border px-2 py-1 text-[10px] text-gray-600">Evidence</a>}</div></td>
             </tr>
           ))}
         </tbody>
       </table>
       {rows.length === 0 && <div className="p-10 text-center text-sm text-gray-400">No managed changes have been requested.</div>}
       </div>
-      {detailsRow && <div className="fixed inset-0 z-[70] flex items-center justify-center bg-black/40 p-4" role="dialog" aria-modal="true" aria-labelledby="managed-change-details-title"><div className="max-h-[92vh] w-full max-w-5xl overflow-auto rounded-xl bg-white shadow-2xl"><header className="sticky top-0 z-10 flex items-start gap-3 border-b bg-white px-5 py-4"><div><h2 id="managed-change-details-title" className="font-semibold text-gray-900">Apply to Azure details</h2><p className="mt-0.5 text-xs text-gray-500">Exact reviewed operation for {detailsRow.target_name}. No action is performed from this dialog.</p></div><button onClick={() => setDetailsRow(null)} className="ml-auto rounded px-2 py-1 text-gray-500">✕</button></header><div className="space-y-4 p-5 text-xs">{detailsLoading && <div className="rounded-lg border border-sky-200 bg-sky-50 p-3 text-sky-700">Loading reviewed change details…</div>}{detailsError && <div role="alert" className="rounded-lg border border-red-200 bg-red-50 p-3 text-red-700">{detailsError}</div>}{details && <><div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4"><DetailField label="Azure method" value={details.execution.azure_method} /><DetailField label="Operation" value={details.execution.operation} /><DetailField label="Target type" value={details.execution.target_type} /><DetailField label="State" value={details.execution.ready_to_apply ? "Approved — ready to apply" : "Pending approval"} /></div><div className="rounded-lg border bg-gray-50 p-3"><div className="text-[10px] font-semibold uppercase text-gray-500">Target Azure resource</div><div className="mt-1 break-all font-mono text-[11px] text-gray-800">{details.execution.target_id}</div>{details.execution.expected_state_hash && <div className="mt-2 break-all text-[9px] text-gray-400">Concurrency hash: {details.execution.expected_state_hash}</div>}</div><div className="grid gap-4 lg:grid-cols-2"><JsonDetails title="Current Azure state" value={details.before} empty="No existing resource; Apply will create it." /><JsonDetails title="Resulting Azure request body" value={details.azure_body} empty={details.execution.azure_method === "DELETE" ? "DELETE sends no request body. The target resource will be removed." : "No ARM body stored."} /></div>{Object.keys(details.desired_payload).length > 0 && <JsonDetails title="Validated desired configuration" value={details.desired_payload} empty="" />}<div className="rounded-lg border border-amber-200 bg-amber-50 p-3 text-amber-800">{details.redaction_notice}</div></>}</div><footer className="sticky bottom-0 flex justify-end border-t bg-white px-5 py-3"><button onClick={() => setDetailsRow(null)} className="rounded border px-3 py-1.5 text-xs">Close</button></footer></div></div>}
+      {detailsRow && <div className="fixed inset-0 z-70 flex items-center justify-center bg-black/40 p-4" role="dialog" aria-modal="true" aria-labelledby="managed-change-details-title"><div className="max-h-[92vh] w-full max-w-5xl overflow-auto rounded-xl bg-white shadow-2xl"><header className="sticky top-0 z-10 flex items-start gap-3 border-b bg-white px-5 py-4"><div><h2 id="managed-change-details-title" className="font-semibold text-gray-900">Apply to Azure details</h2><p className="mt-0.5 text-xs text-gray-500">Exact reviewed operation for {detailsRow.target_name}. No action is performed from this dialog.</p></div><button onClick={() => setDetailsRow(null)} className="ml-auto rounded-sm px-2 py-1 text-gray-500">✕</button></header><div className="space-y-4 p-5 text-xs">{detailsLoading && <div className="rounded-lg border border-sky-200 bg-sky-50 p-3 text-sky-700">Loading reviewed change details…</div>}{detailsError && <div role="alert" className="rounded-lg border border-red-200 bg-red-50 p-3 text-red-700">{detailsError}</div>}{details && <><div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4"><DetailField label="Azure method" value={details.execution.azure_method} /><DetailField label="Operation" value={details.execution.operation} /><DetailField label="Target type" value={details.execution.target_type} /><DetailField label="State" value={details.execution.ready_to_apply ? "Approved — ready to apply" : "Pending approval"} /></div><div className="rounded-lg border bg-gray-50 p-3"><div className="text-[10px] font-semibold uppercase text-gray-500">Target Azure resource</div><div className="mt-1 break-all font-mono text-[11px] text-gray-800">{details.execution.target_id}</div>{details.execution.expected_state_hash && <div className="mt-2 break-all text-[9px] text-gray-400">Concurrency hash: {details.execution.expected_state_hash}</div>}</div><div className="grid gap-4 lg:grid-cols-2"><JsonDetails title="Current Azure state" value={details.before} empty="No existing resource; Apply will create it." /><JsonDetails title="Resulting Azure request body" value={details.azure_body} empty={details.execution.azure_method === "DELETE" ? "DELETE sends no request body. The target resource will be removed." : "No ARM body stored."} /></div>{Object.keys(details.desired_payload).length > 0 && <JsonDetails title="Validated desired configuration" value={details.desired_payload} empty="" />}<div className="rounded-lg border border-amber-200 bg-amber-50 p-3 text-amber-800">{details.redaction_notice}</div></>}</div><footer className="sticky bottom-0 flex justify-end border-t bg-white px-5 py-3"><button onClick={() => setDetailsRow(null)} className="rounded-sm border px-3 py-1.5 text-xs">Close</button></footer></div></div>}
     </div>
   );
 }
@@ -690,7 +694,7 @@ function DetailField({ label, value }: { label: string; value: string }) {
 
 function JsonDetails({ title, value, empty }: { title: string; value: Record<string, unknown>; empty: string }) {
   const hasValue = Object.keys(value).length > 0;
-  return <section className="overflow-hidden rounded-lg border"><h3 className="border-b bg-gray-50 px-3 py-2 font-semibold text-gray-800">{title}</h3>{hasValue ? <pre className="max-h-80 overflow-auto whitespace-pre-wrap break-words p-3 font-mono text-[10px] leading-5 text-gray-700">{JSON.stringify(value, null, 2)}</pre> : <div className="p-3 text-gray-500">{empty}</div>}</section>;
+  return <section className="overflow-hidden rounded-lg border"><h3 className="border-b bg-gray-50 px-3 py-2 font-semibold text-gray-800">{title}</h3>{hasValue ? <pre className="max-h-80 overflow-auto whitespace-pre-wrap wrap-break-word p-3 font-mono text-[10px] leading-5 text-gray-700">{JSON.stringify(value, null, 2)}</pre> : <div className="p-3 text-gray-500">{empty}</div>}</section>;
 }
 
 function ActionGroupEditor({ initial, connectionId, busy, saveError, onClose, onSave }: { initial: EditableActionGroup; connectionId: string; busy: boolean; saveError: string; onClose: () => void; onSave: (value: EditableActionGroup, reason: string) => void }) {
@@ -716,26 +720,26 @@ function ActionGroupEditor({ initial, connectionId, busy, saveError, onClose, on
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4" role="dialog" aria-modal="true" aria-label={initial.id ? "Edit Action Group" : initial.clone_source_id ? "Clone Action Group" : "Create Action Group"}>
       <div className="max-h-[92vh] w-full max-w-4xl overflow-auto rounded-xl bg-white shadow-xl">
-        <div className="sticky top-0 z-10 flex items-center border-b bg-white px-5 py-4"><div><h2 className="font-semibold text-gray-900">{initial.id ? "Edit Action Group" : initial.clone_source_id ? "Clone Action Group" : "Create Action Group"}</h2><p className="text-xs text-gray-500">Saving creates an encrypted, approval-gated change. It does not immediately modify Azure.</p></div><button onClick={onClose} className="ml-auto rounded px-2 py-1 text-gray-500">✕</button></div>
+        <div className="sticky top-0 z-10 flex items-center border-b bg-white px-5 py-4"><div><h2 className="font-semibold text-gray-900">{initial.id ? "Edit Action Group" : initial.clone_source_id ? "Clone Action Group" : "Create Action Group"}</h2><p className="text-xs text-gray-500">Saving creates an encrypted, approval-gated change. It does not immediately modify Azure.</p></div><button onClick={onClose} className="ml-auto rounded-sm px-2 py-1 text-gray-500">✕</button></div>
         <div className="space-y-5 p-5 text-xs">
-          {saveError && <div role="alert" className="rounded border border-red-200 bg-red-50 p-3 text-red-700"><div className="font-medium">Could not save this Action Group</div><div className="mt-1 whitespace-pre-wrap">{saveError}</div></div>}
-          {attempted && requiredErrors.length > 0 && <div role="alert" className="rounded border border-red-200 bg-red-50 p-3 text-red-700"><div className="font-medium">Complete the required fields:</div><ul className="mt-1 list-disc pl-5">{requiredErrors.map((error) => <li key={error}>{error}</li>)}</ul></div>}
-          <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4"><label>Name{!initial.id && <span className="text-red-600"> *</span>}<input required={!initial.id} aria-required={!initial.id} disabled={!!initial.id} value={value.name} onChange={(e) => setValue({ ...value, name: e.target.value })} className="mt-1 w-full rounded border px-2 py-1.5 disabled:bg-gray-100" /></label><AzurePlacementFields connectionId={connectionId} subscriptionId={value.subscription_id} resourceGroup={value.resource_group} location={value.location} disabled={!!initial.id} required={!initial.id} globalLocation onChange={(patch) => setValue({ ...value, ...patch })} /><label>Short name <span className="text-red-600">*</span><input required aria-required="true" maxLength={12} value={value.short_name} onChange={(e) => setValue({ ...value, short_name: e.target.value })} className="mt-1 w-full rounded border px-2 py-1.5" /></label><label className="flex items-end gap-2 pb-1"><input type="checkbox" checked={value.enabled} onChange={(e) => setValue({ ...value, enabled: e.target.checked })} /> Enabled</label></div>
-          <ReceiverSection title="Email receivers" onAdd={() => setValue({ ...value, email_receivers: [...value.email_receivers, { name: "", email_address: "", use_common_alert_schema: true }] })}>{value.email_receivers.map((item, i) => <div key={i} className="grid gap-2 sm:grid-cols-[1fr_2fr_auto_auto]"><input aria-label="Receiver name" placeholder="Name" value={item.name} onChange={(e) => updateList("email_receivers", i, { name: e.target.value })} className="rounded border px-2 py-1.5" /><input aria-label="Email address" placeholder="name@example.com" value={item.email_address} onChange={(e) => updateList("email_receivers", i, { email_address: e.target.value })} className="rounded border px-2 py-1.5" /><label className="flex items-center gap-1"><input type="checkbox" checked={item.use_common_alert_schema} onChange={(e) => updateList("email_receivers", i, { use_common_alert_schema: e.target.checked })} /> Common schema</label><button onClick={() => remove("email_receivers", i)} className="text-red-600">Remove</button></div>)}</ReceiverSection>
-          <ReceiverSection title="SMS receivers" onAdd={() => setValue({ ...value, sms_receivers: [...value.sms_receivers, { name: "", country_code: "1", phone_number: "" }] })}>{value.sms_receivers.map((item, i) => <div key={i} className="grid gap-2 sm:grid-cols-[1fr_100px_2fr_auto]"><input aria-label="Receiver name" placeholder="Name" value={item.name} onChange={(e) => updateList("sms_receivers", i, { name: e.target.value })} className="rounded border px-2 py-1.5" /><input aria-label="Country code" placeholder="1" value={item.country_code} onChange={(e) => updateList("sms_receivers", i, { country_code: e.target.value })} className="rounded border px-2 py-1.5" /><input aria-label="Phone number" placeholder="Phone number" value={item.phone_number} onChange={(e) => updateList("sms_receivers", i, { phone_number: e.target.value })} className="rounded border px-2 py-1.5" /><button onClick={() => remove("sms_receivers", i)} className="text-red-600">Remove</button></div>)}</ReceiverSection>
-          <ReceiverSection title="Webhook receivers" onAdd={() => setValue({ ...value, webhook_receivers: [...value.webhook_receivers, { name: "", service_uri: "", preserve_secret: false, use_common_alert_schema: true }] })}>{value.webhook_receivers.map((item, i) => <div key={i} className="grid gap-2 sm:grid-cols-[1fr_2fr_auto_auto]"><input aria-label="Receiver name" placeholder="Name" value={item.name} onChange={(e) => updateList("webhook_receivers", i, { name: e.target.value })} className="rounded border px-2 py-1.5" /><input aria-label="Webhook URL" placeholder="https://endpoint.example/path" value={item.service_uri} onChange={(e) => updateList("webhook_receivers", i, { service_uri: e.target.value, preserve_secret: false })} className="rounded border px-2 py-1.5" /><label className="flex items-center gap-1"><input type="checkbox" checked={item.use_common_alert_schema} onChange={(e) => updateList("webhook_receivers", i, { use_common_alert_schema: e.target.checked })} /> Common schema</label><button onClick={() => remove("webhook_receivers", i)} className="text-red-600">Remove</button>{item.preserve_secret && <span className="sm:col-span-4 text-[10px] text-amber-700">Signed query/secret is hidden and will be preserved unless this URL is changed.</span>}</div>)}</ReceiverSection>
-          <ReceiverSection title="ARM role receivers" onAdd={() => setValue({ ...value, arm_role_receivers: [...value.arm_role_receivers, { name: "", role_id: "", use_common_alert_schema: true }] })}>{value.arm_role_receivers.map((item, i) => <div key={i} className="grid gap-2 sm:grid-cols-[1fr_2fr_auto_auto]"><input aria-label="Receiver name" placeholder="Name" value={item.name} onChange={(e) => updateList("arm_role_receivers", i, { name: e.target.value })} className="rounded border px-2 py-1.5" /><input aria-label="Role ID" placeholder="Built-in role definition GUID" value={item.role_id} onChange={(e) => updateList("arm_role_receivers", i, { role_id: e.target.value })} className="rounded border px-2 py-1.5" /><label className="flex items-center gap-1"><input type="checkbox" checked={item.use_common_alert_schema} onChange={(e) => updateList("arm_role_receivers", i, { use_common_alert_schema: e.target.checked })} /> Common schema</label><button onClick={() => remove("arm_role_receivers", i)} className="text-red-600">Remove</button></div>)}</ReceiverSection>
+          {saveError && <div role="alert" className="rounded-sm border border-red-200 bg-red-50 p-3 text-red-700"><div className="font-medium">Could not save this Action Group</div><div className="mt-1 whitespace-pre-wrap">{saveError}</div></div>}
+          {attempted && requiredErrors.length > 0 && <div role="alert" className="rounded-sm border border-red-200 bg-red-50 p-3 text-red-700"><div className="font-medium">Complete the required fields:</div><ul className="mt-1 list-disc pl-5">{requiredErrors.map((error) => <li key={error}>{error}</li>)}</ul></div>}
+          <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4"><label>Name{!initial.id && <span className="text-red-600"> *</span>}<input required={!initial.id} aria-required={!initial.id} disabled={!!initial.id} value={value.name} onChange={(e) => setValue({ ...value, name: e.target.value })} className="mt-1 w-full rounded-sm border px-2 py-1.5 disabled:bg-gray-100" /></label><AzurePlacementFields connectionId={connectionId} subscriptionId={value.subscription_id} resourceGroup={value.resource_group} location={value.location} disabled={!!initial.id} required={!initial.id} globalLocation onChange={(patch) => setValue({ ...value, ...patch })} /><label>Short name <span className="text-red-600">*</span><input required aria-required="true" maxLength={12} value={value.short_name} onChange={(e) => setValue({ ...value, short_name: e.target.value })} className="mt-1 w-full rounded-sm border px-2 py-1.5" /></label><label className="flex items-end gap-2 pb-1"><input type="checkbox" checked={value.enabled} onChange={(e) => setValue({ ...value, enabled: e.target.checked })} /> Enabled</label></div>
+          <ReceiverSection title="Email receivers" onAdd={() => setValue({ ...value, email_receivers: [...value.email_receivers, { name: "", email_address: "", use_common_alert_schema: true }] })}>{value.email_receivers.map((item, i) => <div key={i} className="grid gap-2 sm:grid-cols-[1fr_2fr_auto_auto]"><input aria-label="Receiver name" placeholder="Name" value={item.name} onChange={(e) => updateList("email_receivers", i, { name: e.target.value })} className="rounded-sm border px-2 py-1.5" /><input aria-label="Email address" placeholder="name@example.com" value={item.email_address} onChange={(e) => updateList("email_receivers", i, { email_address: e.target.value })} className="rounded-sm border px-2 py-1.5" /><label className="flex items-center gap-1"><input type="checkbox" checked={item.use_common_alert_schema} onChange={(e) => updateList("email_receivers", i, { use_common_alert_schema: e.target.checked })} /> Common schema</label><button onClick={() => remove("email_receivers", i)} className="text-red-600">Remove</button></div>)}</ReceiverSection>
+          <ReceiverSection title="SMS receivers" onAdd={() => setValue({ ...value, sms_receivers: [...value.sms_receivers, { name: "", country_code: "1", phone_number: "" }] })}>{value.sms_receivers.map((item, i) => <div key={i} className="grid gap-2 sm:grid-cols-[1fr_100px_2fr_auto]"><input aria-label="Receiver name" placeholder="Name" value={item.name} onChange={(e) => updateList("sms_receivers", i, { name: e.target.value })} className="rounded-sm border px-2 py-1.5" /><input aria-label="Country code" placeholder="1" value={item.country_code} onChange={(e) => updateList("sms_receivers", i, { country_code: e.target.value })} className="rounded-sm border px-2 py-1.5" /><input aria-label="Phone number" placeholder="Phone number" value={item.phone_number} onChange={(e) => updateList("sms_receivers", i, { phone_number: e.target.value })} className="rounded-sm border px-2 py-1.5" /><button onClick={() => remove("sms_receivers", i)} className="text-red-600">Remove</button></div>)}</ReceiverSection>
+          <ReceiverSection title="Webhook receivers" onAdd={() => setValue({ ...value, webhook_receivers: [...value.webhook_receivers, { name: "", service_uri: "", preserve_secret: false, use_common_alert_schema: true }] })}>{value.webhook_receivers.map((item, i) => <div key={i} className="grid gap-2 sm:grid-cols-[1fr_2fr_auto_auto]"><input aria-label="Receiver name" placeholder="Name" value={item.name} onChange={(e) => updateList("webhook_receivers", i, { name: e.target.value })} className="rounded-sm border px-2 py-1.5" /><input aria-label="Webhook URL" placeholder="https://endpoint.example/path" value={item.service_uri} onChange={(e) => updateList("webhook_receivers", i, { service_uri: e.target.value, preserve_secret: false })} className="rounded-sm border px-2 py-1.5" /><label className="flex items-center gap-1"><input type="checkbox" checked={item.use_common_alert_schema} onChange={(e) => updateList("webhook_receivers", i, { use_common_alert_schema: e.target.checked })} /> Common schema</label><button onClick={() => remove("webhook_receivers", i)} className="text-red-600">Remove</button>{item.preserve_secret && <span className="sm:col-span-4 text-[10px] text-amber-700">Signed query/secret is hidden and will be preserved unless this URL is changed.</span>}</div>)}</ReceiverSection>
+          <ReceiverSection title="ARM role receivers" onAdd={() => setValue({ ...value, arm_role_receivers: [...value.arm_role_receivers, { name: "", role_id: "", use_common_alert_schema: true }] })}>{value.arm_role_receivers.map((item, i) => <div key={i} className="grid gap-2 sm:grid-cols-[1fr_2fr_auto_auto]"><input aria-label="Receiver name" placeholder="Name" value={item.name} onChange={(e) => updateList("arm_role_receivers", i, { name: e.target.value })} className="rounded-sm border px-2 py-1.5" /><input aria-label="Role ID" placeholder="Built-in role definition GUID" value={item.role_id} onChange={(e) => updateList("arm_role_receivers", i, { role_id: e.target.value })} className="rounded-sm border px-2 py-1.5" /><label className="flex items-center gap-1"><input type="checkbox" checked={item.use_common_alert_schema} onChange={(e) => updateList("arm_role_receivers", i, { use_common_alert_schema: e.target.checked })} /> Common schema</label><button onClick={() => remove("arm_role_receivers", i)} className="text-red-600">Remove</button></div>)}</ReceiverSection>
           <AdvancedActionGroupReceivers value={value} connectionId={connectionId} setValue={setValue} />
-          <label className="block">Reason <span className="text-red-600">*</span><textarea required aria-required="true" value={reason} onChange={(e) => setReason(e.target.value)} maxLength={1000} className="mt-1 w-full rounded border px-2 py-1.5" /></label>
+          <label className="block">Reason <span className="text-red-600">*</span><textarea required aria-required="true" value={reason} onChange={(e) => setReason(e.target.value)} maxLength={1000} className="mt-1 w-full rounded-sm border px-2 py-1.5" /></label>
         </div>
-        <div className="sticky bottom-0 flex items-center justify-end gap-2 border-t bg-white px-5 py-3"><span className="mr-auto text-[10px] text-gray-500"><span className="text-red-600">*</span> Required fields</span><button onClick={onClose} className="rounded border px-3 py-1.5 text-xs">Cancel</button><button disabled={busy} onClick={submit} className="rounded bg-gray-900 px-3 py-1.5 text-xs font-medium text-white disabled:opacity-50">{busy ? "Saving…" : "Create change request"}</button></div>
+        <div className="sticky bottom-0 flex items-center justify-end gap-2 border-t bg-white px-5 py-3"><span className="mr-auto text-[10px] text-gray-500"><span className="text-red-600">*</span> Required fields</span><button onClick={onClose} className="rounded-sm border px-3 py-1.5 text-xs">Cancel</button><button disabled={busy} onClick={submit} className="rounded-sm bg-gray-900 px-3 py-1.5 text-xs font-medium text-white disabled:opacity-50">{busy ? "Saving…" : "Create change request"}</button></div>
       </div>
     </div>
   );
 }
 
 function ReceiverSection({ title, onAdd, children }: { title: string; onAdd: () => void; children: ReactNode }) {
-  return <section className="space-y-2 rounded-lg border p-3"><div className="flex items-center"><h3 className="font-semibold text-gray-800">{title}</h3><button onClick={onAdd} className="ml-auto rounded border px-2 py-1 text-[10px] text-indigo-700">+ Add</button></div>{children}<>{!children && <div className="text-gray-400">None configured.</div>}</></section>;
+  return <section className="space-y-2 rounded-lg border p-3"><div className="flex items-center"><h3 className="font-semibold text-gray-800">{title}</h3><button onClick={onAdd} className="ml-auto rounded-sm border px-2 py-1 text-[10px] text-indigo-700">+ Add</button></div>{children}<>{!children && <div className="text-gray-400">None configured.</div>}</></section>;
 }
 
 export function AlertsManagerPanel() {
@@ -801,6 +805,7 @@ export function AlertsManagerPanel() {
   const [bulkOutcome, setBulkOutcome] = useState("");
   const [bulkPreparingCount, setBulkPreparingCount] = useState(0);
   const [selectedGapIds, setSelectedGapIds] = useState<Set<string>>(new Set());
+  const [selectedGapRows, setSelectedGapRows] = useState<Map<string, AlertAnalysisGap>>(new Map());
   const [gapPlannerOpen, setGapPlannerOpen] = useState(false);
   const [activityLogWizardOpen, setActivityLogWizardOpen] = useState(false);
   const [activityLogDiagnosticsOpen, setActivityLogDiagnosticsOpen] = useState(false);
@@ -861,19 +866,19 @@ export function AlertsManagerPanel() {
   const managedGroupsQ = useQuery({
     queryKey: queryKeys.alertsManager.actionGroups(managementParams),
     queryFn: () => api.managedActionGroups(managementParams),
-    enabled: ready && !!data && !data.demo && (tab === "action-groups" || gapPlannerOpen || activityLogWizardOpen),
+    enabled: ready && !!data && !data.demo && (tab === "action-groups" || tab === "deployment-plans" || gapPlannerOpen || activityLogWizardOpen),
     staleTime: 5 * 60_000,
   });
   const ruleActionGroupsQ = useQuery({
     queryKey: queryKeys.alertsManager.actionGroups({ ...managementParams, all_visible: true }),
     queryFn: () => api.managedActionGroups({ ...managementParams, all_visible: true }),
-    enabled: ready && !!data && !data.demo,
+    enabled: ready && !!data && !data.demo && (tab === "manage-rules" || !!ruleEditor),
     staleTime: 5 * 60_000,
   });
   const managedRulesQ = useQuery({
     queryKey: queryKeys.alertsManager.rules(managementParams),
     queryFn: () => api.managedAlertRules(managementParams),
-    enabled: ready && !!data && !data.demo,
+    enabled: ready && !!data && !data.demo && tab === "manage-rules",
     staleTime: 5 * 60_000,
   });
   const summaryQ = useQuery({
@@ -914,6 +919,7 @@ export function AlertsManagerPanel() {
       qc.setQueryData(queryKey, state.result);
       setAnalysisNeedsRefresh(false);
       void Promise.all([
+        qc.invalidateQueries({ queryKey: ["alert-analysis-section"] }),
         qc.invalidateQueries({ queryKey: ["alert-analysis-trend"] }),
         qc.invalidateQueries({ queryKey: ["alert-analysis-runs"] }),
         qc.invalidateQueries({ queryKey: queryKeys.alertsManager.rulesRoot }),
@@ -926,83 +932,40 @@ export function AlertsManagerPanel() {
   }, [jobQ.data, qc, queryKey, scopeKind, effectiveWorkloadId, subId, mgId, connId]);
 
   const query = useDeferredValue(search.trim().toLowerCase());
-  const compareText = (left: string, right: string) => left.localeCompare(right, undefined, { numeric: true, sensitivity: "base" });
   function updateSort<K extends string>(column: K, current: K | null, direction: SortDirection, setColumn: (value: K) => void, setDirection: (value: SortDirection) => void, defaultDirection: SortDirection = "asc") {
     if (current === column) setDirection(direction === "asc" ? "desc" : "asc");
     else { setColumn(column); setDirection(defaultDirection); }
     goPage(1);
   }
-  const searchableRules = useMemo(() => (data?.rules ?? []).map((rule) => ({ rule, text: `${rule.name} ${rule.type} ${rule.resource_group} ${rule.conditions.map((item) => item.signal_name).join(" ")} ${rule.action_group_names.join(" ")}`.toLowerCase() })), [data?.rules]);
-  const searchableOverlaps = useMemo(() => (data?.active_overlaps ?? data?.overlaps ?? []).map((row) => ({ row, text: `${row.signal_name} ${row.target_id} ${row.rule_names.join(" ")}`.toLowerCase() })), [data?.active_overlaps, data?.overlaps]);
-  const searchableGaps = useMemo(() => (data?.active_gaps ?? data?.gaps ?? []).map((row) => ({ row, text: `${row.type} ${row.resource_name} ${row.rule_name} ${row.signal}`.toLowerCase() })), [data?.active_gaps, data?.gaps]);
-  const rules = useMemo(() => {
-    const filtered = searchableRules.filter(({ rule, text }) => {
-      if (status !== "all" && rule.finding_status !== status) return false;
-      return !query || text.includes(query);
-    }).map(({ rule }) => rule);
-    if (!ruleSort) return filtered;
-    const direction = ruleSortDirection === "asc" ? 1 : -1;
-    return [...filtered].sort((left, right) => {
-      let result = 0;
-      if (ruleSort === "status") result = compareText(left.finding_status, right.finding_status);
-      else if (ruleSort === "rule") result = compareText(left.name, right.name);
-      else if (ruleSort === "condition") result = compareText(`${left.conditions[0]?.signal_name || ""} ${left.conditions[0]?.aggregation || ""}`, `${right.conditions[0]?.signal_name || ""} ${right.conditions[0]?.aggregation || ""}`);
-      else if (ruleSort === "targets") result = left.effective_target_count - right.effective_target_count || compareText(left.scopes[0] || "", right.scopes[0] || "");
-      else if (ruleSort === "action_groups") result = left.action_group_names.length - right.action_group_names.length || compareText(left.action_group_names.join(" "), right.action_group_names.join(" "));
-      else if (ruleSort === "cost") {
-        const leftCost = left.cost?.monthly_usd;
-        const rightCost = right.cost?.monthly_usd;
-        if (leftCost == null || rightCost == null) return leftCost == null && rightCost == null ? compareText(left.name, right.name) : leftCost == null ? 1 : -1;
-        result = leftCost - rightCost;
-      }
-      else result = (left.firing_30d ?? left.firing_7d ?? 0) - (right.firing_30d ?? right.firing_7d ?? 0);
-      return direction * (result || compareText(left.name, right.name));
-    });
-  }, [searchableRules, query, status, ruleSort, ruleSortDirection]);
-  const overlaps = useMemo(() => {
-    const filtered = searchableOverlaps.filter(({ text }) => !query || text.includes(query)).map(({ row }) => row);
-    if (!overlapSort) return filtered;
-    const direction = overlapSortDirection === "asc" ? 1 : -1;
-    const confidenceOrder = { medium: 0, high: 1 };
-    return [...filtered].sort((left, right) => {
-      let result = overlapSort === "confidence" ? confidenceOrder[left.confidence] - confidenceOrder[right.confidence]
-        : overlapSort === "signal" ? compareText(`${left.signal_name} ${left.target_id}`, `${right.signal_name} ${right.target_id}`)
-          : overlapSort === "rules" ? left.rule_names.length - right.rule_names.length
-            : left.shared_recipient_count - right.shared_recipient_count;
-      return direction * (result || compareText(left.signal_name, right.signal_name));
-    });
-  }, [searchableOverlaps, query, overlapSort, overlapSortDirection]);
-  const gapOptions = useMemo(() => ({
-    risks: [...new Set(searchableGaps.map(({ row }) => row.risk).filter(Boolean))].sort(),
-    types: [...new Set(searchableGaps.map(({ row }) => row.type).filter(Boolean))].sort(),
-    signals: [...new Set(searchableGaps.map(({ row }) => row.signal).filter(Boolean))].sort((left, right) => left.localeCompare(right)),
-  }), [searchableGaps]);
-  const gaps = useMemo(() => {
-    const riskOrder: Record<string, number> = { critical: 0, error: 1, warning: 2, info: 3 };
-    const filtered = searchableGaps.filter(({ row, text }) =>
-      (!query || text.includes(query))
-      && (gapRisk === "all" || row.risk === gapRisk)
-      && (gapType === "all" || row.type === gapType)
-      && (gapSignal === "all" || row.signal === gapSignal)
-    ).map(({ row }) => row);
-    if (!gapSort && gapGroup !== "signal") return filtered;
-    const direction = gapSortDirection === "asc" ? 1 : -1;
-    return [...filtered].sort((left, right) => {
-      const signalResult = compareText(left.signal || "", right.signal || "");
-      if (gapGroup === "signal" && signalResult) return gapSort === "signal" ? direction * signalResult : signalResult;
-      let result = 0;
-      if (gapSort === "risk") result = (riskOrder[left.risk] ?? 99) - (riskOrder[right.risk] ?? 99);
-      else if (gapSort === "gap") result = compareText(left.type, right.type);
-      else if (gapSort === "resource") result = compareText(left.rule_name || left.resource_name || "", right.rule_name || right.resource_name || "");
-      else if (gapSort === "signal") result = signalResult;
-      else if (gapSort === "recommendation") result = compareText(left.recommendation, right.recommendation);
-      else result = (riskOrder[left.risk] ?? 99) - (riskOrder[right.risk] ?? 99);
-      return direction * (result || compareText(left.resource_name || left.rule_name || "", right.resource_name || right.rule_name || ""));
-    });
-  }, [searchableGaps, query, gapRisk, gapType, gapSignal, gapGroup, gapSort, gapSortDirection]);
+  const rulesPageQ = useQuery({
+    queryKey: ["alert-analysis-section", "rules", ...queryKey, page, query, status, ruleSort, ruleSortDirection],
+    queryFn: () => api.alertAnalysisSection<AlertAnalysisRule>("rules", params, { page, page_size: PAGE_SIZE, search: query, status, sort: ruleSort || "", direction: ruleSortDirection }),
+    enabled: ready && !!data?.report_exists && tab === "rules",
+    placeholderData: (previous) => previous,
+  });
+  const overlapsPageQ = useQuery({
+    queryKey: ["alert-analysis-section", "overlaps", ...queryKey, page, query, overlapSort, overlapSortDirection],
+    queryFn: () => api.alertAnalysisSection<AlertAnalysisOverlap>("overlaps", params, { page, page_size: PAGE_SIZE, search: query, sort: overlapSort || "", direction: overlapSortDirection }),
+    enabled: ready && !!data?.report_exists && tab === "overlaps",
+    placeholderData: (previous) => previous,
+  });
+  const gapsPageQ = useQuery({
+    queryKey: ["alert-analysis-section", "gaps", ...queryKey, page, query, gapRisk, gapType, gapSignal, gapGroup, gapSort, gapSortDirection],
+    queryFn: () => api.alertAnalysisSection<AlertAnalysisGap>("gaps", params, { page, page_size: PAGE_SIZE, search: query, risk: gapRisk, gap_type: gapType, signal: gapSignal, sort: gapSort || "", direction: gapSortDirection, group: gapGroup }),
+    enabled: ready && !!data?.report_exists && tab === "gaps",
+    placeholderData: (previous) => previous,
+  });
+  const rules = rulesPageQ.data?.items ?? [];
+  const overlaps = overlapsPageQ.data?.items ?? [];
+  const gaps = gapsPageQ.data?.items ?? [];
+  const gapOptions = {
+    risks: gapsPageQ.data?.facets.risks ?? [],
+    types: gapsPageQ.data?.facets.types ?? [],
+    signals: gapsPageQ.data?.facets.signals ?? [],
+  };
   const sortedAnalysisGroups = useMemo(() => sortActionGroups(data?.action_groups ?? [], actionGroupSort, actionGroupSortDirection), [data?.action_groups, actionGroupSort, actionGroupSortDirection]);
   const sortedManagedGroups = useMemo(() => sortActionGroups(managedGroupsQ.data?.action_groups ?? [], actionGroupSort, actionGroupSortDirection), [managedGroupsQ.data?.action_groups, actionGroupSort, actionGroupSortDirection]);
-  const allGaps = data?.active_gaps ?? data?.gaps ?? [];
+  const allGaps = gaps;
   const allGapIds = useMemo(() => [...new Set(allGaps.map((row, index) => gapIdentity(row, index)))], [allGaps]);
   const gapPlansQ = useQuery({
     queryKey: ["alerts-manager-deployment-plans-by-gap", allGapIds],
@@ -1036,15 +999,22 @@ export function AlertsManagerPanel() {
     });
   }, [gapPlansQ.data]);
   const analysisSelectionKey = `${data?.scope_kind ?? scopeKind}:${data?.scope_id ?? ""}:${data?.generated_at ?? ""}`;
-  useEffect(() => { setSelectedGapIds(new Set()); setGapPlannerOpen(false); setAnalysisNeedsRefresh(false); }, [analysisSelectionKey]);
-  const selectedGaps = useMemo(() => {
-    const unique = new Map<string, AlertAnalysisGap>();
-    for (const [index, row] of allGaps.entries()) {
-      const id = gapIdentity(row, index);
-      if (selectedGapIds.has(id) && !unique.has(id)) unique.set(id, row);
-    }
-    return [...unique.values()];
-  }, [allGaps, selectedGapIds]);
+  useEffect(() => { setSelectedGapIds(new Set()); setSelectedGapRows(new Map()); setGapPlannerOpen(false); setAnalysisNeedsRefresh(false); }, [analysisSelectionKey]);
+  useEffect(() => {
+    setSelectedGapRows((current) => new Map([...current].filter(([id]) => selectedGapIds.has(id))));
+  }, [selectedGapIds]);
+  const selectedGaps = useMemo(() => [...selectedGapRows.values()], [selectedGapRows]);
+  function changeSelectedGaps(next: Set<string>) {
+    setSelectedGapRows((current) => {
+      const rows = new Map([...current].filter(([id]) => next.has(id)));
+      for (const row of allGaps) {
+        const id = gapIdentity(row);
+        if (next.has(id)) rows.set(id, row);
+      }
+      return rows;
+    });
+    setSelectedGapIds(next);
+  }
   const canPlanGaps = !!capabilities?.can_submit_deployment_plans && !capabilities.read_only && !data?.demo;
   const invalidateManagedChanges = () => Promise.all([
     qc.invalidateQueries({ queryKey: queryKeys.alertsManager.changesRoot }),
@@ -1108,7 +1078,10 @@ export function AlertsManagerPanel() {
     setError("");
     try {
       await api.recordAlertAnalysisDecision(connId, { target_type: targetType, target_id: targetId, action, reason });
-      await qc.invalidateQueries({ queryKey: ["alert-analysis"] });
+      await Promise.all([
+        qc.invalidateQueries({ queryKey: ["alert-analysis"] }),
+        qc.invalidateQueries({ queryKey: ["alert-analysis-section"] }),
+      ]);
     } catch (cause) {
       setError(formatError(cause));
     }
@@ -1284,6 +1257,32 @@ export function AlertsManagerPanel() {
     finally { setManagementBusy(""); }
   }
 
+  async function editVisualizedRule(ruleId: string, family: ManagedAlertRule["family"]) {
+    goTab("manage-rules");
+    setManagementBusy(ruleId); setError("");
+    if (capabilities?.read_only || !capabilities?.can_manage_rules) {
+      setError(capabilities?.read_only ? "This tenant connection is read-only. Select a writable connection to edit alert rules." : "You do not have permission to edit alert rules.");
+      setManagementBusy("");
+      return;
+    }
+    try { setRuleEditor((await api.managedAlertRuleDetails(connId, ruleId, family)).rule); }
+    catch (cause) { setError(`Could not load the selected alert rule: ${formatError(cause)}`); }
+    finally { setManagementBusy(""); }
+  }
+
+  async function editVisualizedActionGroup(actionGroupId: string) {
+    goTab("action-groups");
+    setManagementBusy(actionGroupId); setError(""); setActionGroupEditorError("");
+    if (capabilities?.read_only || !capabilities?.can_manage_action_groups) {
+      setError(capabilities?.read_only ? "This tenant connection is read-only. Select a writable connection to edit Action Groups." : "You do not have permission to edit Action Groups.");
+      setManagementBusy("");
+      return;
+    }
+    try { setEditor((await api.managedActionGroupDetails(connId, actionGroupId)).action_group); }
+    catch (cause) { setError(`Could not load the selected Action Group: ${formatError(cause)}`); }
+    finally { setManagementBusy(""); }
+  }
+
   async function cloneManagedRule(row: ManagedAlertRule) {
     setManagementBusy(row.id); setError("");
     try {
@@ -1350,11 +1349,11 @@ export function AlertsManagerPanel() {
     { id: "overview", label: "Overview" },
     { id: "inbox", label: "Alert instances", count: firedQ.data?.count },
     { id: "visualize", label: "Visualize" },
-    { id: "overlaps", label: "Overlaps", count: data?.overlaps.length },
-    { id: "gaps", label: "Gaps", count: data?.gaps.length },
-    { id: "rules", label: "Rule analysis", count: data?.rules.length },
-    { id: "manage-rules", label: "Rule management", count: managedRulesQ.data?.count },
-    { id: "action-groups", label: "Action groups", count: data?.action_groups.length ?? managedGroupsQ.data?.count },
+    { id: "overlaps", label: "Overlaps", count: data?.section_totals?.overlaps ?? data?.kpis.actionable_overlap_groups ?? data?.kpis.overlap_groups },
+    { id: "gaps", label: "Gaps", count: data?.section_totals?.gaps ?? data?.kpis.actionable_gap_count ?? data?.kpis.gap_count },
+    { id: "rules", label: "Rule analysis", count: data?.section_totals?.rules ?? data?.kpis.total_rules },
+    { id: "manage-rules", label: "Rule management", count: managedRulesQ.data?.count ?? data?.kpis.total_rules },
+    { id: "action-groups", label: "Action groups", count: data?.demo ? data.action_groups.length : managedGroupsQ.data?.count ?? data?.kpis.action_groups },
     { id: "deployment-plans", label: "Deployment plans" },
     { id: "changes", label: "Managed changes", count: summaryQ.data?.actionable_count ?? changesQ.data?.actionable_count, urgent: (summaryQ.data?.actionable_count ?? changesQ.data?.actionable_count ?? 0) > 0 },
   ];
@@ -1364,12 +1363,12 @@ export function AlertsManagerPanel() {
     <div className="flex h-full flex-col overflow-hidden bg-gray-50">
       <header className="border-b bg-white px-4 py-4 sm:px-6">
         <div className="flex flex-wrap items-start gap-3 sm:gap-4">
-          <div className="flex h-11 w-11 items-center justify-center rounded-xl bg-gradient-to-br from-amber-100 to-orange-50 text-2xl">🔔</div>
+          <div className="flex h-11 w-11 items-center justify-center rounded-xl bg-linear-to-br from-amber-100 to-orange-50 text-2xl">🔔</div>
           <div className="min-w-0 basis-[220px] flex-1">
             <div className="flex flex-wrap items-center gap-x-2 gap-y-1">
               <h1 className="text-lg font-semibold text-gray-900">Alerts Manager</h1>
-              {data?.demo && <span className="rounded bg-indigo-50 px-2 py-0.5 text-[10px] text-indigo-700">demo data</span>}
-              {data?.partial && <span className="rounded bg-amber-50 px-2 py-0.5 text-[10px] text-amber-700">partial result</span>}
+              {data?.demo && <span className="rounded-sm bg-indigo-50 px-2 py-0.5 text-[10px] text-indigo-700">demo data</span>}
+              {data?.partial && <span className="rounded-sm bg-amber-50 px-2 py-0.5 text-[10px] text-amber-700">partial result</span>}
               {data?.report_exists && <span className="text-[10px] font-normal text-gray-400">Updated {ageText(data.age_seconds)}{data.stale && <span className="text-amber-600"> · stale</span>} · cached</span>}
             </div>
             <p className="mt-0.5 max-w-3xl text-xs leading-4 text-gray-500">Find overlapping Azure Monitor rules, duplicate notification paths, and AMBA baseline coverage gaps. Recipient destinations are shown in full.</p>
@@ -1386,7 +1385,7 @@ export function AlertsManagerPanel() {
             <div className="flex items-center gap-2">
               <div className="flex items-center rounded-lg border bg-gray-50 p-0.5 text-xs">
                 {(["workload", "subscription", "management_group"] as const).map((kind) => (
-                  <button key={kind} onClick={() => { setScopeKind(kind); if (kind === "management_group") setMgRefreshToken((value) => value + 1); }} className={`rounded-md px-2.5 py-1 ${scopeKind === kind ? "bg-white font-medium text-gray-900 shadow-sm" : "text-gray-500"}`}>
+                  <button key={kind} onClick={() => { setScopeKind(kind); if (kind === "management_group") setMgRefreshToken((value) => value + 1); }} className={`rounded-md px-2.5 py-1 ${scopeKind === kind ? "bg-white font-medium text-gray-900 shadow-xs" : "text-gray-500"}`}>
                     {kind === "workload" ? "Workload" : kind === "subscription" ? "Subscription" : "Management group"}
                   </button>
                 ))}
@@ -1423,15 +1422,15 @@ export function AlertsManagerPanel() {
         <div className="mt-3 overflow-x-auto border-t pt-3">
           <div className="flex w-max min-w-full items-center gap-1 pb-1">
             {tabs.map((item) => (
-              <button key={item.id} onClick={() => goTab(item.id)} className={`rounded-lg px-3 py-1.5 text-xs font-medium ${item.urgent ? (tab === item.id ? "bg-red-600 text-white ring-2 ring-red-200" : "bg-red-50 text-red-700 ring-1 ring-red-300 hover:bg-red-100") : tab === item.id ? "bg-gray-900 text-white" : "text-gray-600 hover:bg-gray-100"}`}>{item.label}{item.urgent && <span className="ml-1.5 inline-block h-2 w-2 animate-pulse rounded-full bg-current" title={`${summaryQ.data?.actionable_count ?? changesQ.data?.actionable_count ?? 0} changes require action`} />}{typeof item.count === "number" && <span className={`ml-1.5 rounded px-1.5 py-0.5 text-[10px] ${item.urgent ? (tab === item.id ? "bg-white/20" : "bg-red-100") : tab === item.id ? "bg-white/20" : "bg-gray-100"}`}>{item.count}</span>}</button>
+              <button key={item.id} onClick={() => goTab(item.id)} className={`rounded-lg px-3 py-1.5 text-xs font-medium ${item.urgent ? (tab === item.id ? "bg-red-600 text-white ring-2 ring-red-200" : "bg-red-50 text-red-700 ring-1 ring-red-300 hover:bg-red-100") : tab === item.id ? "bg-gray-900 text-white" : "text-gray-600 hover:bg-gray-100"}`}>{item.label}{item.urgent && <span className="ml-1.5 inline-block h-2 w-2 animate-pulse rounded-full bg-current" title={`${summaryQ.data?.actionable_count ?? changesQ.data?.actionable_count ?? 0} changes require action`} />}{typeof item.count === "number" && <span className={`ml-1.5 rounded-sm px-1.5 py-0.5 text-[10px] ${item.urgent ? (tab === item.id ? "bg-white/20" : "bg-red-100") : tab === item.id ? "bg-white/20" : "bg-gray-100"}`}>{item.count}</span>}</button>
             ))}
           </div>
         </div>
         {data?.report_exists && !managementTab && tab !== "overview" && (
           <div className="mt-2 flex flex-wrap items-center gap-2">
-            <input value={search} onChange={(event) => setSearch(event.target.value)} placeholder="Search rules, signals, resources…" className="w-64 rounded-lg border px-3 py-1.5 text-xs focus:border-brand focus:outline-none" />
+            <input value={search} onChange={(event) => { setSearch(event.target.value); goPage(1); }} placeholder="Search rules, signals, resources…" className="w-64 rounded-lg border px-3 py-1.5 text-xs focus:border-brand focus:outline-hidden" />
             {tab === "gaps" && <><select aria-label="Filter gaps by risk" value={gapRisk} onChange={(event) => { setGapRisk(event.target.value); goPage(1); }} className="rounded-lg border px-2 py-1.5 text-xs"><option value="all">All risks</option>{gapOptions.risks.map((value) => <option key={value} value={value}>{value}</option>)}</select><select aria-label="Filter gaps by type" value={gapType} onChange={(event) => { setGapType(event.target.value); goPage(1); }} className="rounded-lg border px-2 py-1.5 text-xs"><option value="all">All gap types</option>{gapOptions.types.map((value) => <option key={value} value={value}>{value.replaceAll("_", " ")}</option>)}</select><select aria-label="Filter gaps by signal" value={gapSignal} onChange={(event) => { setGapSignal(event.target.value); goPage(1); }} className="max-w-64 rounded-lg border px-2 py-1.5 text-xs"><option value="all">All signals</option>{gapOptions.signals.map((value) => <option key={value} value={value}>{value}</option>)}</select><select aria-label="Group gaps" value={gapGroup} onChange={(event) => { setGapGroup(event.target.value as typeof gapGroup); goPage(1); }} className="rounded-lg border px-2 py-1.5 text-xs"><option value="none">No grouping</option><option value="signal">Group by signal</option></select><select aria-label="Sort gaps" value={gapSort ?? "default"} onChange={(event) => { setGapSort(event.target.value === "default" ? null : event.target.value as GapSort); setGapSortDirection("asc"); goPage(1); }} className="rounded-lg border px-2 py-1.5 text-xs"><option value="default">Default order</option><option value="risk">Risk</option><option value="signal">Signal</option><option value="gap">Gap type</option><option value="resource">Resource / rule</option><option value="recommendation">Recommended action</option></select><button type="button" disabled={!gapSort} onClick={() => { setGapSortDirection((value) => value === "asc" ? "desc" : "asc"); goPage(1); }} title="Reverse gap sort direction" className="rounded-lg border px-2 py-1.5 text-xs disabled:opacity-40">{gapSortDirection === "asc" ? "↑" : "↓"}</button></>}
-            {tab === "rules" && <select value={status} onChange={(event) => setStatus(event.target.value)} className="rounded-lg border px-2 py-1.5 text-xs"><option value="all">All statuses</option><option value="overlap">Overlaps</option><option value="gap">Gaps</option><option value="ok">OK</option></select>}
+            {tab === "rules" && <select value={status} onChange={(event) => { setStatus(event.target.value); goPage(1); }} className="rounded-lg border px-2 py-1.5 text-xs"><option value="all">All statuses</option><option value="overlap">Overlaps</option><option value="gap">Gaps</option><option value="ok">OK</option></select>}
             {tab === "rules" && <select aria-label="Sort rule analysis" value={ruleSort === "cost" ? `cost_${ruleSortDirection}` : "default"} onChange={(event) => { const value = event.target.value; setRuleSort(value === "default" ? null : "cost"); if (value !== "default") setRuleSortDirection(value.endsWith("desc") ? "desc" : "asc"); goPage(1); }} className="rounded-lg border px-2 py-1.5 text-xs"><option value="default">Default order</option><option value="cost_desc">Cost: highest first</option><option value="cost_asc">Cost: lowest first</option></select>}
             {(search || status !== "all" || ruleSort || overlapSort || gapRisk !== "all" || gapType !== "all" || gapSignal !== "all" || gapGroup !== "none" || gapSort) && <button onClick={() => { setSearch(""); setStatus("all"); setRuleSort(null); setOverlapSort(null); setGapRisk("all"); setGapType("all"); setGapSignal("all"); setGapGroup("none"); setGapSort(null); goPage(1); }} className="text-xs text-gray-500 hover:underline">Clear</button>}
           </div>
@@ -1481,7 +1480,7 @@ export function AlertsManagerPanel() {
                     <div className="flex flex-wrap items-center gap-3 rounded-xl border bg-white px-4 py-3 text-xs">
                       <span className="font-medium text-gray-600">Show:</span>
                       <div className="inline-flex overflow-hidden rounded-md border" role="group" aria-label="Filter managed changes">
-                        {(["all", "action_required", "archived"] as const).map((value) => <button key={value} type="button" aria-pressed={changesView === value} onClick={() => { setChangesView(value); goPage(1); }} className={`px-3 py-1.5 transition ${changesView === value ? "bg-gray-900 font-medium text-white" : "bg-white text-gray-600 hover:bg-gray-50"}`}>{value === "all" ? "All" : value === "action_required" ? "Action Required" : "Archived"}{value === "action_required" && <span className={`ml-1.5 rounded px-1.5 py-0.5 text-[10px] ${changesView === value ? "bg-white/20" : "bg-red-50 text-red-700"}`}>{changesQ.data?.actionable_count ?? 0}</span>}</button>)}
+                        {(["all", "action_required", "archived"] as const).map((value) => <button key={value} type="button" aria-pressed={changesView === value} onClick={() => { setChangesView(value); goPage(1); }} className={`px-3 py-1.5 transition ${changesView === value ? "bg-gray-900 font-medium text-white" : "bg-white text-gray-600 hover:bg-gray-50"}`}>{value === "all" ? "All" : value === "action_required" ? "Action Required" : "Archived"}{value === "action_required" && <span className={`ml-1.5 rounded-sm px-1.5 py-0.5 text-[10px] ${changesView === value ? "bg-white/20" : "bg-red-50 text-red-700"}`}>{changesQ.data?.actionable_count ?? 0}</span>}</button>)}
                       </div>
                       <label className="ml-auto flex items-center gap-2 text-gray-600">Sort by<select aria-label="Sort managed changes" value={changesSort} onChange={(event) => { setChangesSort(event.target.value as ChangesSort); goPage(1); }} className="rounded-md border px-2.5 py-1.5 text-xs text-gray-700"><option value="newest">Newest requested</option><option value="oldest">Oldest requested</option><option value="status">Status</option><option value="risk">Risk</option><option value="change">Change</option></select></label>
                       <span className="text-[10px] text-gray-400">{CHANGES_PAGE_SIZE} per page</span>
@@ -1506,17 +1505,17 @@ export function AlertsManagerPanel() {
               <Kpi label="Fires 7d" value={data.kpis.firings_7d} tone={data.kpis.firings_7d > 0 ? "amber" : "gray"} />
               <Kpi label="Fires 30d" value={data.kpis.firings_30d} tone={data.kpis.firings_30d > 0 ? "blue" : "gray"} />
             </div>}
-            <Overview overlaps={data.active_overlaps ?? data.overlaps} gaps={data.active_gaps ?? data.gaps} rules={data.rules} costSummary={data.cost_summary} activityLogCoverage={data.demo ? <section className="rounded-xl border bg-white p-4 text-xs text-gray-500">Essential Activity Log coverage is available for live Azure scopes.</section> : <ActivityLogCoverageSection coverage={activityLogCoverageQ.data?.coverage} loading={activityLogCoverageQ.isLoading} error={activityLogCoverageQ.error} disabled={!capabilities?.can_manage_rules || !!capabilities.read_only} onOpen={() => setActivityLogWizardOpen(true)} />} />
+            <Overview overlaps={data.overlaps} gaps={data.gaps} overview={data.overview} totals={data.section_totals} costSummary={data.cost_summary} activityLogCoverage={data.demo ? <section className="rounded-xl border bg-white p-4 text-xs text-gray-500">Essential Activity Log coverage is available for live Azure scopes.</section> : <ActivityLogCoverageSection coverage={activityLogCoverageQ.data?.coverage} loading={activityLogCoverageQ.isLoading} error={activityLogCoverageQ.error} readOnly={!!capabilities?.read_only} canManageRules={!!capabilities?.can_manage_rules} onOpen={() => setActivityLogWizardOpen(true)} />} />
           </div>
-          : tab === "overlaps" ? <PagedView rows={overlaps} page={page} onPage={goPage}>{(pageRows) => <OverlapsTable rows={pageRows} sortColumn={overlapSort} sortDirection={overlapSortDirection} onSort={(column) => updateSort(column, overlapSort, overlapSortDirection, setOverlapSort, setOverlapSortDirection, column === "confidence" ? "desc" : "asc")} onDismiss={(id) => void recordDecision("overlap", id, "dismiss_finding")} />}</PagedView>
-          : tab === "gaps" ? <PagedView rows={gaps} page={page} onPage={goPage}>{(pageRows) => <GapsTable rows={pageRows} selectedRows={selectedGaps} selectedIds={selectedGapIds} plansByGap={gapPlansQ.data?.by_gap ?? {}} canPlan={canPlanGaps} groupBySignal={gapGroup === "signal"} sortColumn={gapSort} sortDirection={gapSortDirection} onSort={(column) => updateSort(column, gapSort, gapSortDirection, setGapSort, setGapSortDirection)} onSelectionChange={setSelectedGapIds} onCreatePlan={() => setGapPlannerOpen(true)} onOpenPlan={(planId) => { setFocusedDeploymentPlanId(planId); goTab("deployment-plans"); }} onCreateRule={capabilitiesQ.data?.can_manage_rules && !capabilitiesQ.data.read_only ? (row) => setRuleEditor(ruleFromGap(row, scopeKind === "subscription" ? subId : "")) : undefined} />}</PagedView>
-          : tab === "rules" ? <PagedView rows={rules} page={page} onPage={goPage}>{(pageRows) => <RulesTable rows={pageRows} sortColumn={ruleSort} sortDirection={ruleSortDirection} onSort={(column) => updateSort(column, ruleSort, ruleSortDirection, setRuleSort, setRuleSortDirection, column === "cost" || column === "firings" ? "desc" : "asc")} onDecision={(rule, action) => void recordDecision("rule", rule.id, action)} />}</PagedView>
-          : tab === "visualize" ? <NotificationSimulatorPanel params={managementParams} />
+          : tab === "overlaps" ? overlapsPageQ.isLoading ? <Skeleton rows={8} /> : overlapsPageQ.isError ? <div className="rounded-lg border border-red-200 bg-red-50 p-4 text-sm text-red-700">{formatError(overlapsPageQ.error)}</div> : <div className="space-y-2"><OverlapsTable rows={overlaps} sortColumn={overlapSort} sortDirection={overlapSortDirection} onSort={(column) => updateSort(column, overlapSort, overlapSortDirection, setOverlapSort, setOverlapSortDirection, column === "confidence" ? "desc" : "asc")} onDismiss={(id) => void recordDecision("overlap", id, "dismiss_finding")} /><PageBar total={overlapsPageQ.data?.total ?? 0} page={page} pageSize={PAGE_SIZE} onPage={goPage} /></div>
+          : tab === "gaps" ? gapsPageQ.isLoading ? <Skeleton rows={8} /> : gapsPageQ.isError ? <div className="rounded-lg border border-red-200 bg-red-50 p-4 text-sm text-red-700">{formatError(gapsPageQ.error)}</div> : <div className="space-y-2"><GapsTable rows={gaps} selectedRows={selectedGaps} selectedIds={selectedGapIds} plansByGap={gapPlansQ.data?.by_gap ?? {}} canPlan={canPlanGaps} groupBySignal={gapGroup === "signal"} sortColumn={gapSort} sortDirection={gapSortDirection} onSort={(column) => updateSort(column, gapSort, gapSortDirection, setGapSort, setGapSortDirection)} onSelectionChange={changeSelectedGaps} onCreatePlan={() => setGapPlannerOpen(true)} onOpenPlan={(planId) => { setFocusedDeploymentPlanId(planId); goTab("deployment-plans"); }} onCreateRule={capabilitiesQ.data?.can_manage_rules && !capabilitiesQ.data.read_only ? (row) => setRuleEditor(ruleFromGap(row, scopeKind === "subscription" ? subId : "")) : undefined} /><PageBar total={gapsPageQ.data?.total ?? 0} page={page} pageSize={PAGE_SIZE} onPage={goPage} /></div>
+          : tab === "rules" ? rulesPageQ.isLoading ? <Skeleton rows={8} /> : rulesPageQ.isError ? <div className="rounded-lg border border-red-200 bg-red-50 p-4 text-sm text-red-700">{formatError(rulesPageQ.error)}</div> : <div className="space-y-2"><RulesTable rows={rules} sortColumn={ruleSort} sortDirection={ruleSortDirection} onSort={(column) => updateSort(column, ruleSort, ruleSortDirection, setRuleSort, setRuleSortDirection, column === "cost" || column === "firings" ? "desc" : "asc")} onDecision={(rule, action) => void recordDecision("rule", rule.id, action)} /><PageBar total={rulesPageQ.data?.total ?? 0} page={page} pageSize={PAGE_SIZE} onPage={goPage} /></div>
+          : tab === "visualize" ? <NotificationSimulatorPanel params={managementParams} readOnly={!!capabilities?.read_only} canEditRules={!!capabilities?.can_manage_rules} canEditActionGroups={!!capabilities?.can_manage_action_groups} onEditRule={(ruleId, family) => void editVisualizedRule(ruleId, family)} onEditActionGroup={(actionGroupId) => void editVisualizedActionGroup(actionGroupId)} />
           : null}
       </main>
       {editor && <ActionGroupEditor initial={editor} connectionId={connId} busy={managementBusy === "save"} saveError={actionGroupEditorError} onClose={() => { setActionGroupEditorError(""); setEditor(null); }} onSave={(value, reason) => void saveActionGroup(value, reason)} />}
       {ruleEditor && <AlertRuleEditor initial={ruleEditor} connectionId={connId} workloadId={scopeKind === "workload" ? effectiveWorkloadId : ""} actionGroups={ruleActionGroupsQ.data?.action_groups ?? []} canPreview={!!capabilitiesQ.data?.can_preview_queries} busy={managementBusy === "rule-save"} onClose={() => setRuleEditor(null)} onSave={saveManagedRule} />}
-      {gapPlannerOpen && selectedGaps.length > 0 && <GapRemediationPlanner gaps={selectedGaps} scopeParams={managementParams} liveActionGroups={managedGroupsQ.data?.action_groups ?? []} capabilities={capabilitiesQ.data} onClose={() => setGapPlannerOpen(false)} onOpenPlan={(planId) => { setGapPlannerOpen(false); setFocusedDeploymentPlanId(planId); goTab("deployment-plans"); }} onSubmitted={(plan) => { setGapPlannerOpen(false); setSelectedGapIds(new Set()); setFocusedDeploymentPlanId(plan.id); goTab("deployment-plans"); void Promise.all([qc.invalidateQueries({ queryKey: ["alerts-manager-deployment-plans"] }), qc.invalidateQueries({ queryKey: ["alerts-manager-deployment-plans-by-gap"] }), invalidateManagedChanges()]); }} />}
+      {gapPlannerOpen && selectedGaps.length > 0 && <GapRemediationPlanner gaps={selectedGaps} scopeParams={managementParams} liveActionGroups={managedGroupsQ.data?.action_groups ?? []} capabilities={capabilitiesQ.data} onClose={() => setGapPlannerOpen(false)} onOpenPlan={(planId) => { setGapPlannerOpen(false); setFocusedDeploymentPlanId(planId); goTab("deployment-plans"); }} onSubmitted={(plan) => { setGapPlannerOpen(false); setSelectedGapIds(new Set()); setSelectedGapRows(new Map()); setFocusedDeploymentPlanId(plan.id); goTab("deployment-plans"); void Promise.all([qc.invalidateQueries({ queryKey: ["alerts-manager-deployment-plans"] }), qc.invalidateQueries({ queryKey: ["alerts-manager-deployment-plans-by-gap"] }), invalidateManagedChanges()]); }} />}
       {activityLogWizardOpen && activityLogCoverageQ.data && <ActivityLogSetupWizard coverage={activityLogCoverageQ.data.coverage} scopeParams={managementParams} actionGroups={managedGroupsQ.data?.action_groups ?? []} capabilities={capabilities} onClose={() => setActivityLogWizardOpen(false)} onOpenDiagnostics={() => { setActivityLogWizardOpen(false); setActivityLogDiagnosticsOpen(true); }} onSubmitted={() => { setActivityLogWizardOpen(false); goTab("changes"); requestAnimationFrame(() => contentScrollRef.current?.scrollTo({ top: 0, behavior: "auto" })); void Promise.all([invalidateManagedChanges(), qc.invalidateQueries({ queryKey: queryKeys.alertsManager.activityLogCoverageRoot }), qc.invalidateQueries({ queryKey: queryKeys.alertsManager.rulesRoot })]); }} />}
       {activityLogDiagnosticsOpen && <ActivityLogDiagnosticsWizard scopeParams={managementParams} capabilities={capabilities} onBack={() => { setActivityLogDiagnosticsOpen(false); setActivityLogWizardOpen(true); }} onClose={() => setActivityLogDiagnosticsOpen(false)} onSubmitted={() => { setActivityLogDiagnosticsOpen(false); goTab("changes"); requestAnimationFrame(() => contentScrollRef.current?.scrollTo({ top: 0, behavior: "auto" })); void Promise.all([invalidateManagedChanges(), qc.invalidateQueries({ queryKey: queryKeys.alertsManager.activityLogCoverageRoot })]); }} />}
     </div>

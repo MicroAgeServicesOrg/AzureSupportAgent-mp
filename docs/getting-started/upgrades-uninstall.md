@@ -13,16 +13,20 @@ Upgrade procedures depend on how the application was deployed. The repository pr
 
 ## Before an upgrade
 
-1. Record the current image digest or immutable tag and active Container App revision.
+1. Record the current `/version` build identity and active Container App revision.
 2. Back up the application database and configuration using your approved method. If using the in-product backup export, remember that secrets are intentionally not included and must be re-entered.
 3. Review release notes and database migration requirements.
 4. Confirm persistent storage mounts and database connection settings.
 5. Schedule a maintenance window for stateful or schema-changing upgrades.
 6. Test the target image in a non-production environment with representative configuration.
 
+{% include screenshot.html file="flife-about-version-environment.png" title="Before upgrade — locate the version and environment in About" caption="The native About dialog shows the documentation instance as version dev and environment local. Use the corresponding fields in your instance alongside the build identity and active revision recorded above. The background usage is dummy data; this image does not demonstrate an upgrade, uninstall, Azure deployment, or successful health check." %}
+
+{% include screenshot.html file="admin-backup-export-scope.png" title="Before upgrade or removal — review the application backup scope" caption="The Backup & Restore export catalog separates configuration, operational data, reference sets, and connections, and explicitly excludes secrets. Use it to plan retained application records alongside the database backup above. This seeded example did not download or restore a backup and is not proof of complete disaster recovery or a successful upgrade." %}
+
 ## Manual Container Apps upgrade
 
-The [Manual Deployment Guide]({{ site.baseurl }}/DEPLOYMENT/) documents the supported pattern: build a new image and update the Container App so Azure creates a fresh revision. Prefer a versioned tag or digest. If reusing `latest`, force a unique revision as shown in that guide.
+[Manual deployment]({{ site.baseurl }}/getting-started/manual-deployment/) documents the supported pattern: build and scan a new image, publish it as `latest`, and update the Container App with a unique revision suffix. The supplied Bicep template generates that suffix automatically on every deployment.
 
 After the new revision starts:
 
@@ -46,7 +50,7 @@ The complete one-click footprint can be removed by deleting its dedicated resour
 2. Back up the database if policy requires it.
 3. Inventory the resource group and confirm that it contains no unrelated resources.
 4. Record dependencies such as private DNS links, role assignments, external connectors, or monitoring exports.
-5. Delete the resource group in the Azure portal, or use the teardown command in the [Installation Guide]({{ site.baseurl }}/INSTALLATION/).
+5. Delete the resource group in the Azure portal, or use the teardown command in [one-click installation]({{ site.baseurl }}/getting-started/one-click-install/#teardown).
 6. Remove external app registrations, credentials, Graph consents, role assignments, DNS records, and connector credentials that were created outside the resource group.
 7. Verify that billing and monitoring no longer show retained resources.
 
@@ -62,7 +66,7 @@ For a manual deployment spread across resource groups, delete resources in depen
 | --- | --- |
 | New revision starts but old data is absent | Stop rollout and verify database URL, secret references, and storage mount before writing new state |
 | Readiness fails after upgrade | Inspect startup/migration logs and dependency connectivity; keep traffic on the prior revision |
-| A reused tag still runs old code | Deploy a unique tag/digest or force a new revision as documented |
+| `latest` still runs old code | Force a new revision with a unique suffix as documented, then verify `/version` |
 | Resource group deletion is blocked | Check locks, policy, dependent resources, and delete permissions |
 | Costs remain after uninstall | Search for resources, role-linked services, or external dependencies outside the deleted group |
 
@@ -70,4 +74,4 @@ For a manual deployment spread across resource groups, delete resources in depen
 
 - [One-click installation]({{ site.baseurl }}/getting-started/one-click-install/)
 - [Manual deployment]({{ site.baseurl }}/getting-started/manual-deployment/)
-- [Canonical deployment guide]({{ site.baseurl }}/DEPLOYMENT/)
+- [Backup & Restore and Demo Data]({{ site.baseurl }}/admin/backup-demo/)

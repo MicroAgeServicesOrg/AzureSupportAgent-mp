@@ -12,6 +12,8 @@ import { streamIamRefresh, type IamOverview, type IamProgress, type IamRow, type
 // Shared via context so every tab + the refresh stream re-scope together without prop drilling.
 export const IamConnectionContext = createContext<string>("");
 export const useIamConnectionId = () => useContext(IamConnectionContext) || null;
+export const IamConnectionChangeContext = createContext<(connectionId: string) => void>(() => undefined);
+export const useIamConnectionChange = () => useContext(IamConnectionChangeContext);
 
 // RP6 — access-grid server page size (the grid pages through the full result set as you scroll).
 export const IAM_PAGE = 200;
@@ -106,18 +108,18 @@ const STATUS_CLS: Record<string, string> = {
 
 export function StatusPill({ status }: { status: string }) {
   const cls = STATUS_CLS[status] ?? "bg-sky-100 text-sky-700";
-  return <span className={`whitespace-nowrap rounded px-1.5 py-0.5 text-[11px] font-medium ${cls}`}>{status || "—"}</span>;
+  return <span className={`whitespace-nowrap rounded-sm px-1.5 py-0.5 text-[11px] font-medium ${cls}`}>{status || "—"}</span>;
 }
 
 export function StaleBadge({ stale, age }: { stale?: boolean; age: number | null }) {
-  if (age == null) return <span className="rounded bg-gray-100 px-1.5 py-0.5 text-[11px] text-gray-500">never</span>;
+  if (age == null) return <span className="rounded-sm bg-gray-100 px-1.5 py-0.5 text-[11px] text-gray-500">never</span>;
   const cls = stale ? "bg-amber-100 text-amber-700" : "bg-green-100 text-green-700";
-  return <span className={`whitespace-nowrap rounded px-1.5 py-0.5 text-[11px] font-medium ${cls}`}>updated {agoText(age)}</span>;
+  return <span className={`whitespace-nowrap rounded-sm px-1.5 py-0.5 text-[11px] font-medium ${cls}`}>updated {agoText(age)}</span>;
 }
 
 export function PrivBadge({ row }: { row: IamRow }) {
-  if (row.roleIsPrivileged) return <span className="rounded bg-red-100 px-1.5 py-0.5 text-[10px] font-semibold text-red-700">privileged</span>;
-  if (row.roleHasDataActions) return <span className="rounded bg-amber-100 px-1.5 py-0.5 text-[10px] font-semibold text-amber-700">data</span>;
+  if (row.roleIsPrivileged) return <span className="rounded-sm bg-red-100 px-1.5 py-0.5 text-[10px] font-semibold text-red-700">privileged</span>;
+  if (row.roleHasDataActions) return <span className="rounded-sm bg-amber-100 px-1.5 py-0.5 text-[10px] font-semibold text-amber-700">data</span>;
   return null;
 }
 
@@ -127,7 +129,7 @@ export function EffectChip({ row }: { row: IamRow }) {
   if (row.effect !== "Deny") return null;
   return (
     <span
-      className="rounded bg-red-600 px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-white"
+      className="rounded-sm bg-red-600 px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-white"
       title="Deny assignment — evaluated before role assignments and cannot be overridden, even by Owner"
     >
       deny
@@ -164,7 +166,7 @@ export function scopeCell(r: IamRow): { icon: "mg" | "subscription" | "resource_
 }
 
 export function KpiTile({ label, value, tone }: { label: string; value: number | null | undefined; tone?: "red" | "amber" | "sky" }) {
-  const toneCls = tone === "red" ? "text-red-600" : tone === "amber" ? "text-amber-600" : tone === "sky" ? "text-sky-600" : "text-gray-900";
+  const toneCls = tone === "red" ? "text-red-600" : tone === "amber" ? "text-amber-700" : tone === "sky" ? "text-sky-700" : "text-gray-900";
   // A missing figure renders as "—", never as 0. A hard zero on a tenant that was never scanned
   // is the most reassuring possible way to say "we did not look", and it is the one rendering
   // this product must never produce.
@@ -308,7 +310,7 @@ export function RefreshConsole({ ctl, lines = 8 }: { ctl: IamRefreshCtl; lines?:
         )}
       </div>
       {running && pct !== null && (
-        <div className="mb-1.5 h-1 w-full overflow-hidden rounded bg-gray-700">
+        <div className="mb-1.5 h-1 w-full overflow-hidden rounded-sm bg-gray-700">
           <div
             className={`h-full transition-[width] duration-500 ${overdue ? "bg-amber-400" : "bg-sky-400"}`}
             style={{ width: `${overdue ? 100 : pct}%` }}
@@ -365,12 +367,12 @@ export function ScopeTable({
           <tr key={s.scope} className="border-t hover:bg-gray-50">
             <td className="px-3 py-1.5 font-medium text-gray-800">
               {s.displayName}
-              {s.demo && <span className="ml-1 rounded bg-violet-100 px-1 text-[10px] text-violet-700">demo</span>}
+              {s.demo && <span className="ml-1 rounded-sm bg-violet-100 px-1 text-[10px] text-violet-700">demo</span>}
             </td>
             <td className="px-3 py-1.5 text-gray-500">{s.scopeType}</td>
             <td className="px-3 py-1.5">
               <StatusPill status={s.status} />
-              {s.collectors_attention > 0 && <span className="ml-1 text-[11px] text-amber-600">⚠ {s.collectors_attention}</span>}
+              {s.collectors_attention > 0 && <span className="ml-1 text-[11px] text-amber-700">⚠ {s.collectors_attention}</span>}
             </td>
             <td className="px-3 py-1.5 text-gray-600">{s.row_count}</td>
             <td className="px-3 py-1.5">
@@ -380,7 +382,7 @@ export function ScopeTable({
                   would let day-old data read as freshly collected. */}
               {s.verified_unchanged && (
                 <span
-                  className="ml-1 rounded border border-emerald-300 bg-emerald-50 px-1 text-[10px] text-emerald-700"
+                  className="ml-1 rounded-sm border border-emerald-300 bg-emerald-50 px-1 text-[10px] text-emerald-700"
                   title={`No authorization activity since collection. Verified ${agoText(s.verified_age_seconds ?? null)}.`}
                 >
                   ✓ unchanged
@@ -390,7 +392,7 @@ export function ScopeTable({
             <td className="px-3 py-1.5">
               {s.source && (
                 <span
-                  className="rounded bg-gray-100 px-1 text-[10px] uppercase text-gray-500"
+                  className="rounded-sm bg-gray-100 px-1 text-[10px] uppercase text-gray-500"
                   title={
                     s.source === "arg"
                       ? "Collected by the tenant-wide Resource Graph sweep."
@@ -405,7 +407,7 @@ export function ScopeTable({
               <button
                 onClick={() => refresh(s.scope, s.displayName)}
                 disabled={refreshing.has(s.scope)}
-                className="rounded border px-2 py-0.5 text-xs text-brand hover:bg-gray-50 disabled:opacity-50"
+                className="rounded-sm border px-2 py-0.5 text-xs text-brand hover:bg-gray-50 disabled:opacity-50"
               >
                 {refreshing.has(s.scope) ? "Refreshing…" : "↻ Refresh"}
               </button>

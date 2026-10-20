@@ -4,15 +4,19 @@
 import { useState } from "react";
 import { Link } from "react-router-dom";
 import { PROACTIVE_NAV } from "./navConfig";
+import { useAuth } from "./AuthContext";
+import { filterPermissionedGroups } from "../utils/accessControl";
 
 export function ProactiveOverviewPanel() {
+  const { user } = useAuth();
   const [q, setQ] = useState("");
   const term = q.trim().toLowerCase();
+  const permittedItems = filterPermissionedGroups(PROACTIVE_NAV, user);
 
   // Preserve the PROACTIVE_NAV order but split into the same groups the sidebar uses. Each
   // item joins the group of the nearest preceding item that declared one.
   const groups: { name: string; items: typeof PROACTIVE_NAV }[] = [];
-  for (const item of PROACTIVE_NAV) {
+  for (const item of permittedItems) {
     if (item.group || groups.length === 0) {
       groups.push({ name: item.group ?? "Proactive Support", items: [] });
     }
@@ -27,7 +31,7 @@ export function ProactiveOverviewPanel() {
 
   return (
     <div className="h-full overflow-y-auto bg-gray-50">
-      <div className="mx-auto max-w-5xl space-y-6 p-8">
+      <div className="w-full max-w-none space-y-6 p-8">
         <div className="flex flex-wrap items-end justify-between gap-3">
           <div>
             <h1 className="text-xl font-semibold text-gray-900">Proactive Support</h1>
@@ -40,7 +44,7 @@ export function ProactiveOverviewPanel() {
             value={q}
             onChange={(e) => setQ(e.target.value)}
             placeholder="Search proactive tools…"
-            className="w-56 rounded-lg border border-gray-300 px-3 py-2 text-sm focus:border-brand-dark focus:outline-none"
+            className="w-56 rounded-lg border border-gray-300 px-3 py-2 text-sm focus:border-brand-dark focus:outline-hidden"
           />
         </div>
 
@@ -54,12 +58,12 @@ export function ProactiveOverviewPanel() {
               <div className="mb-2 text-[11px] font-semibold uppercase tracking-wide text-gray-400">
                 {g.name}
               </div>
-              <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-3">
+              <div className="grid grid-cols-[repeat(auto-fit,minmax(240px,1fr))] gap-3">
                 {g.items.map((i) => (
                   <Link
                     key={i.id}
                     to={i.to}
-                    className="group flex items-start gap-3 rounded-xl border bg-white p-4 transition hover:border-brand-dark/40 hover:shadow-sm"
+                    className="group flex items-start gap-3 rounded-xl border bg-white p-4 transition hover:border-brand-dark/40 hover:shadow-xs"
                   >
                     <span className="text-xl leading-none">{i.icon}</span>
                     <span className="min-w-0">

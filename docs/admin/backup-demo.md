@@ -2,9 +2,10 @@
 layout: default
 title: Backup & Restore and Demo Data
 parent: Administration
-nav_order: 10
+nav_order: 11
 description: Export or import tenant configuration safely and manage synthetic demonstration data.
 permalink: /admin/backup-demo/
+feature_ids: [ADMIN_NAV:backup, ADMIN_NAV:demodata]
 ---
 
 # Backup & Restore and Demo Data
@@ -33,11 +34,15 @@ permalink: /admin/backup-demo/
 
 The backup screen enumerates available sections by tier, such as configuration, operational data, references, and credentials. Select explicitly, download the archive, and store it under organizational controls. The normal whole-tenant configuration export is designed to be secret-free/masked unless the UI explicitly offers a protected secret tier with clear warnings.
 
+{% include screenshot.html file="admin-backup-export-scope.png" title="Backup export sections and secret-redaction guidance" caption="Review configuration, operational data, reference sets, and credential sections before exporting. The captured catalog marks secrets as redacted; no archive was downloaded or uploaded, and no restore preview or restore was run." %}
+
 For restore, upload the archive, validate/preview it, select sections, and choose the offered conflict mode: **merge**, **overwrite**, or **skip**. Restore does not prove external credentials remain valid; re-enter and test masked/excluded secrets. Verify tenant identity before import and take a current backup first.
 
 ### Demo Data
 
 Demo Data loads synthetic records for exploring features without touching Azure. The screen shows status and provides seed/reset or purge actions. Demo connectors are disabled and use non-functional placeholders. Purge removes demo-marked records and is irreversible; inspect the confirmation and avoid mixing demo output into real reports.
+
+{% include screenshot.html file="admin-demo-data-loaded.png" title="Loaded demo-data scope and removal guidance" caption="The status describes synthetic records already seeded in the isolated local instance, not live Azure discovery. Load and Remove were not clicked during capture; review the demo-only removal scope before any later cleanup." %}
 
 ## Interpretation of results
 
@@ -60,5 +65,6 @@ After restore or demo changes, validate workload counts, references, automation 
 
 ## Related pages
 
+- [Back up, restore, or manage demo data (how-to)]({{ site.baseurl }}/how-to/administration/backup-demo/)
 - [Credential handling]({{ site.baseurl }}/security/credential-handling/)
 - [Auditing]({{ site.baseurl }}/security/auditing/)

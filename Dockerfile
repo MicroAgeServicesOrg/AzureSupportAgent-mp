@@ -7,7 +7,7 @@
 # silently-retagged upstream cannot slip in. Pinning alone would freeze out upstream
 # SECURITY patches, so it is paired with the `docker` ecosystem in .github/dependabot.yml,
 # which opens a PR when a new digest is published. Do not un-pin; bump via that PR.
-FROM node:22-alpine@sha256:c610fcdfb1d5b4740dd70c284ed3cb16bb857e0f7166196e36a5501df7a3aa32 AS frontend
+FROM node:22-alpine@sha256:b6f26b36c8ff49624cfdac716b8ea1138d606df02586a77d364bb5536a634f85 AS frontend
 WORKDIR /web
 # Install exactly the audited lockfile. Copying both manifests into this layer also ensures
 # dependency-only security updates invalidate Docker's npm cache before the SPA is bundled.
@@ -26,8 +26,42 @@ ARG APP_RELEASE=
 ENV VITE_APP_RELEASE=$APP_RELEASE
 RUN npm run build
 
-# ---- Stage 2: backend + bundled SPA ------------------------------------------------
-FROM python:3.12-slim@sha256:57cd7c3a7a273101a6485ba99423ee568157882804b1124b4dd04266317710de
+# ---- Stage 2: rebuild Azure Quick Review with a patched Go toolchain ----------------
+# Keep azqr's checksum-verified release source unchanged while patching the compiler and
+# embedded modules independently; upstream binary releases lag their security fixes.
+FROM golang:1.26.9-bookworm@sha256:d9c68c2c51161e12fd77e4c6320687c9cd86e1af1e3ad6e6cd63ff970641453c AS azqr
+ARG AZQR_VERSION=4.0.1
+ARG AZQR_SOURCE_COMMIT=ffda262cbccc33bf4f472c07f81758839b165b1a
+ARG AZQR_SOURCE_SHA256=afef4ba8c09945668145d0a035da87922ec26ba1461077d2c1bf418a12e8321f
+ARG AZQR_APRL_COMMIT=60eaddda76541f6adbc1c5ffa686829807e55e29
+ARG AZQR_APRL_SHA256=9f5125e2992649057328c0fb8e7430d5eac0db574d07316b4876236a66a10deb
+# The release source pins x/crypto v0.54.0, which contains CVE-2026-56854.
+# Align the patched modules on the x/crypto version required by x/net and Excelize.
+ARG GO_X_CRYPTO_VERSION=v0.57.0
+ARG GO_X_NET_VERSION=v0.60.0
+ARG GO_EXCELIZE_VERSION=v2.11.1-0.20261003002531-6258dcebc4e2
+WORKDIR /src
+RUN curl -fsSLo /tmp/azqr.tar.gz \
+        "https://github.com/Azure/azqr/archive/${AZQR_SOURCE_COMMIT}.tar.gz" \
+    && echo "${AZQR_SOURCE_SHA256}  /tmp/azqr.tar.gz" | sha256sum -c - \
+    && tar -xzf /tmp/azqr.tar.gz --strip-components=1 \
+    && curl -fsSLo /tmp/aprl.tar.gz \
+        "https://github.com/Azure/Azure-Proactive-Resiliency-Library-v2/archive/${AZQR_APRL_COMMIT}.tar.gz" \
+    && echo "${AZQR_APRL_SHA256}  /tmp/aprl.tar.gz" | sha256sum -c - \
+    && mkdir -p internal/graph/aprl \
+    && tar -xzf /tmp/aprl.tar.gz -C internal/graph/aprl --strip-components=1 \
+    && GOTOOLCHAIN=local go get \
+        "golang.org/x/crypto@${GO_X_CRYPTO_VERSION}" \
+        "golang.org/x/net@${GO_X_NET_VERSION}" \
+        "github.com/xuri/excelize/v2@${GO_EXCELIZE_VERSION}" \
+    && GOTOOLCHAIN=local CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath \
+        -ldflags "-s -w -X github.com/Azure/azqr/cmd/azqr/commands.version=${AZQR_VERSION}" \
+        -o /usr/local/bin/azqr ./cmd/azqr/main.go \
+    && /usr/local/bin/azqr --version \
+    && rm /tmp/azqr.tar.gz /tmp/aprl.tar.gz
+
+# ---- Stage 3: backend + bundled SPA ------------------------------------------------
+FROM python:3.12-slim@sha256:229a2c5bfa27522db7815ea81f9bed70af17ccb9de9fc7ad142b1877b5830d36
 
 ENV PYTHONUNBUFFERED=1 \
     PYTHONDONTWRITEBYTECODE=1 \
@@ -41,12 +75,29 @@ ENV APP_VERSION=$APP_VERSION
 ARG APP_RELEASE=
 ENV APP_RELEASE=$APP_RELEASE
 
-# Node.js (for `npx @azure/mcp`), the Azure CLI (DefaultAzureCredential), and the
+# Node.js (to run the Azure MCP server), the Azure CLI (DefaultAzureCredential), and the
 # networking CLIs the built-in utility tools shell out to (ping, traceroute, dig, etc.).
 # One layer.
 # `apt-get upgrade` pulls in the latest Debian security patches for the base image so a
 # rebuild closes known OS-package CVEs instead of inheriting whatever was current when
 # the base tag was published.
+#
+# npm is PINNED rather than `@latest`. An unpinned global upgrade makes the image
+# non-reproducible — two builds of the same commit can ship different npm trees — and npm
+# vendors its own dependency copies under /usr/lib/node_modules/npm/node_modules, so those
+# bundled packages are what image CVE scans report. Pinning makes that surface a deliberate,
+# reviewable choice; bump it on purpose after checking the scan.
+ARG NPM_VERSION=12.0.2
+# The Azure MCP server is INSTALLED AT BUILD TIME instead of being fetched by `npx` on every
+# cold start. Fetching it at runtime meant the container reached out to the public npm
+# registry from production — a supply-chain and availability dependency on a third party,
+# and the main path that exercised npm's own HTTP stack at runtime.
+#
+# Pinned to the exact version `@latest` resolved to when this was introduced, so this change
+# is only about WHEN the package is fetched, not WHICH version runs. NOTE: the package's
+# `latest` dist-tag currently points at a PRERELEASE (there is no stable tag), which is worth
+# a deliberate decision rather than inheriting it silently — see MCP_COMMAND below.
+ARG AZURE_MCP_VERSION=3.0.0-beta.31
 RUN apt-get update \
     && apt-get upgrade -y --no-install-recommends \
     && apt-get install -y --no-install-recommends \
@@ -56,10 +107,43 @@ RUN apt-get update \
     && curl -fsSL https://deb.nodesource.com/setup_22.x | bash - \
     && apt-get install -y --no-install-recommends nodejs \
     && curl -sL https://aka.ms/InstallAzureCLIDeb | bash \
-    && /opt/az/bin/python3 -m pip install --no-cache-dir "cryptography>=48.0.1" \
-    && npm install -g npm@latest \
+    # Azure CLI ships its own private Python under /opt/az and lags upstream security fixes in
+    # it. PyJWT < 2.14 there carries a fixable CRITICAL (CVE-2026-102268, HS/asymmetric
+    # key-confusion guard bypass) that fails the image gate; 2.15 also clears the rest of the
+    # 2.13.x advisory set. az's msal/azure-cli-core accept any PyJWT 2.x. Application
+    # requirements cannot patch this private environment's urllib3 or OAuthlib either.
+    && /opt/az/bin/python3 -m pip install --no-cache-dir \
+        "cryptography>=50.0.0" "setuptools>=83.0.0" "PyJWT>=2.15.0" \
+        "urllib3>=2.8.0,<3" "oauthlib>=4.0.0,<5" \
+    && npm install -g "npm@${NPM_VERSION}" \
+    && npm install -g "@azure/mcp@${AZURE_MCP_VERSION}" \
+    && npm cache clean --force \
+    # npm is a BUILD-TIME tool here, not a runtime one: the only runtime consumer was
+    # `npx @azure/mcp`, which the pre-install above replaced with a real binary. Removing it
+    # deletes the whole /usr/lib/node_modules/npm/node_modules vendored tree, which is where
+    # every open image CVE in this project lives (undici, ip-address, brace-expansion). Those
+    # are bundled INSIDE npm, so they cannot be patched downstream — even the newest npm still
+    # ships the vulnerable copies. Deleting the surface is the only fix available to us.
+    #
+    # It also removes the ability to install anything from the public npm registry at runtime,
+    # which is a deliberate hardening rather than a side effect.
+    #
+    # TRADE-OFF: `npx` no longer exists in this image. The application's default
+    # `MCP_COMMAND=npx` (still correct for local development) is overridden to `azmcp` below;
+    # a deployment that forces MCP_COMMAND back to `npx` would not find it. Node itself stays,
+    # because `azmcp` needs it.
+    && rm -rf /usr/lib/node_modules/npm /usr/bin/npm /usr/bin/npx \
     && apt-get clean \
     && rm -rf /var/lib/apt/lists/*
+
+COPY --from=azqr /usr/local/bin/azqr /usr/local/bin/azqr
+RUN azqr --version
+
+# Run the pre-installed server binary directly. `npx -y @azure/mcp@latest` (the application
+# default, which stays correct for local development) would resolve and possibly download the
+# package on every cold start; `azmcp` is the bin the package installs and is already on PATH.
+ENV MCP_COMMAND=azmcp \
+    MCP_ARGS="server start --transport stdio"
 
 # Resource discovery uses `az graph query`, which needs the resource-graph CLI extension.
 # Each query runs in a throwaway AZURE_CONFIG_DIR (fresh SP login), so relying on runtime
@@ -67,7 +151,13 @@ RUN apt-get update \
 # container) and silently yield zero resources. Bake it into a FIXED extension dir that
 # every config dir resolves via AZURE_EXTENSION_DIR.
 ENV AZURE_EXTENSION_DIR=/opt/az-extensions
-RUN az extension add --name resource-graph --only-show-errors
+RUN az extension add --name resource-graph --only-show-errors \
+    # pip is required to install the extension, but neither az nor the installed
+    # extension needs it at runtime. Its vendored msgpack/setuptools copies carry
+    # fixable CVEs that cannot be upgraded independently, so remove the build tool.
+    && rm -rf /opt/az/lib/python*/site-packages/pip \
+        /opt/az/lib/python*/site-packages/pip-*.dist-info \
+        /opt/az/bin/pip /opt/az/bin/pip3
 
 WORKDIR /app
 
@@ -79,7 +169,12 @@ COPY backend/ ./
 # import (argon2, lxml, signxml, PyJWT, …) is present.
 RUN pip install --upgrade pip \
     && pip install -r requirements.txt \
-    && pip install --no-deps .
+    && pip install --no-deps . \
+    # Runtime application processes never install packages. Removing pip also
+    # removes its private vulnerable vendor tree and reduces post-exploit tooling.
+    && rm -rf /usr/local/lib/python*/site-packages/pip \
+        /usr/local/lib/python*/site-packages/pip-*.dist-info \
+        /usr/local/bin/pip /usr/local/bin/pip3 /usr/local/bin/pip3.*
 
 # Bundled SPA goes into the package's static dir, which main.py serves.
 COPY --from=frontend /web/dist ./app/static
@@ -90,7 +185,10 @@ COPY third_party/ /app/third_party/
 RUN python -m venv /opt/eidmcp \
     && /opt/eidmcp/bin/pip install --no-cache-dir --upgrade pip \
     && /opt/eidmcp/bin/pip install --no-cache-dir \
-        "cryptography>=48.0.1" azure-core azure-identity "mcp[cli]>=1.28.1,<2" msgraph-core msgraph-sdk fastmcp python-dotenv
+        "cryptography>=50.0.0" "aiohttp>=3.14.4" "yarl>=1.25.1" azure-core azure-identity "mcp[cli]>=1.30.0,<2" msgraph-core msgraph-sdk fastmcp python-dotenv \
+    && rm -rf /opt/eidmcp/lib/python*/site-packages/pip \
+        /opt/eidmcp/lib/python*/site-packages/pip-*.dist-info \
+        /opt/eidmcp/bin/pip /opt/eidmcp/bin/pip3 /opt/eidmcp/bin/pip3.*
 
 EXPOSE 8000
 
@@ -115,6 +213,8 @@ ENV HOME=/home/azsup \
     NPM_CONFIG_CACHE=/home/azsup/.npm
 USER azsup
 
-# Run DB migrations then start the API + SPA. All AI-provider sign-in flows are headless
-# (OAuth device flow + paste-the-code), so no virtual display / browser is needed.
+# Run DB migrations (serialized by a PostgreSQL advisory lock) then start exactly ONE uvicorn
+# worker. Background work is process-owned and coordinated across replicas by database leases;
+# extra workers inside a replica would create hidden schedulers and duplicate connection pools.
+# All AI-provider sign-in flows are headless, so no virtual display / browser is needed.
 CMD ["sh", "-c", "alembic upgrade head && uvicorn app.main:app --host 0.0.0.0 --port 8000"]

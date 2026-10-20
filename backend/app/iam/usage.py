@@ -2,7 +2,7 @@
 
 Everything hard about CIEM is in what this module refuses to conclude. Comparing granted actions
 against used actions is arithmetic; deciding that an unused permission is an unnecessary one is
-a judgement, and it is wrong often enough to cause outages.
+a judgment, and it is wrong often enough to cause outages.
 
 Four rules, all of them load-bearing:
 
@@ -45,6 +45,12 @@ DEFAULT_WINDOW_DAYS = 90
 
 SOURCE_ACTIVITY_LOG = "ActivityLog"
 SOURCE_WORKSPACE = "AzureActivity"
+
+# The exact phrase the Activity Log collector emits when a subscription trips the 6 MB cap
+# ("...returned more than 6 MB and was truncated; showing the N event(s) received"). Matching
+# this rather than the bare word "truncated" keeps a note that merely mentions truncation —
+# or denies it — from being read as a partial sweep.
+TRUNCATION_MARKER = "and was truncated"
 
 # Confidence in a "this is unused" claim.
 HIGH = "high"
@@ -160,11 +166,19 @@ async def collect(
             # against nobody is right; counting it against everybody would manufacture usage.
             continue
         entry = by_principal.setdefault(pid, {"principalId": pid, "actions": set(), "events": 0,
-                                              "displayName": str(e.get("actor", "")), "scopes": set()})
+                                              "displayName": str(e.get("actor", "")), "scopes": set(),
+                                              "lastSeen": ""})
         op = str(e.get("operation", "")).strip()
         if op:
             entry["actions"].add(op.lower())
         entry["events"] += 1
+        # The most recent operation this principal was seen performing. "Granted Owner in 2019,
+        # last actually did anything in 2021, account disabled in 2024" is a far stronger case
+        # for removal than any role name, and the timestamp was already in every event and
+        # being discarded. ISO-8601 UTC strings compare correctly as strings.
+        when = str(e.get("eventTime", "") or "")
+        if when > entry["lastSeen"]:
+            entry["lastSeen"] = when
         rid = str(e.get("resourceId", ""))
         if rid:
             entry["scopes"].add(rid.lower())
@@ -177,12 +191,22 @@ async def collect(
         "status": status,
         "subscriptions": len(subscriptions),
         "event_count": len(events),
+        # The Activity Log query caps at 6 MB per subscription and the collector says so in a
+        # note when it trips. Measured on a real tenant: ELEVEN subscriptions truncated in one
+        # 90-day sweep. A truncated sweep holds a PREFIX of the activity, so the absence of an
+        # operation proves nothing at all — and "this principal never used their access" is an
+        # argument for deleting it. The flag has to travel with the data, not sit in a note
+        # nobody parses.
+        # Anchored on the phrase the collector actually emits, not the bare word, so a future
+        # note reading "not truncated" cannot flip this to the alarming value.
+        "truncated": any(TRUNCATION_MARKER in str(n).lower() for n in notes),
         "principals": [
             {
                 "principalId": v["principalId"],
                 "displayName": v["displayName"],
                 "actions": sorted(v["actions"]),
                 "events": v["events"],
+                "lastSeen": v["lastSeen"],
                 "scopes": sorted(v["scopes"])[:200],
             }
             for v in by_principal.values()
@@ -258,7 +282,7 @@ def action_universe(
     an unused ratio of **zero** and never appears in a report about over-privilege. Reader
     declares one too. The measure inverts precisely where it matters.
 
-    Expanding against the full Azure action catalogue is not available offline, so the universe
+    Expanding against the full Azure action catalog is not available offline, so the universe
     is built from what is actually observable: every LITERAL action any collected role declares,
     plus every action anybody was seen to use. It is concrete, it is derived from real data, and
     it can be published alongside the ratio so a reader can see what the percentage is *of*."""

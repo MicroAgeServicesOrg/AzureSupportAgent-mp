@@ -49,6 +49,7 @@ export const DOCUMENTATION_TARGETS: Readonly<Record<string, DocumentationTarget>
   "/telemetry": target("Telemetry Coverage", "/user-guide/coverage/telemetry-coverage", "/how-to/coverage/telemetry-coverage"),
   "/backupdr": target("Backup & DR Coverage", "/user-guide/coverage/backup-dr-coverage", "/how-to/coverage/backup-dr-coverage"),
   "/backup-manager": target("Backup Manager", "/user-guide/coverage/backup-manager", "/how-to/coverage/backup-manager"),
+  "/resiliency": target("Recovery Readiness", "/user-guide/coverage/recovery-readiness", "/how-to/coverage/recovery-readiness"),
   "/capability": target("Connection Capability", "/user-guide/coverage/connection-capability", "/how-to/coverage/connection-capability"),
 
   "/inventory": target("Inventory", "/user-guide/estate-intelligence/inventory", "/how-to/estate-intelligence/inventory"),
@@ -87,8 +88,8 @@ export const DOCUMENTATION_TARGETS: Readonly<Record<string, DocumentationTarget>
   "/notifications": target("Notifications", "/user-guide/automations/notifications", "/how-to/automations-connectors/notifications"),
 
   "/admin/providers": target("AI Providers", "/admin/ai-providers", "/how-to/administration/ai-providers"),
-  "/admin/tenants": target("Azure Tenants", "/admin/azure-tenants-sandbox-vms", "/how-to/administration/azure-tenants"),
-  "/admin/sandboxvms": target("Sandbox VMs", "/admin/azure-tenants-sandbox-vms", "/how-to/administration/sandbox-vms"),
+  "/admin/tenants": target("Azure Tenants", "/admin/azure-tenants", "/how-to/administration/azure-tenants"),
+  "/admin/sandboxvms": target("Sandbox VMs", "/admin/sandbox-vms", "/how-to/administration/sandbox-vms"),
   "/admin/settings": target("General Settings", "/admin/general-settings", "/how-to/administration/general-settings"),
   "/admin/connectors": target("Connectors", "/connectors", "/how-to/administration/connectors"),
   "/admin/access": target("Access Control", "/admin/access-control", "/how-to/administration/access-control"),

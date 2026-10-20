@@ -12,20 +12,40 @@ Produces a workbook that breaks the app-registrations snapshot into one sheet pe
 Mirrors app.iam.export.to_workbook (same styling + CSV-injection neutralization)."""
 from __future__ import annotations
 
+from datetime import date, datetime, timezone
 from typing import Any
 
-# Excel / LibreOffice treat a cell starting with one of these as a formula — the classic
-# CSV-injection vector. Prefix with a single quote so it's read as literal text.
-_FORMULA_TRIGGERS = ("=", "+", "-", "@")
+from app.core.xlsx import cell_safe
+
+#: Kept as a module-local name because `app/api/assessments.py` imports it. The behaviour is
+#: the shared one - there is exactly one definition of the guard.
+_csv_safe = cell_safe
+
+#: Applied to every real date cell. Excel sorts and date-filters a typed cell; an ISO string
+#: only ever sorts lexicographically.
+DATE_FORMAT = "yyyy-mm-dd hh:mm"
 
 
-def _csv_safe(value: Any) -> Any:
-    if not isinstance(value, str) or not value:
-        return value
-    stripped = value.lstrip("\t\r\n ")
-    if stripped and stripped[0] in _FORMULA_TRIGGERS:
-        return "'" + value
-    return value
+def _dt(value: Any) -> datetime | None:
+    """ISO-8601 -> naive UTC datetime, or None if it is absent/unparseable.
+
+    Excel has no concept of a timezone and openpyxl refuses a tz-aware value outright, so an
+    offset is normalised to UTC and then dropped. Returning None (a blank cell) rather than a
+    sentinel date matters: a blank sorts out of the way instead of asserting 1970.
+    """
+    if isinstance(value, datetime):
+        parsed = value
+    elif isinstance(value, str) and value.strip():
+        try:
+            # `fromisoformat` only learned to read a trailing 'Z' in 3.11.
+            parsed = datetime.fromisoformat(value.strip().replace("Z", "+00:00"))
+        except ValueError:
+            return None
+    else:
+        return None
+    if parsed.tzinfo is not None:
+        parsed = parsed.astimezone(timezone.utc).replace(tzinfo=None)
+    return parsed
 
 
 def _coerce(value: Any) -> Any:
@@ -33,6 +53,8 @@ def _coerce(value: Any) -> Any:
         return "Yes" if value else ""
     if value is None:
         return ""
+    if isinstance(value, (datetime, date)):
+        return value
     if isinstance(value, (int, float)):
         return value
     return _csv_safe(str(value))
@@ -58,6 +80,42 @@ def _high_risk_reasons(app: dict[str, Any]) -> str:
     return "; ".join(reasons)
 
 
+def _enterprise_state_label(app: dict[str, Any]) -> str:
+    return {
+        "active": "Active",
+        "deactivated": "Deactivated",
+        "not_instantiated": "No local enterprise app",
+        "unknown": "Unknown",
+    }.get(str(app.get("enterpriseAppState") or "unknown"), "Unknown")
+
+
+def _last_signin_cells(app: dict[str, Any]) -> tuple[Any, str, Any]:
+    """(successful date, status, last failed date) for one app.
+
+    A blank date must never be read as "never signed in", and a rejected attempt must never
+    be reported in the success column: Graph counts a rejected credential as sign-in
+    activity, so an expired secret keeps producing a recent-looking date.
+    """
+    failed = _dt(app.get("lastFailedSignIn"))
+    if not app.get("lastSignInKnown"):
+        return None, "Not measured", failed
+    last = app.get("lastSignIn")
+    if not last:
+        if app.get("lastAttempt"):
+            return None, f"Attempted {app.get('lastAttemptDays')} day(s) ago — did not succeed", failed
+        return None, "No sign-in in the reported window", failed
+    return _dt(last), f"{app.get('lastSignInDays')} day(s) ago", failed
+
+
+def _last_used_cells(credential: dict[str, Any]) -> tuple[Any, str]:
+    if not credential.get("lastUsedKnown"):
+        return None, "Not measured"
+    last = credential.get("lastUsed")
+    if not last:
+        return None, "Not used in the reported window"
+    return _dt(last), f"{credential.get('lastUsedDays')} day(s) ago"
+
+
 def to_workbook(snap: dict[str, Any]) -> bytes:
     """Build the multi-sheet app-registrations workbook from a snapshot dict."""
     from io import BytesIO
@@ -74,7 +132,8 @@ def to_workbook(snap: dict[str, Any]) -> bytes:
     header_font = Font(bold=True, color="FFFFFF")
     header_fill = PatternFill("solid", fgColor="0F6CBD")
 
-    def _sheet(title: str, headers: list[str], data: list[list[Any]]) -> None:
+    def _sheet(title: str, headers: list[str], data: list[list[Any]],
+               date_cols: tuple[str, ...] = ()) -> None:
         ws = wb.create_sheet(_safe_sheet_title(title))
         ws.append(headers)
         for c in range(1, len(headers) + 1):
@@ -85,7 +144,16 @@ def to_workbook(snap: dict[str, Any]) -> bytes:
         for r in data:
             ws.append([_coerce(v) for v in r])
         ws.freeze_panes = "A2"
+        # Resolved by header name, not index, so reordering a column cannot silently leave a
+        # date rendered as a serial number.
+        date_idx = {headers.index(h) + 1 for h in date_cols if h in headers}
+        for ci in date_idx:
+            for row in range(2, len(data) + 2):
+                ws.cell(row=row, column=ci).number_format = DATE_FORMAT
         for ci, h in enumerate(headers, start=1):
+            if ci in date_idx:
+                ws.column_dimensions[get_column_letter(ci)].width = max(len(h) + 2, 18)
+                continue
             width = len(str(h))
             for r in data[:200]:
                 if ci - 1 < len(r):
@@ -116,10 +184,24 @@ def to_workbook(snap: dict[str, Any]) -> bytes:
         ("Expired credentials", "expired"),
         ("High risk", "highRisk"),
         ("Ownerless", "ownerless"),
+        ("Active enterprise applications", "active"),
+        ("Deactivated enterprise applications", "deactivated"),
+        ("No local enterprise application", "notInstantiated"),
+        ("Enterprise application state unknown", "stateUnknown"),
         ("Application permissions", "applicationPerms"),
         ("Delegated permissions", "delegatedPerms"),
+        ("Signed in (last 7 days)", "signedIn7d"),
+        ("Signed in (last 30 days)", "signedIn30d"),
+        ("No recent sign-in", "noRecentSignIn"),
+        ("Sign-in activity not measured", "signInNotMeasured"),
     ]:
         ws0.append([label, summary.get(key, 0)])
+    signin_meta: dict[str, Any] = snap.get("signin_activity") or {}
+    ws0.append([])
+    ws0.append([
+        "Sign-in activity",
+        "Measured" if signin_meta.get("measured") else (signin_meta.get("reason") or "Not measured"),
+    ])
     ws0.column_dimensions["A"].width = 30
     ws0.column_dimensions["B"].width = 24
 
@@ -127,20 +209,27 @@ def to_workbook(snap: dict[str, Any]) -> bytes:
     _sheet(
         "Applications",
         ["Name", "App ID", "Object ID", "Sign-in audience", "Publisher domain",
+         "Enterprise app state", "Service principal ID", "Service principal type",
+         "Microsoft disable status",
          "Secrets", "Certs", "Next expiry (days)", "Expired creds",
-         "App permissions", "Delegated permissions", "High risk", "Ownerless", "Owners", "Created"],
+         "App permissions", "Delegated permissions", "High risk", "Ownerless", "Owners",
+         "Last sign-in", "Sign-in status", "Last failed sign-in", "Created"],
         [
             [
                 a.get("displayName", ""), a.get("appId", ""), a.get("id", ""),
                 a.get("signInAudience", ""), a.get("publisherDomain", ""),
+                _enterprise_state_label(a), a.get("servicePrincipalId", ""),
+                a.get("servicePrincipalType", ""), a.get("disabledByMicrosoftStatus", ""),
                 a.get("secretsCount", 0), a.get("certsCount", 0),
                 a.get("nextExpiryDays"), a.get("expiredCredentials", 0),
                 a.get("applicationPermissionsCount", 0), a.get("delegatedPermissionsCount", 0),
                 bool(a.get("highRisk")), bool(a.get("ownerless")),
-                "; ".join(a.get("owners") or []), a.get("createdDateTime", ""),
+                "; ".join(a.get("owners") or []),
+                *_last_signin_cells(a), _dt(a.get("createdDateTime")),
             ]
             for a in apps
         ],
+        date_cols=("Last sign-in", "Last failed sign-in", "Created"),
     )
 
     # 3. Credentials — one row per secret / certificate.
@@ -150,13 +239,16 @@ def to_workbook(snap: dict[str, Any]) -> bytes:
             cred_rows.append([
                 a.get("displayName", ""), a.get("appId", ""),
                 c.get("type", ""), c.get("displayName", ""),
-                c.get("endDateTime", ""), c.get("daysUntilExpiry"),
+                _dt(c.get("endDateTime")), c.get("daysUntilExpiry"),
                 "Expired" if (c.get("daysUntilExpiry") is not None and c["daysUntilExpiry"] < 0) else "Active",
+                *_last_used_cells(c),
             ])
     _sheet(
         "Credentials",
-        ["Application", "App ID", "Type", "Credential name", "Expires", "Days until expiry", "Status"],
+        ["Application", "App ID", "Type", "Credential name", "Expires", "Days until expiry",
+         "Status", "Last used", "Usage status"],
         cred_rows,
+        date_cols=("Expires", "Last used"),
     )
 
     # 4. API Permissions — one row per granted permission.
@@ -191,10 +283,11 @@ def to_workbook(snap: dict[str, Any]) -> bytes:
     # 6. High Risk — only flagged apps, with the reason signals.
     _sheet(
         "High Risk",
-        ["Name", "App ID", "Reasons", "App permissions", "Delegated permissions", "Owners"],
+        ["Name", "App ID", "Enterprise app state", "Reasons", "App permissions", "Delegated permissions", "Owners"],
         [
             [
-                a.get("displayName", ""), a.get("appId", ""), _high_risk_reasons(a),
+                a.get("displayName", ""), a.get("appId", ""), _enterprise_state_label(a),
+                _high_risk_reasons(a),
                 a.get("applicationPermissionsCount", 0), a.get("delegatedPermissionsCount", 0),
                 "; ".join(a.get("owners") or []),
             ]
@@ -202,7 +295,26 @@ def to_workbook(snap: dict[str, Any]) -> bytes:
         ],
     )
 
-    # 7. Permission Pivot — apps-per-permission rollup (from the facet, else recomputed).
+    # 7. Deactivated — disabled local enterprise applications remain visible because their
+    # credentials and permissions can become effective again if the principal is re-enabled.
+    _sheet(
+        "Deactivated",
+        ["Name", "App ID", "Service principal ID", "Service principal type",
+         "Microsoft disable status", "High risk", "App permissions", "Delegated permissions",
+         "Secrets", "Certs", "Owners"],
+        [
+            [
+                a.get("displayName", ""), a.get("appId", ""), a.get("servicePrincipalId", ""),
+                a.get("servicePrincipalType", ""), a.get("disabledByMicrosoftStatus", ""),
+                bool(a.get("highRisk")), a.get("applicationPermissionsCount", 0),
+                a.get("delegatedPermissionsCount", 0), a.get("secretsCount", 0),
+                a.get("certsCount", 0), "; ".join(a.get("owners") or []),
+            ]
+            for a in apps if a.get("enterpriseAppState") == "deactivated"
+        ],
+    )
+
+    # 8. Permission Pivot — apps-per-permission rollup (from the facet, else recomputed).
     perm_facet = facets.get("permissions") or []
     if not perm_facet:
         counts: dict[str, int] = {}

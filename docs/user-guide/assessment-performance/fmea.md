@@ -6,6 +6,7 @@ grand_parent: User guide
 nav_order: 3
 description: Create and review Failure Mode and Effects Analysis documents with scored risk tables.
 permalink: /user-guide/assessment-performance/fmea/
+feature_ids: [PROACTIVE_NAV:fmea, ROUTE:fmea]
 ---
 
 # FMEA
@@ -15,6 +16,9 @@ permalink: /user-guide/assessment-performance/fmea/
 Failure Mode and Effects Analysis (FMEA) records how a design can fail, the effects and causes, current controls, and follow-up actions. Each row uses Severity, Occurrence, and Detection factors to calculate a Risk Priority Number (RPN), helping teams order design-risk review.
 
 **Application routes:** `/fmea` and `/fmea/:id`.
+
+{: .note }
+**Screenshot note:** The native Memory and FMEA views contain synthetic content. Autosaves and scores update only browser-scoped examples; no AI generation, probe, or control verification occurred. Memory has revision preview/diff, but the current FMEA editor has no History or revision-preview control.
 
 ## Common use cases
 
@@ -33,6 +37,8 @@ Failure Mode and Effects Analysis (FMEA) records how a design can fail, the effe
 - Workload inventory supports document suggestions and detects documents whose workload was deleted.
 - AI generation requires a configured provider. Manual documents and edits remain available without trusting generated output.
 
+{% include screenshot.html file="fdesign-memory-editor-preview.png" title="Review the source Architecture Memory before scoring risk" caption="This is the separate native Memory editor and live Markdown preview, not the FMEA worksheet. Its 800 ms autosave updates only synthetic browser data. Filled sections still carry review flags; Use in investigations is shown without launching an investigation." %}
+
 ## Document index and editor
 
 The index groups documents by workload and shows title, lifecycle status, source badge, table count, update time, buildable architecture suggestions, and Trash. A **workload deleted** badge preserves an orphaned document for review instead of silently removing it.
@@ -46,10 +52,12 @@ Actions include:
 - add or remove tables;
 - regenerate one table or the complete document;
 - export CSV or Excel;
-- review and restore revisions;
+- retain revisions through the API (the current editor has no History/preview control);
 - soft-delete, restore, or permanently purge a document.
 
-Edits auto-save after a short debounce. Wait for save completion before navigating away or exporting.
+Edits auto-save after 1.2 seconds of idle time; **Save** is also available. Wait for **Saved** before navigating away, generating, or exporting. The worksheet has action-results and completion-date fields, not a separate per-row open/in-progress/completed status selector. Document lifecycle is independent of those row values.
+
+{% include screenshot.html file="fdesign-fmea-worksheet.png" title="Review scored and unscored failure modes" caption="The native, horizontally scrolling worksheet contains a synthetic critical DNS risk, medium capacity risk, and unscored recovery uncertainty. These are workshop examples, not AI findings or verified failures; a blank RPN preserves the scoring gap." %}
 
 ## RPN and risk bands
 
@@ -70,6 +78,8 @@ If a factor is blank or zero, the row is not fully scored and RPN remains blank.
 
 Factor-cell color also helps identify high individual values. RPN is a prioritization convention, not an objective probability or impact model. Teams should calibrate factor definitions and review low-RPN catastrophic scenarios separately.
 
+{% include screenshot.html file="fdesign-fmea-factors-controls.png" title="Inspect factor scores and current-control rationale" caption="The synthetic row shows Severity 9, Occurrence 3, and Detection 5, giving RPN 135 after browser-local autosave. Rationale is entered in native Controls cells, not a separate factor dialog; the changed score does not prove a control was implemented." %}
+
 ## Workflow
 
 1. Review the architecture and update stale memory.
@@ -88,6 +98,7 @@ Factor-cell color also helps identify high individual values. RPN is a prioritiz
 - **Edited** means the document is human-authored/changed.
 - **Hybrid** means generated and human-edited content are combined.
 - **Draft**, **In review**, **Published**, and **Archived** communicate lifecycle, not technical validation.
+- **Archived** is not an immutable evidence lock: some editor controls are disabled, but the API still accepts authorized edits. Keep a reviewed export when a fixed record is required.
 - A high RPN prioritizes review; it does not prescribe the remediation.
 - Post-mitigation scores should represent verified controls, not planned work.
 
@@ -95,7 +106,7 @@ Factor-cell color also helps identify high individual values. RPN is a prioritiz
 
 - **CSV** provides portable tabular data.
 - **Excel** includes worksheet formatting and live RPN formulas/conditional formatting for supported fields. Confirm formulas after opening in the target spreadsheet application.
-- Revision history retains a bounded set of snapshots. Restoring an older revision creates a new current state rather than erasing later history.
+- The API retains up to 50 revision snapshots and exposes revision listing and restore. The current editor does not expose a revision drawer or preview endpoint; do not look for a History button. An authorized revision restore changes the application document, not Azure resources.
 - FMEA is grounded in [Architectures]({{ site.baseurl }}/user-guide/design-ownership/architectures/) and [Know-Me]({{ site.baseurl }}/user-guide/design-ownership/know-me/).
 - Mission Control can generate or update the latest workload FMEA as one system in a broader analysis and link back to the document.
 
@@ -104,6 +115,7 @@ Factor-cell color also helps identify high individual values. RPN is a prioritiz
 - AI may omit failure modes, invent controls, or score inconsistently. Human facilitation is mandatory.
 - RPN multiplication can under-rank high-severity/low-occurrence events and common-cause failures.
 - Regeneration can replace table content; review the scope and preserve important manual work through revisions/exports.
+- **Regenerate all** replaces all tables. Per-table regeneration replaces that table's rows with the first generated table's rows, retaining its name/scope and the other tables. Both run as detached jobs: closing or cancelling the browser stream does not guarantee server cancellation. Reopen the saved document before retrying.
 - A deleted workload does not delete its FMEA; review orphaned records and relink or archive deliberately.
 - Owner and due-date values must be entered and validated by people.
 - Exports can contain sensitive architecture and risk information.
@@ -116,7 +128,7 @@ Factor-cell color also helps identify high individual values. RPN is a prioritiz
 | Generation fails or is partial | Check AI provider health and architecture memory; a fallback draft may be returned for review. |
 | RPN is blank | Enter valid non-zero S, O, and D values from 1 to 10. |
 | Scores change after save | The server normalizes factor values; inspect entries outside the allowed range. |
-| Recent edits are missing | Wait for auto-save, avoid simultaneous tabs, and inspect revision history. |
+| Recent edits are missing | Wait for **Saved**, avoid simultaneous edits/regeneration, and compare the persisted document with a retained export. Revision recovery is available through the API, not an editor History button. |
 | Document shows workload deleted | Decide whether to relink through the supported workflow, archive, export, or remove it. |
 | Excel differs from UI | Recalculate workbook formulas and verify that the spreadsheet application supports the generated formatting. |
 

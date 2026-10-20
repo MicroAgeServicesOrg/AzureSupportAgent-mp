@@ -6,6 +6,7 @@ grand_parent: How-to guides
 nav_order: 57
 description: Change local sign-in, lockout, session, and SSO JIT policy and respond to active sessions.
 permalink: /how-to/administration/security-sessions/
+feature_ids: [ADMIN_NAV:policies, ADMIN_NAV:sessions, SECURITY_NAV:policies, SECURITY_NAV:sessions]
 ---
 
 # Set security policy and revoke sessions
@@ -25,6 +26,8 @@ permalink: /how-to/administration/security-sessions/
 - Open `/admin/users`.
 
 ## How to change Security Policy safely
+
+{% include screenshot.html file="admin-security-policy-defaults.png" title="Record sign-in and lockout policy before making changes" caption="The local default controls provide a baseline for the review in step 1. No settings were saved or sign-in and lockout tests performed during capture; retain a proven recovery path before following the procedure." %}
 
 1. Record current visible settings: local password sign-in, self-registration, minimum length and complexity, account lockout, IP protection, idle/absolute session lifetime, SSO auto-provisioning, and SSO default role.
 2. Keep SSO JIT's default role at `noaccess` or an explicitly reviewed least-privilege role.
@@ -70,6 +73,7 @@ Do not disable local login until SSO and recovery are proven. Complexity is not 
 ## Related docs
 
 - [Security Policy and Active Sessions reference]({{ site.baseurl }}/admin/security-policy-sessions/)
+- [Restrict network access by IP]({{ site.baseurl }}/how-to/administration/network-access/)
 - [Audit investigation]({{ site.baseurl }}/how-to/administration/usage-audit/)
 - [Security Policy reference]({{ site.baseurl }}/admin/security-policy-sessions/)
 - [Access Control recipe]({{ site.baseurl }}/how-to/administration/access-control/)

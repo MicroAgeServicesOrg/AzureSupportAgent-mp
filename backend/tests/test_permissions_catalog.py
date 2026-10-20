@@ -57,7 +57,9 @@ def test_new_feature_permissions_are_present():
     # A representative spread of the capabilities added when the product grew.
     for key in (
         "inventory.read",
+        "cost.read",
         "graph.read",
+        "radar.manage",
         "iam.read",
         "identity.read",
         "tagintel.read",
@@ -96,7 +98,16 @@ def test_admin_has_every_permission():
 
 def test_operator_is_admin_minus_the_admin_only_surface():
     roles = _roles()
-    admin_only = {"settings.write", "users.manage", "audit.read", "backup.manage", "demo.manage"}
+    # Spelled out rather than imported so that ADDING a capability to the admin-only set is a
+    # deliberate, reviewed act: this test failing is the intended signal.
+    admin_only = {
+        "settings.write",
+        "users.manage",
+        "audit.read",
+        "firewall.manage",
+        "backup.manage",
+        "demo.manage",
+    }
     operator = set(roles["operator"])
     # Operator is a strict subset of admin (nothing operator has that admin lacks).
     assert operator <= set(roles["admin"])
@@ -122,6 +133,7 @@ def test_auditor_is_read_only_oversight():
     for p in auditor:
         assert not any(p.endswith(suffix) for suffix in
                        (".write", ".manage", ".approve", ".delete", ".exec", ".run")), p
+    assert "radar.manage" not in auditor
 
 
 def test_user_role_is_minimal_self_service():
@@ -138,7 +150,7 @@ def test_noaccess_has_zero_permissions():
     assert _roles()["noaccess"] == []
 
 
-# ------------------------------------------------------------------- guard behaviour
+# ------------------------------------------------------------------- guard behavior
 def test_require_permission_allows_holder_and_admin_denies_others():
     dep = require_permission("inventory.read")
 

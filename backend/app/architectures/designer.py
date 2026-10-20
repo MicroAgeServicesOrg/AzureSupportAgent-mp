@@ -27,10 +27,12 @@ _VALID_GROUP_KINDS = ("subscription", "resource_group", "vnet", "tier", "custom"
 
 
 GENERATE_PROMPT = """\
-You are a principal Azure solutions architect. You are given the COMPLETE resource \
-inventory of one application "workload" — every resource with its real Azure Resource \
-Graph `properties` (the actual configuration). Your job is to REVERSE-ENGINEER the \
-application architecture and return it as a diagram (nodes + edges + groups).
+You are a principal Azure solutions architect. You are given a deterministic, bounded \
+architecture context for one application workload. On smaller workloads it contains every \
+resource directly. On larger workloads repeated resources may be represented by one real \
+resource carrying `_aggregate_count`; relationship-bearing resources are prioritized and \
+properties may be explicitly omitted when the safe context budget is reached. Your job is \
+to REVERSE-ENGINEER the supported application architecture as a diagram.
 
 Infer relationships from the `properties`, not from guesses. Use signals such as:
 - Network interface `ipConfigurations[].subnet.id` -> NIC sits in a Subnet/VNet.
@@ -54,6 +56,8 @@ Then organize the diagram:
 - Only reference real resources from the inventory by their exact ARM `id` as the node's \
   `arm_id`. Do NOT invent resources. You MAY add at most a couple of conceptual nodes \
   (e.g. "Users", "Internet") with an empty `arm_id` when they clarify the entry point.
+- Do not expand an aggregated representative into invented resource nodes. Represent the \
+    aggregate as one node and include the observed `_aggregate_count` in `meta`.
 - Keep node `name` short (the resource name). Put 2–5 key facts in `meta` (e.g. tier, \
   sku, capacity, runtime) drawn from the properties.
 
@@ -186,6 +190,8 @@ def _normalize(parsed: dict[str, Any], resources: list[dict[str, Any]]) -> dict[
         layer = str(n.get("layer") or catalog.layer_for(category))
         meta = n.get("meta") if isinstance(n.get("meta"), dict) else {}
         meta = {str(k)[:40]: str(v)[:80] for k, v in list(meta.items())[:6]}
+        if src and int(src.get("_aggregate_count") or 1) > 1:
+            meta["represented_resources"] = str(int(src["_aggregate_count"]))
         gid = n.get("group_id")
         node_ids.add(nid)
         nodes.append({
@@ -198,7 +204,8 @@ def _normalize(parsed: dict[str, Any], resources: list[dict[str, Any]]) -> dict[
             "resource_group": (src.get("resourceGroup") if src else n.get("resource_group")) or "",
             "subscription_id": (src.get("subscriptionId") if src else n.get("subscription_id")) or "",
             "location": (src.get("location") if src else n.get("location")) or "",
-            "sku": _sku_label(src.get("sku")) if src else "",
+            "sku": _resource_sku(src) if src else str(n.get("sku") or "")[:60],
+            "pricing_hint": _pricing_hint(src) if src else {},
             "meta": meta,
             "group_id": gid if gid in valid_group_ids else "",
             "x": float(n["x"]) if isinstance(n.get("x"), (int, float)) else 0.0,
@@ -251,16 +258,69 @@ def _sku_label(sku: Any) -> str:
     return ""
 
 
+def _nested(value: Any, *path: str) -> Any:
+    current = value
+    for key in path:
+        if not isinstance(current, dict):
+            return None
+        current = current.get(key)
+    return current
+
+
+def _resource_sku(resource: dict[str, Any]) -> str:
+    """Best deterministic SKU label from the ARG row and resource properties."""
+    direct = _sku_label(resource.get("sku"))
+    if direct:
+        return direct
+    properties = resource.get("properties") if isinstance(resource.get("properties"), dict) else {}
+    candidates = (
+        _nested(properties, "hardwareProfile", "vmSize"),
+        _nested(properties, "virtualMachineProfile", "hardwareProfile", "vmSize"),
+        _sku_label(properties.get("currentSku")),
+        _sku_label(properties.get("sku")),
+    )
+    return next((str(value)[:60] for value in candidates if value), "")
+
+
+def _pricing_hint(resource: dict[str, Any]) -> dict[str, Any]:
+    """Extract only pricing-relevant facts; rates themselves are always fetched live."""
+    properties = resource.get("properties") if isinstance(resource.get("properties"), dict) else {}
+    sku = resource.get("sku") if isinstance(resource.get("sku"), dict) else {}
+    storage = properties.get("storageProfile") if isinstance(properties.get("storageProfile"), dict) else {}
+    vm_profile = properties.get("virtualMachineProfile") if isinstance(properties.get("virtualMachineProfile"), dict) else {}
+    vm_storage = vm_profile.get("storageProfile") if isinstance(vm_profile.get("storageProfile"), dict) else {}
+    os_disk = storage.get("osDisk") if isinstance(storage.get("osDisk"), dict) else {}
+    if not os_disk:
+        os_disk = vm_storage.get("osDisk") if isinstance(vm_storage.get("osDisk"), dict) else {}
+    hint = {
+        "sku": _resource_sku(resource),
+        "tier": str(sku.get("tier") or "")[:80],
+        "capacity": sku.get("capacity"),
+        "os_type": str(os_disk.get("osType") or "")[:40],
+        "kind": str(resource.get("kind") or "")[:80],
+        "disk_size_gb": properties.get("diskSizeGB"),
+    }
+    return {key: value for key, value in hint.items() if value not in (None, "")}
+
+
 async def generate_architecture(
-    workload_name: str, resources: list[dict[str, Any]]
+    workload_name: str,
+    resources: list[dict[str, Any]],
+    *,
+    context: dict[str, Any] | None = None,
 ) -> dict[str, Any] | None:
     """One-shot reverse-engineer an architecture from a resource inventory."""
     if not resources:
         return None
+    coverage = context or {
+        "mode": "detailed", "total_resource_count": len(resources),
+        "represented_resource_count": len(resources), "aggregated_resource_count": 0,
+        "omitted_resource_count": 0, "property_enriched_count": len(resources),
+    }
     user = (
         f"Workload: {workload_name or '(unnamed)'}\n"
-        f"Resource count: {len(resources)}\n\n"
-        f"Resource inventory (id, name, type, location, sku, identity, tags, full properties):\n"
+        f"Architecture context coverage: {json.dumps(coverage, separators=(',', ':'))}\n\n"
+        f"Resource representatives (id, name, type, location, sku, identity, tags, bounded properties):\n"
         + _resources_block(resources)
     )
     parsed = await _complete_json(get_full_prompt("architecture_generate"), user)
@@ -270,7 +330,8 @@ async def generate_architecture(
 
 
 async def enhance_architecture(
-    arch: dict[str, Any], resources: list[dict[str, Any]], goal: str
+    arch: dict[str, Any], resources: list[dict[str, Any]], goal: str,
+    *, context: dict[str, Any] | None = None,
 ) -> dict[str, Any] | None:
     """Refine an existing diagram per an instruction, grounded on the inventory."""
     current = {
@@ -285,6 +346,7 @@ async def enhance_architecture(
     }
     user = (
         f"Instruction: {goal.strip() or 'Improve the diagram.'}\n\n"
+        f"ARCHITECTURE CONTEXT COVERAGE:\n{json.dumps(context or {}, separators=(',', ':'))}\n\n"
         f"CURRENT DIAGRAM:\n{json.dumps(current, separators=(',', ':'))}\n\n"
         f"RESOURCE INVENTORY:\n{_resources_block(resources)}"
     )

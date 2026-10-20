@@ -1,5 +1,5 @@
-const API_BASE = import.meta.env.VITE_API_BASE ?? "http://localhost:8000/api";
-export { API_BASE };
+import { API_BASE, HttpError, http, httpBlob, httpUpload, downloadBlob, apiBase } from "./api/http";
+export { API_BASE, HttpError, downloadBlob, apiBase };
 
 export interface Chat {
   id: string;
@@ -80,101 +80,13 @@ export interface Me {
 export interface AuthConfig {
   local_login_enabled: boolean;
   providers: { id: string; type: string; label: string }[];
+  /** True when the provider list is the last known one, served because the store was unreadable. */
+  stale?: boolean;
 }
 
 export interface ActiveLlm {
   provider: string;
   model: string;
-}
-
-export class HttpError extends Error {
-  status: number;
-  detail: string;
-  constructor(status: number, detail: string) {
-    super(detail || `${status}`);
-    this.status = status;
-    this.detail = detail;
-  }
-}
-
-async function http<T>(path: string, init?: RequestInit): Promise<T> {
-  const res = await fetch(`${API_BASE}${path}`, {
-    headers: { "Content-Type": "application/json" },
-    credentials: "include",
-    // API responses are dynamic and must never come from the browser HTTP cache
-    // (e.g. a stale /me after switching roles). React Query handles app-level caching.
-    cache: "no-store",
-    ...init,
-  });
-  if (!res.ok) {
-    let detail = `${res.status} ${res.statusText}`;
-    try {
-      const body = await res.json();
-      if (body && typeof body.detail === "string") detail = body.detail;
-      else if (Array.isArray(body?.detail)) detail = body.detail.map((item: unknown) => typeof item === "string" ? item : JSON.stringify(item)).join("\n");
-      else if (body?.detail && typeof body.detail === "object") detail = typeof body.detail.message === "string" ? body.detail.message : JSON.stringify(body.detail);
-    } catch {
-      /* non-JSON error body */
-    }
-    throw new HttpError(res.status, detail);
-  }
-  return res.json() as Promise<T>;
-}
-
-async function httpBlob(path: string, init?: RequestInit): Promise<Blob> {
-  const res = await fetch(`${API_BASE}${path}`, {
-    headers: { "Content-Type": "application/json" },
-    credentials: "include",
-    cache: "no-store",
-    ...init,
-  });
-  if (!res.ok) {
-    let detail = `${res.status} ${res.statusText}`;
-    try {
-      const body = await res.json();
-      if (body && typeof body.detail === "string") detail = body.detail;
-    } catch {
-      /* non-JSON error body */
-    }
-    throw new HttpError(res.status, detail);
-  }
-  return res.blob();
-}
-
-/** Absolute API origin, e.g. for SSO redirects (full-page navigations). */
-export const apiBase = API_BASE;
-
-/** POST a multipart form (file upload). Lets the browser set the multipart boundary. */
-async function httpUpload<T>(path: string, form: FormData): Promise<T> {
-  const res = await fetch(`${API_BASE}${path}`, {
-    method: "POST",
-    body: form,
-    credentials: "include",
-    cache: "no-store",
-  });
-  if (!res.ok) {
-    let detail = `${res.status} ${res.statusText}`;
-    try {
-      const body = await res.json();
-      if (body && typeof body.detail === "string") detail = body.detail;
-    } catch {
-      /* non-JSON */
-    }
-    throw new HttpError(res.status, detail);
-  }
-  return res.json() as Promise<T>;
-}
-
-/** Trigger a browser download of a Blob with a filename. */
-export function downloadBlob(blob: Blob, filename: string): void {
-  const url = URL.createObjectURL(blob);
-  const a = document.createElement("a");
-  a.href = url;
-  a.download = filename;
-  document.body.appendChild(a);
-  a.click();
-  a.remove();
-  setTimeout(() => URL.revokeObjectURL(url), 1000);
 }
 
 // ---- Identity dashboard ---------------------------------------------------------
@@ -271,10 +183,15 @@ export type PimOverview = {
 
 
 export type AppRegCredential = {
+  keyId: string;
   type: "secret" | "certificate";
   displayName: string;
   endDateTime?: string | null;
   daysUntilExpiry: number | null;
+  // `lastUsedKnown` false means the per-credential report was unreadable — NOT "never used".
+  lastUsed: string | null;
+  lastUsedKnown: boolean;
+  lastUsedDays: number | null;
 };
 
 export type AppRegPermission = {
@@ -283,6 +200,8 @@ export type AppRegPermission = {
   type: "Application" | "Delegated";
   risk: "high" | "medium" | "low";
 };
+
+export type EnterpriseAppState = "active" | "deactivated" | "not_instantiated" | "unknown";
 
 export type AppRegistration = {
   id: string;
@@ -303,9 +222,49 @@ export type AppRegistration = {
   owners: string[];
   ownerless: boolean;
   highRisk: boolean;
+  // Three distinct facts, never collapse them: a date; measured-but-no-sign-in
+  // (lastSignInKnown && !lastSignIn); and unreadable (!lastSignInKnown).
+  // `lastSignIn` is a SUCCESSFUL sign-in. `lastAttempt` may be a rejected one — Graph counts
+  // a failed credential as sign-in activity, so an expired secret keeps producing a date.
+  lastSignIn: string | null;
+  lastSignInKnown: boolean;
+  lastSignInDays: number | null;
+  lastAttempt: string | null;
+  lastAttemptDays: number | null;
+  // Derived: an attempt Graph stamped AFTER the last success cannot have been the success.
+  lastFailedSignIn: string | null;
+  lastFailedSignInDays: number | null;
+  // False when the per-event log has not been read for this application yet. The pass is
+  // bounded, so an empty cell is only "no failures" once this is true.
+  lastFailedSignInKnown?: boolean;
+  lastSignInDelegated: string | null;
+  lastSignInApplication: string | null;
+  enterpriseAppState: EnterpriseAppState;
+  servicePrincipalId: string | null;
+  servicePrincipalType: string;
+  disabledByMicrosoftStatus: string;
+  enterpriseAppStateReadStatus: "read" | "not_found" | "incomplete" | "unreadable" | "invalid_app_id" | "demo";
+  enterpriseAppStateSource: "microsoft_graph" | "demo";
 };
 
 export type AppRegFacet = { value: string; count: number };
+
+export type AppRegSignInActivity = {
+  measured: boolean;
+  reason: string;
+  window_days: number;
+  source: string;
+  complete: boolean;
+  apps_with_activity: number;
+  credentials: { measured: boolean; reason: string; count: number };
+  // Whether success and failure can be told apart at all for this tenant.
+  failures?: { measured: boolean; reason: string; pending?: number; checked?: number };
+  // Microsoft stops maintaining this aggregate on unlicensed tenants and keeps serving the
+  // last build. `stale` means "absent from the report" is unknown, not idle.
+  stale?: boolean;
+  as_of?: string;
+  stale_reason?: string;
+};
 
 export type AppRegistrationsResponse = {
   generated_at: string;
@@ -321,6 +280,8 @@ export type AppRegistrationsResponse = {
     audiences: AppRegFacet[];
     permissions: AppRegFacet[];
     owners: AppRegFacet[];
+    enterpriseAppStates: AppRegFacet[];
+    signInActivity: AppRegFacet[];
   };
   summary: {
     total: number;
@@ -332,7 +293,16 @@ export type AppRegistrationsResponse = {
     ownerless: number;
     applicationPerms: number;
     delegatedPerms: number;
+    active: number;
+    deactivated: number;
+    notInstantiated: number;
+    stateUnknown: number;
+    signedIn7d: number;
+    signedIn30d: number;
+    noRecentSignIn: number;
+    signInNotMeasured: number;
   };
+  signin_activity?: AppRegSignInActivity;
   cached: boolean;
   never_loaded?: boolean;
   fetched_at: string;
@@ -340,6 +310,52 @@ export type AppRegistrationsResponse = {
   // IU3 — set when the live listing hit the per-refresh cap (UI shows a "first N" notice).
   truncated?: boolean;
   limit?: number;
+  configured_limit: number;
+  max_configurable_limit: number;
+  full_safety_limit: number;
+  page_size: number;
+  graph_total?: number | null;
+  enumeration?: AppRegEnumeration | null;
+};
+
+export type AppRegRefreshMode = "capped" | "full";
+export type AppRegEnumeration = {
+  mode: AppRegRefreshMode;
+  configured_limit: number;
+  applied_limit: number;
+  full_safety_limit: number;
+  page_size: number;
+  pages: number;
+  graph_total: number | null;
+  fetched: number;
+  complete: boolean;
+  truncated: boolean;
+  stop_reason: "complete" | "configured_limit" | "full_safety_limit" | "not_started";
+  resumed: boolean;
+  retries: number;
+  throttles: number;
+  duration_seconds: number;
+};
+
+export type AppRegJob = {
+  id: string;
+  status: "running" | "cancelling" | "paused" | "done" | "cancelled" | "error";
+  started_at: string;
+  finished_at: string | null;
+  progress_count: number;
+  last_message: string;
+  error: string;
+  mode: AppRegRefreshMode;
+  configured_limit: number;
+  page_size: number;
+  current: number;
+  total: number | null;
+  percent: number | null;
+  page: number;
+  retries: number;
+  throttles: number;
+  resumed: boolean;
+  resume_available: boolean;
 };
 
 // ---- AMBA Monitoring Coverage ---------------------------------------------------
@@ -682,6 +698,9 @@ export type AlertAnalysisOverlap = {
   type: "exact" | "near" | "notification";
   confidence: "high" | "medium";
   target_id: string;
+  target_ids?: string[];
+  target_count?: number;
+  targets_truncated?: boolean;
   signal_type: string;
   signal_name: string;
   rule_ids: string[];
@@ -746,6 +765,27 @@ export type AlertsManagerCapabilities = {
 };
 
 export type ActivityLogCategory = "ServiceHealth" | "ResourceHealth" | "Security" | "Recommendation";
+export type ActivityLogFilterCategory = ActivityLogCategory | "Other";
+export type ServiceHealthEventType = "service_issue" | "planned_maintenance" | "health_advisory" | "security_advisory";
+export type ResourceHealthEventStatus = "active" | "in_progress" | "resolved" | "updated";
+export type ResourceHealthStatus = "available" | "degraded" | "unavailable" | "unknown";
+export type ResourceHealthReasonType = "platform_initiated" | "unknown" | "user_initiated";
+export type RecommendationCategory = "cost" | "performance" | "high_availability" | "operational_excellence" | "security";
+export type RecommendationImpact = "high" | "medium" | "low";
+export type ActivityRuleFilterMetadata = {
+  activity_category?: string;
+  service_health_event_types?: ServiceHealthEventType[];
+  service_health_unrestricted?: boolean;
+  service_health_unmapped?: boolean;
+  resource_health_event_statuses?: ResourceHealthEventStatus[];
+  resource_health_current_statuses?: ResourceHealthStatus[];
+  resource_health_previous_statuses?: ResourceHealthStatus[];
+  resource_health_reason_types?: ResourceHealthReasonType[];
+  recommendation_categories?: RecommendationCategory[];
+  recommendation_impacts?: RecommendationImpact[];
+  activity_unrestricted_fields?: string[];
+  activity_unmapped_values?: Record<string, string[]>;
+};
 export type ActivityLogCoverageStatus = "covered" | "partial" | "missing" | "disabled" | "no_routing" | "unknown";
 export type ActivityLogCondition = { field: string; equals?: string; containsAny?: string[]; anyOf?: ActivityLogCondition[] };
 export type ActivityLogSubscriptionMetadata = { id?: string; subscription_id?: string; name?: string; display_name?: string; state?: string; status?: string; environment?: string; tags?: Record<string, string> };
@@ -1110,10 +1150,11 @@ export type NotificationSimulation = {
 
 export type BulkNotificationSimulation = {
   summary: { rules: number; resources: number; action_groups: number; receiver_paths: number; would_deliver: number; blocked: number; diagnostics: number };
-  facets?: { families: Partial<Record<ManagedAlertRule["family"], number>>; severities: Partial<Record<0 | 1 | 2 | 3 | 4, number>>; total_rules: number };
-  nodes: { id: string; name: string; kind: "resource" | "alert" | "action_group" | "receiver" | "outcome"; status: string; resource_id?: string; family?: string; severity?: number; receiver_type?: string; fingerprint?: string }[];
+  facets?: { families: Partial<Record<ManagedAlertRule["family"], number>>; severities: Partial<Record<0 | 1 | 2 | 3 | 4, number>>; total_rules: number; activity_categories?: Partial<Record<ActivityLogFilterCategory, number>>; service_health_event_types?: Partial<Record<ServiceHealthEventType, number>>; service_health_unrestricted?: number; service_health_unmapped?: number; resource_health_event_statuses?: Partial<Record<ResourceHealthEventStatus, number>>; resource_health_current_statuses?: Partial<Record<ResourceHealthStatus, number>>; resource_health_previous_statuses?: Partial<Record<ResourceHealthStatus, number>>; resource_health_reason_types?: Partial<Record<ResourceHealthReasonType, number>>; recommendation_categories?: Partial<Record<RecommendationCategory, number>>; recommendation_impacts?: Partial<Record<RecommendationImpact, number>>; activity_unmapped?: number; applied?: { activity_categories: ActivityLogFilterCategory[]; service_health_event_types: ServiceHealthEventType[] | null } };
+  rules?: Array<{ id: string; name: string; family: ManagedAlertRule["family"]; severity: number | null; enabled: boolean } & ActivityRuleFilterMetadata>;
+  nodes: Array<{ id: string; name: string; kind: "resource" | "alert" | "action_group" | "receiver" | "outcome"; status: string; resource_id?: string; family?: string; severity?: number; receiver_type?: string; fingerprint?: string } & ActivityRuleFilterMetadata>;
   links: { source: string; target: string; value: number; status: string; receiver_type?: string }[];
-  routes: { resource_ids: string[]; rule_id: string; rule_name: string; family: string; severity: number | null; rule_enabled: boolean; action_group_id: string; action_group_name: string; action_group_enabled?: boolean; receiver_type: string; receiver_name: string; receiver_destination?: string; receiver_masked: string; receiver_fingerprint?: string; receiver_enabled?: boolean; payload_schema?: string; outcome: string; would_run?: boolean; issues: string[] }[];
+  routes: Array<{ resource_ids: string[]; rule_id: string; rule_name: string; family: string; severity: number | null; rule_enabled: boolean; action_group_id: string; action_group_name: string; action_group_enabled?: boolean; receiver_type: string; receiver_name: string; receiver_destination?: string; receiver_masked: string; receiver_fingerprint?: string; receiver_enabled?: boolean; payload_schema?: string; outcome: string; would_run?: boolean; issues: string[] } & ActivityRuleFilterMetadata>;
   diagnostics: { code: string; severity: string; rule_id?: string; rule_name?: string; action_group_id?: string; receiver?: string; message: string }[];
   scope?: { kind: "workload" | "subscription" | "management_group"; id: string; name?: string };
   resources?: { id: string; name?: string; type?: string; resource_type?: string; resource_group?: string; subscription_id?: string; subscription_name?: string; workload_ids?: string[]; alert_rule_ids?: string[]; accessible?: boolean }[];
@@ -1384,6 +1425,32 @@ export type AlertAnalysisSnapshot = {
   decisions?: AlertAnalysisDecision[];
   active_overlaps?: AlertAnalysisOverlap[];
   active_gaps?: AlertAnalysisGap[];
+  active_overlap_ids?: string[];
+  active_gap_keys?: string[];
+  overview?: {
+    clean_rules: number;
+    cost_confidence_counts: Record<string, number>;
+  };
+  section_totals?: {
+    rules: number;
+    overlaps: number;
+    gaps: number;
+    action_groups: number;
+    recipients: number;
+  };
+};
+
+export type AlertAnalysisSectionPage<T> = {
+  section: "rules" | "overlaps" | "gaps";
+  items: T[];
+  total: number;
+  page: number;
+  page_size: number;
+  facets: {
+    risks?: string[];
+    types?: string[];
+    signals?: string[];
+  };
 };
 
 export type AlertAnalysisRefreshProgress = {
@@ -1839,6 +1906,8 @@ export type RadarEvent = {
   recommended_replacement: string;
   migration_url: string;
   rule_id: string;
+  impact_scope?: Array<{ service: string; regions: string[]; subscriptions: string[] }>;
+  impact_count_known?: boolean;
   impacted_resources: RadarImpactedResource[];
   impacted_count: number;
   owner: string;
@@ -1888,6 +1957,12 @@ export type RadarSnapshot = {
   source: string;
   demo: boolean;
   error: string;
+  partial?: boolean;
+  collection_failed?: boolean;
+  warnings?: string[];
+  source_status?: Record<string, { status: string; rows: number; batches?: number; optional?: boolean }>;
+  last_good_preserved?: boolean;
+  last_refresh_error?: string;
   rail: RadarRailItem[];
   events: RadarEvent[];
   model_items: RadarModelItem[];
@@ -1900,6 +1975,7 @@ export type RadarSnapshot = {
     grey: number;
     unowned: number;
     impacted_total: number;
+    impact_counts_complete?: boolean;
     models: number;
     models_at_risk: number;
   };
@@ -1914,7 +1990,7 @@ export type MissionSystem = {
   key: string;
   label: string;
   icon: string;
-  status: string; // queued|running|done|skipped|fail|error|idle
+  status: string; // queued|running|done|partial|skipped|fail|error|idle
   headline: string;
   detail?: string;
   score: number | null;
@@ -1964,6 +2040,26 @@ export type MissionState = {
 };
 
 export type MissionSystemDef = { key: string; label: string; icon: string; informational: boolean };
+
+export type RecentItem = {
+  id: string;
+  kind: string;
+  item_key: string;
+  title: string;
+  subtitle: string;
+  route: string;
+  permission: string;
+  connection_id?: string | null;
+  workload_id?: string | null;
+  pinned: boolean;
+  visit_count: number;
+  last_visited_at: string;
+};
+
+export type RecentItemTouch = Pick<
+  RecentItem,
+  "kind" | "item_key" | "title" | "subtitle" | "route" | "connection_id" | "workload_id"
+>;
 
 export type RadarClassificationRule = {
   id: string;
@@ -2145,9 +2241,31 @@ export type PerfResourceRow = {
   resource_group: string;
   subscription_id: string;
   region: string;
-  score: number;
+  score: number | null;
   state: "healthy" | "approaching" | "breaching" | "no_data";
   cells: PerfMetricCell[];
+};
+
+export type PerfCollection = {
+  status: "running" | "succeeded" | "partial" | "failed";
+  resources_discovered: number;
+  resources_eligible: number;
+  resources_selected: number;
+  resources_completed: number;
+  scan_cap_reached: boolean;
+  metric_checks_total: number;
+  metric_checks_succeeded: number;
+  metric_checks_no_data: number;
+  metric_checks_failed: number;
+  metric_requests_total: number;
+  metric_request_attempts: number;
+  metric_requests_succeeded: number;
+  metric_requests_failed: number;
+  metric_requests_retried: number;
+  metric_requests_throttled: number;
+  metric_requests_timed_out: number;
+  completeness_pct: number;
+  errors: Array<{ resource_id?: string; resource_name?: string; metrics?: string[]; code: string; message: string }>;
 };
 
 export type PerfBottleneck = {
@@ -2175,9 +2293,12 @@ export type PerfProfile = {
   source: string;
   window: string;
   demo: boolean;
+  status?: "succeeded" | "partial" | "failed";
   error: string;
+  warning?: string;
+  collection?: PerfCollection;
   scorecard: {
-    workload_score: number;
+    workload_score: number | null;
     resources_profiled: number;
     breaching: number;
     approaching: number;
@@ -2257,6 +2378,11 @@ export type PerfRunSummary = {
   healthy: number;
   top_bottleneck: { resource_name: string; metric_name: string; pct_of_threshold: number | null; state: string } | null;
   demo: boolean;
+  status?: "succeeded" | "partial" | "failed";
+  warning?: string;
+  error?: string;
+  collection?: PerfCollection;
+  completeness_pct?: number | null;
   triggered_by: string;
   deleted_at?: string;
 };
@@ -2281,6 +2407,11 @@ export type PerfFleetRow = {
   demo: boolean;
   age_seconds: number | null;
   stale: boolean;
+  last_attempt_status: "" | "succeeded" | "partial" | "failed";
+  last_attempt_at: string;
+  last_attempt_error: string;
+  last_attempt_warning: string;
+  last_attempt_collection: Partial<PerfCollection>;
 };
 export type PerfFleet = {
   workloads: PerfFleetRow[];
@@ -2288,6 +2419,88 @@ export type PerfFleet = {
   default_window: string;
   total: number;
   profiled: number;
+};
+
+export type PerfFleetBatchItem = {
+  id: string;
+  batch_id: string;
+  workload_id: string;
+  workload_name: string;
+  connection_id: string;
+  status: "queued" | "running" | "succeeded" | "partial" | "failed" | "cancelled";
+  run_id: string;
+  resources_completed: number;
+  resources_total: number;
+  collection: Partial<PerfCollection>;
+  error: string;
+  started_at: string;
+  ended_at: string;
+  duration_ms: number | null;
+};
+
+export type PerfFleetBatch = {
+  id: string;
+  status: "queued" | "running" | "succeeded" | "partial" | "failed" | "cancelled";
+  window: string;
+  start_time: string;
+  end_time: string;
+  total: number;
+  completed: number;
+  succeeded: number;
+  partial: number;
+  failed: number;
+  cancelled: number;
+  cancel_requested: boolean;
+  error: string;
+  triggered_by: string;
+  created_at: string;
+  started_at: string;
+  ended_at: string;
+  items: PerfFleetBatchItem[];
+};
+
+export type WorkBatchStatus = "queued" | "running" | "succeeded" | "partial" | "failed" | "cancelled";
+export type WorkBatchItem = {
+  id: string;
+  batch_id: string;
+  item_key: string;
+  workload_id: string;
+  workload_name: string;
+  connection_id: string;
+  status: WorkBatchStatus;
+  attempt: number;
+  max_attempts: number;
+  progress_current: number;
+  progress_total: number;
+  message: string;
+  result_ref: { kind?: string; id?: string } | null;
+  result: Record<string, unknown>;
+  error: string;
+  retryable: boolean;
+  available_at: string;
+  started_at: string;
+  ended_at: string;
+  duration_ms: number | null;
+};
+export type WorkBatch = {
+  id: string;
+  feature: string;
+  status: WorkBatchStatus;
+  config: Record<string, unknown>;
+  total: number;
+  completed: number;
+  succeeded: number;
+  partial: number;
+  failed: number;
+  cancelled: number;
+  cancel_requested: boolean;
+  error: string;
+  triggered_by: string;
+  trigger: string;
+  created_at: string;
+  started_at: string;
+  ended_at: string;
+  items: WorkBatchItem[];
 };
 
 // ---- Coverage / posture trend (shared by the 4 dashboards) ----------------------
@@ -2722,6 +2935,232 @@ export type IamJob = {
   last_message: string;
   error: string;
 } | null;
+
+/** One scope a disabled identity reaches, with its ARM structure intact.
+ *
+ * The rollup used to flatten these to display strings and the UI truncated them to six with a
+ * "+N more" that was not a control — so the reader could neither group by resource type nor
+ * recover the full id of the thing they were being asked to act on. */
+export type IamLeaverResource = {
+  scope: string;
+  scopeType: string;
+  scopeDisplayName: string;
+  subscriptionId: string;
+  subscriptionName: string;
+  resourceGroup: string;
+  resourceType: string;
+  resourceName: string;
+  managementGroupName: string;
+  roles: string[];
+  grants: number;
+  privileged: number;
+  viaGroups: string[];
+  direct: boolean;
+};
+
+/** One actual grant behind the aggregate numbers. */
+export type IamLeaverGrant = {
+  roleName: string;
+  roleIsPrivileged: boolean;
+  roleHasDataActions: boolean;
+  surface: string;
+  accessPath: string;
+  sourceGroupName: string;
+  scope: string;
+  scopeType: string;
+  scopeDisplayName: string;
+  subscriptionName: string;
+  resourceGroup: string;
+  resourceType: string;
+  resourceName: string;
+  assignmentId: string;
+  roleDefinitionId: string;
+  assignmentCreatedOn: string;
+  assignmentState: string;
+  pimManaged: boolean;
+  isPermanentEligible: boolean;
+};
+
+export type IamLeaverOwnedApp = {
+  name: string;
+  principalId: string;
+  appId: string;
+  /** Empty means "not seen inside the report's window", NEVER "never used". */
+  lastSignIn: string;
+  lastSignInKnown: boolean;
+};
+
+/** One disabled identity that still holds access, rolled up across every grant it holds.
+ *
+ * Person-centric on purpose: a leaver with Contributor on four subscriptions is ONE offboarding
+ * task, not four findings, and the remediation is performed once against the person. */
+export type IamLeaverIdentity = {
+  principalId: string;
+  displayName: string;
+  userPrincipalName: string;
+  principalType: string;
+  userType: string;
+  accountEnabled: string;
+  onPremSynced: string;
+  softDeleted: boolean;
+  deletedDateTime: string;
+  tier: string;
+  grants: number;
+  privilegedGrants: number;
+  highestRole: string;
+  highestRoleIsPrivileged: boolean;
+  planes: string[];
+  directGrants: number;
+  groupGrants: number;
+  groupsGrantingAccess: string[];
+  ownedServicePrincipals: string[];
+  ownedDetail: IamLeaverOwnedApp[];
+  pimEligible: number;
+  permanentlyEligible: number;
+  scopes: string[];
+  subscriptions: string[];
+  resources: IamLeaverResource[];
+  grantDetail: IamLeaverGrant[];
+  grantDetailTruncated: boolean;
+  signIn: {
+    interactive: string;
+    nonInteractive: string;
+    successful: string;
+    servicePrincipal: string;
+    known: boolean;
+  };
+  lastSignIn: string;
+  lastSignInSource: string;
+  dormancyBucket: string;
+  dormancyDays: number | null;
+  lastActivity: string;
+  activityEvents: number;
+  activityMeasured: boolean;
+  /** Whether a "never used" conclusion is available for THIS account. False means the window
+   *  cannot answer the question (it predates the account's last sign-in, or the sweep was
+   *  truncated) — which is not the same as answering "no". */
+  activityConclusive: boolean;
+  activityWindowCovers: boolean;
+  oldestGrantAt: string;
+  newestGrantAt: string;
+  /** Paths to full control that START at this principal. `escalationMeasured` is the gate:
+   *  without it, 0 means "no graph has been built", not "cannot escalate". */
+  escalationPaths: number;
+  escalationMeasured: boolean;
+};
+
+/** `measured` is the gate the UI must render on.
+ *
+ * false means Entra account state has never been collected for this tenant, and an empty
+ * `identities` list then means "we have not looked", NOT "nobody". Those are opposite findings,
+ * and "0 disabled accounts hold access" is the most reassuring sentence this feature can
+ * produce — it must never come from having failed to ask. */
+export type IamLeaversReport = {
+  measured: boolean;
+  reason: string;
+  identities: IamLeaverIdentity[];
+  denominator: {
+    principals_with_access: number;
+    state_resolved: number;
+    state_unknown: number;
+    not_applicable: number;
+  };
+  tiers: Record<string, { key: string; label: string; detail: string }>;
+  tier_counts: Record<string, number>;
+  totals: Record<string, number>;
+  limitations: string[];
+  dormancy_labels: Record<string, string>;
+  signin: { available: boolean; generated_at: string; sp_window_days: number };
+  usage: {
+    available: boolean;
+    window_days: number;
+    start?: string;
+    end: string;
+    truncated: boolean;
+  };
+  escalation: { available: boolean };
+  generated_at: string;
+  total_identities: number;
+  filtered: boolean;
+  /** Counts over the WHOLE filtered set, computed server-side. A header count derived from the
+   *  loaded page shrinks as the reader scrolls. */
+  counts: Record<string, Record<string, number>>;
+  /** Every value the dropdowns can offer, from the UNFILTERED set, so choosing one option does
+   *  not delete the others from existence. */
+  facets: {
+    subscriptions: string[];
+    roles: string[];
+    planes: string[];
+    groups: string[];
+    signin_kinds: string[];
+  };
+};
+
+export type IamLeaversFilter = {
+  tier?: string;
+  principal_type?: string;
+  privileged_only?: boolean;
+  on_prem?: string;
+  via_group_only?: boolean;
+  soft_deleted?: boolean;
+  has_owned_sp?: boolean;
+  pim_eligible?: boolean;
+  never_used?: boolean;
+  dormancy?: string;
+  signin_kind?: string;
+  subscription?: string;
+  role?: string;
+  plane?: string;
+  group?: string;
+  search?: string;
+  /** Explicit selection from the screen. An ADDITIONAL constraint on the filters, never a
+   *  replacement — a stale id must not resurrect an identity a later scan has excluded. */
+  principal_ids?: string[];
+  connection_id?: string | null;
+};
+
+/** Serialise the leaver filters ONCE, so the screen's query and the download's href cannot
+ * disagree about what is being asked for. */
+export function iamLeaversQuery(params?: IamLeaversFilter): string {
+  const q = new URLSearchParams();
+  const p = params ?? {};
+  const put = (k: keyof IamLeaversFilter) => {
+    const v = p[k];
+    if (v === undefined || v === null || v === "" || v === false) return;
+    q.set(k, v === true ? "true" : String(v));
+  };
+  ([
+    "tier", "principal_type", "privileged_only", "on_prem", "via_group_only", "soft_deleted",
+    "has_owned_sp", "pim_eligible", "never_used", "dormancy", "subscription", "role", "plane",
+    "group", "search", "connection_id",
+  ] as (keyof IamLeaversFilter)[]).forEach(put);
+  // Only meaningful alongside a dormancy bucket, and "any" is the server default.
+  if (p.signin_kind && p.signin_kind !== "any") q.set("signin_kind", p.signin_kind);
+  if (p.principal_ids && p.principal_ids.length) q.set("principal_ids", p.principal_ids.join(","));
+  const qs = q.toString();
+  return qs ? `?${qs}` : "";
+}
+
+/** An ordered revocation script for the current selection. Read-only: the product never runs
+ *  it, and every step carries a dry run, a "breaks if" and a rollback. */
+export type IamLeaversRemediation = {
+  measured: boolean;
+  reason?: string;
+  format?: string;
+  generator?: string;
+  action_count: number;
+  /** The whole document: revoke, then the rollback. Kept for anything that stored one script. */
+  script: string;
+  /** The two halves, separately copyable — they are run at different times by different people. */
+  revoke_script?: string;
+  rollback_script?: string;
+  identities: number;
+  grants: number;
+  /** Step count per removal API. Group-derived access, directory roles and PIM eligibility are
+   *  each removed by a different call — a single `role assignment delete` covers none of them. */
+  planes?: Record<string, number>;
+  limitations?: string[];
+};
 
 export type IamRun = {
   id: string;
@@ -3486,6 +3925,9 @@ export interface BackupManagerCapabilities {
   /** Always false — destructive backup operations are portal-only. */
   can_delete_backup_data: false;
   portal_only_operations: { id: string; label: string; reason: string }[];
+  portal_host: "portal.azure.com" | "portal.azure.us" | "portal.azure.cn" | "";
+  scope_kind: "none" | "workload" | "subscription" | "management_group";
+  analysis_only_scope: boolean;
   demo?: boolean;
 }
 
@@ -3893,7 +4335,9 @@ export interface BackupChangesResp {
 export interface BackupReplicationItem {
   id: string;
   name: string;
+  vault_id?: string;
   vault_name: string;
+  datasource_id?: string;
   friendly_name: string;
   protected_item_type: string;
   protection_state: string;
@@ -3917,7 +4361,7 @@ export interface BackupReplicationItem {
 export interface BackupDrResp {
   items: BackupReplicationItem[];
   recovery_plans: {
-    id: string; name: string; friendly_name: string; vault_name: string;
+    id: string; name: string; friendly_name: string; vault_id?: string; vault_name: string;
     primary_region: string; recovery_region: string; last_test_failover: string;
     last_test_failover_age_days: number | null; current_scenario: string;
     current_scenario_status: string; protected_item_count: number; stale_drill: boolean;
@@ -3970,11 +4414,17 @@ export interface BackupCostActuals {
   by_meter: Record<string, number>;
   daily: { date: string; cost: number }[];
   currency: string;
+  currencies?: string[];
+  mixed_currency?: boolean;
+  totals_by_currency?: Record<string, number>;
   total: number;
   period: { from: string; to: string; partial: string };
   partial_period: boolean;
   cost_type: string;
   subscriptions: string[];
+  subscriptions_succeeded?: number;
+  subscriptions_failed?: number;
+  partial?: boolean;
   reason: string;
   remedy: string;
   cache_age_seconds?: number;
@@ -4045,7 +4495,7 @@ export interface BackupCostResp {
   assumed_instance_gb: number;
   confidence: "measured" | "partial" | "assumed";
   top_rows: {
-    instance_id: string; name: string; datasource_type: string; vault_id: string;
+    instance_id: string; name: string; datasource_id: string; datasource_type: string; vault_id: string;
     vault_name: string; redundancy: string; stored_gb: number; instance_cost: number;
     storage_cost: number; monthly_cost: number; meter: string; measured: boolean;
     priced: boolean; note: string;
@@ -4056,7 +4506,7 @@ export interface BackupCostResp {
   report_note: string;
   price_region: string;
   waste: {
-    findings: { kind: string; severity: string; title: string; detail: string; instance_id: string; name: string; vault_name: string; monthly_cost: number; action: string }[];
+    findings: { kind: string; severity: string; title: string; detail: string; instance_id: string; datasource_id: string; vault_id: string; name: string; vault_name: string; monthly_cost: number; action: string }[];
     recoverable_monthly: number;
     counts: Record<string, number>;
     currency: string;
@@ -4106,9 +4556,16 @@ export interface BackupSnapshot {
   generated_at: string;
   age_seconds?: number | null;
   demo: boolean;
+  partial?: boolean;
   reason?: string;
-  scope: { scope_kind?: string; scope_id?: string; subscriptions: string[] } & Record<string, unknown>;
+  scope: {
+    scope_kind?: string; scope_id?: string; scope_name?: string; subscriptions: string[];
+    subscription_count?: number; management_group_id?: string; management_group_name?: string;
+    resolution_complete?: boolean; resolution_warnings?: string[];
+  } & Record<string, unknown>;
   errors: Record<string, string>;
+  warnings?: Record<string, string>;
+  source_details?: Record<string, Record<string, unknown>>;
   job_window_days: number;
   counts: { vaults?: number; protected_items?: number; policies?: number; jobs?: number; gaps?: number; failed_jobs?: number };
   summary: BackupManagerSummary;
@@ -4216,6 +4673,7 @@ export interface BackupManagerStoredSnapshot {
   scope_kind: string;
   scope_id: string;
   scope_name: string;
+  subscription_count: number;
   generated_at: string;
   age_seconds: number | null;
   size_bytes: number;
@@ -4253,6 +4711,74 @@ function backupScopeQuery(scope: BackupManagerScope, extra: Record<string, strin
 
 export const api = {
   me: () => http<Me>("/me"),
+
+  // ---------------------------------------------------------------- Recovery Readiness
+  /** The vocabulary: scenarios, RTO classes and their wording. Served by the server so the
+   *  client never invents a label for `none` or `unknown` — they must not read alike. */
+  resiliencyMeta: () => http<ResiliencyMeta>("/resiliency/meta"),
+  /** Everything as of the last analysis. Cache-only; never triggers Azure work. */
+  resiliencySnapshot: (scope: ResiliencyScope) =>
+    http<ResiliencySnapshot>(`/resiliency/snapshot${resiliencyScopeQuery(scope)}`),
+  resiliencySummary: (scope: ResiliencyScope) =>
+    http<ResiliencySummaryResponse>(`/resiliency/summary${resiliencyScopeQuery(scope)}`),
+  resiliencyResources: (
+    scope: ResiliencyScope,
+    params: { scenario?: string; state?: string; search?: string; offset?: number; limit?: number } = {},
+  ) =>
+    http<ResiliencyResourcesResponse>(
+      `/resiliency/resources${resiliencyScopeQuery(scope, params as Record<string, string | number | undefined>)}`),
+  resiliencyResource: (scope: ResiliencyScope, resourceId: string) =>
+    http<{ resource: ResiliencyResource; generated_at: string; provenance: Record<string, ResiliencyProvenance> }>(
+      `/resiliency/resources/${resourceId.replace(/^\//, "")}${resiliencyScopeQuery(scope)}`),
+  resiliencyBreaches: (scope: ResiliencyScope) =>
+    http<ResiliencyBreachesResponse>(`/resiliency/breaches${resiliencyScopeQuery(scope)}`),
+  resiliencyWorkloads: (scope: ResiliencyScope) =>
+    http<{ report_exists: boolean; rows: ResiliencyWorkload[] }>(
+      `/resiliency/workloads${resiliencyScopeQuery(scope)}`),
+  resiliencyAnalyzeStart: (scope: ResiliencyScope) =>
+    http<{ job: ResiliencyJob | null }>(`/resiliency/analyze/start${resiliencyScopeQuery(scope)}`,
+      { method: "POST", body: "{}" }),
+  resiliencyAnalyzeJob: (scope: ResiliencyScope) =>
+    http<{ job: ResiliencyJob | null }>(`/resiliency/analyze/job${resiliencyScopeQuery(scope)}`),
+  resiliencyReference: () => http<ResiliencyReference>("/resiliency/reference"),
+  resiliencySaveReference: (body: Partial<ResiliencyReference>) =>
+    http<{ reference: ResiliencyReference; rejected: string[] }>("/resiliency/reference",
+      { method: "PUT", body: JSON.stringify(body) }),
+  /** The aggregate lens: which resource TYPES are weak, and the reasons that explain most
+   *  of it. Same function the exports use, so the screen and the workbook cannot disagree. */
+  resiliencyAnalysis: (scope: ResiliencyScope) =>
+    http<ResiliencyAnalysis>(`/resiliency/analysis${resiliencyScopeQuery(scope)}`),
+  resiliencyTrend: (scope: ResiliencyScope) =>
+    http<ResiliencyTrend>(`/resiliency/trend${resiliencyScopeQuery(scope)}`),
+  resiliencyExportUrl: (scope: ResiliencyScope, format: "xlsx" | "pdf" = "xlsx") =>
+    `${API_BASE}/resiliency/export${resiliencyScopeQuery(scope, { format })}`,
+  /** Blob rather than a plain link so a 409 (objectives not agreed) can be shown to the
+   *  reader instead of vanishing into a navigation that silently does nothing. Returns the
+   *  server's filename too — two names for one file is how a report gets filed under the
+   *  wrong scope. */
+  resiliencyExport: async (
+    scope: ResiliencyScope, format: "xlsx" | "pdf", signal?: AbortSignal,
+  ): Promise<{ blob: Blob; filename: string }> => {
+    const path = `/resiliency/export${resiliencyScopeQuery(scope, { format })}`;
+    const res = await fetch(`${API_BASE}${path}`, {
+      credentials: "include", cache: "no-store", signal,
+    });
+    if (!res.ok) {
+      let detail = `${res.status} ${res.statusText}`;
+      try {
+        const body = await res.json();
+        if (body && typeof body.detail === "string") detail = body.detail;
+      } catch { /* non-JSON error body */ }
+      throw new HttpError(res.status, detail);
+    }
+    const disposition = res.headers.get("content-disposition") ?? "";
+    const match = /filename="?([^";]+)"?/i.exec(disposition);
+    return { blob: await res.blob(), filename: match?.[1] ?? "" };
+  },
+  resiliencySaveEvidence: (scope: ResiliencyScope, body: { name?: string; retention_class?: string } = {}) =>
+    http<{ ok: boolean; evidence: { id: string; name: string; sha256: string } }>(
+      `/resiliency/evidence${resiliencyScopeQuery(scope)}`,
+      { method: "POST", body: JSON.stringify(body) }),
 
   // ---------------------------------------------------------------- Backup Manager
   backupManagerCapabilities: (scope: BackupManagerScope) =>
@@ -4399,6 +4925,8 @@ export const api = {
   backupManagerRefusals: () => http<{ operations: { id: string; label: string; reason: string }[] }>("/backup-manager/refusals"),
   backupManagerExport: (kind: string, scope: BackupManagerScope) =>
     httpBlob(`/backup-manager/export${backupScopeQuery(scope, { kind })}`),
+  backupManagerWorkbook: (scope: BackupManagerScope) =>
+    httpBlob(`/backup-manager/export/workbook${backupScopeQuery(scope)}`),
   backupManagerEvidence: (body: BackupManagerScope & { name?: string }) =>
     http<{ ok: boolean; snapshot: Record<string, unknown> }>("/backup-manager/evidence", { method: "POST", body: JSON.stringify(body) }),
 
@@ -4415,6 +4943,8 @@ export const api = {
   // Recent deep investigations across the caller's chats (history + confidence).
   deepInvestigations: (limit = 30) =>
     http<{ investigations: DeepInvestigationSummary[] }>(`/chats/investigations?limit=${limit}`),
+  investigationStats: (sinceDays = 7) =>
+    http<{ count: number; since_days: number }>(`/chats/investigations/stats?since_days=${sinceDays}`),
   // Save an investigation's root-cause analysis into the linked architecture's Memory
   // ("Case Law"). Pass architectureId to disambiguate when several are linked.
   saveInvestigationRca: (messageId: string, architectureId?: string) =>
@@ -4454,6 +4984,22 @@ export const api = {
       method: "POST",
       body: JSON.stringify(connectionId ? { connection_id: connectionId } : {}),
     }),
+  recentItems: (limit = 8) =>
+    http<{ items: RecentItem[] }>(`/dashboard/recent-items?limit=${Math.max(1, Math.min(20, limit))}`),
+  touchRecentItem: (body: RecentItemTouch) =>
+    http<{ item: RecentItem }>("/dashboard/recent-items", {
+      method: "PUT",
+      body: JSON.stringify(body),
+    }),
+  pinRecentItem: (id: string, pinned: boolean) =>
+    http<{ ok: boolean; pinned: boolean }>(`/dashboard/recent-items/${encodeURIComponent(id)}/pin`, {
+      method: "PATCH",
+      body: JSON.stringify({ pinned }),
+    }),
+  removeRecentItem: (id: string) =>
+    http<{ ok: boolean }>(`/dashboard/recent-items/${encodeURIComponent(id)}`, { method: "DELETE" }),
+  clearRecentItems: (includePinned = false) =>
+    http<{ ok: boolean; deleted: number }>(`/dashboard/recent-items?include_pinned=${includePinned}`, { method: "DELETE" }),
   deepReviewFleet: (workloadIds: string[]) =>
     http<{
       launched: number;
@@ -4496,8 +5042,8 @@ export const api = {
     http<{ ok: boolean; deleted: number }>(`/chats/${id}/messages/from/${messageId}`, {
       method: "DELETE",
     }),
-  suggestions: (id: string) =>
-    http<{ suggestions: string[] }>(`/chats/${id}/suggestions`),
+  suggestions: (id: string, signal?: AbortSignal) =>
+    http<{ suggestions: string[] }>(`/chats/${id}/suggestions`, { signal }),
   clarify: (id: string, content: string) =>
     http<{
       needs_subscription: boolean;
@@ -4519,13 +5065,24 @@ export const api = {
       { method: "POST", body: JSON.stringify({ content }) },
     ),
   listTools: () =>
-    http<{ name: string; description: string; kind: string }[]>("/admin/mcp/tools"),
+    http<{
+      disabled: string[];
+      bundles: string[];
+      tools: ToolCatalogEntry[];
+    }>("/admin/mcp/tools"),
   listEntraTools: () =>
     http<{
       enabled: boolean;
       connection_configured: boolean;
-      tools: { name: string; description: string; kind: string }[];
+      disabled: string[];
+      permission_withheld: string[];
+      bundles: string[];
+      tools: ToolCatalogEntry[];
     }>("/admin/entra/tools"),
+  toolRoutingDiagnostics: (query = "", agentId = "") =>
+    http<ToolRoutingDiagnostics>(
+      `/admin/tool-routing/diagnostics?query=${encodeURIComponent(query)}&agent_id=${encodeURIComponent(agentId)}`,
+    ),
   listBuiltinTools: () =>
     http<{
       enabled: boolean;
@@ -5227,6 +5784,33 @@ export const api = {
       body: JSON.stringify(body),
     }),
 
+  // --- Network access control (IP allowlist) ---
+  firewallConfig: () => http<FirewallConfig>("/admin/firewall"),
+  updateFirewall: (body: {
+    mode: string;
+    rules: FirewallRuleIn[];
+    import_context?: FirewallImportContext;
+  }) =>
+    http<FirewallConfig>("/admin/firewall", {
+      method: "PUT",
+      body: JSON.stringify(body),
+    }),
+  firewallImportPreview: (body: FirewallImportPreviewRequest) =>
+    http<FirewallImportPreview>("/admin/firewall/import/preview", {
+      method: "POST",
+      body: JSON.stringify(body),
+    }),
+  firewallExport: (format: "txt" | "csv") =>
+    httpBlob(`/admin/firewall/export?format=${format}`),
+  confirmFirewall: () =>
+    http<FirewallConfig>("/admin/firewall/confirm", { method: "POST", body: "{}" }),
+  firewallBlocks: (limit = 25, offset = 0) =>
+    http<{ total: number; items: FirewallBlock[] }>(
+      `/admin/firewall/blocks?limit=${limit}&offset=${offset}`,
+    ),
+  clearFirewallBlocks: () =>
+    http<{ ok: boolean }>("/admin/firewall/blocks", { method: "DELETE" }),
+
   // --- Workbooks (az / KQL / PowerShell snippets, AI'fied) ---
   workbooks: () => http<{ workbooks: Workbook[] }>("/workbooks"),
   upsertWorkbook: (body: Partial<Workbook>) =>
@@ -5311,6 +5895,11 @@ export const api = {
     }),
   deleteWorkload: (id: string) =>
     http<{ ok: boolean }>(`/workloads/${id}`, { method: "DELETE" }),
+  bulkTrashWorkloads: (workloadIds: string[]) =>
+    http<WorkloadBulkTrashResult>("/workloads/bulk/trash", {
+      method: "POST",
+      body: JSON.stringify({ workload_ids: workloadIds }),
+    }),
   // --- Workload trash (soft-delete) ---
   trashedWorkloads: () => http<{ workloads: Workload[] }>("/workloads/trash"),
   restoreWorkload: (id: string) =>
@@ -5439,6 +6028,10 @@ export const api = {
   architectureCatalog: () => http<ArchitectureCatalog>("/architectures/catalog"),
   architectures: () => http<{ architectures: Architecture[] }>("/architectures"),
   architecture: (id: string) => http<{ architecture: Architecture }>(`/architectures/${id}`),
+  architecturePricing: (id: string, currency = "", force = false) =>
+    http<ArchitecturePricing>(
+      `/architectures/${encodeURIComponent(id)}/pricing?${currency ? `currency=${encodeURIComponent(currency)}&` : ""}${force ? "force=true" : "force=false"}`,
+    ),
   upsertArchitecture: (body: Partial<Architecture>) =>
     http<{ architecture: Architecture }>("/architectures", {
       method: "PUT",
@@ -5539,10 +6132,15 @@ export const api = {
     http<{ jobs: KnowMeBuildJob[] }>("/architectures/know-me/from-workload/active"),
   saveKnowMe: (kmId: string, body: { title?: string; description?: string; sections?: KnowMeSection[]; todos?: KnowMeTodo[]; status?: string }) =>
     http<KnowMeResponse>(`/architectures/know-me/${kmId}`, { method: "PUT", body: JSON.stringify(body) }),
+  calculateKnowMeCompositeSla: (kmId: string, model?: SlaJourney) =>
+    http<KnowMeResponse>(`/architectures/know-me/${kmId}/composite-sla`, {
+      method: "POST",
+      body: JSON.stringify(model ? { model } : {}),
+    }),
   setKnowMeReference: (kmId: string, isReference = true) =>
     http<KnowMeResponse>(`/architectures/know-me/${kmId}/reference`, { method: "POST", body: JSON.stringify({ is_reference: isReference }) }),
-  suggestKnowMeField: (kmId: string, fieldId: string) =>
-    http<{ choices: string[]; choice_source?: string }>(`/architectures/know-me/${kmId}/fields/${encodeURIComponent(fieldId)}/suggest`, { method: "POST", body: "{}" }),
+  suggestKnowMeField: (kmId: string, fieldId: string, signal?: AbortSignal, preload = false) =>
+    http<{ choices: string[]; choice_source?: string }>(`/architectures/know-me/${kmId}/fields/${encodeURIComponent(fieldId)}/suggest${preload ? "?preload=true" : ""}`, { method: "POST", body: "{}", signal }),
   deleteKnowMe: (kmId: string) =>
     http<{ ok: boolean }>(`/architectures/know-me/${kmId}`, { method: "DELETE" }),
   restoreKnowMe: (kmId: string) =>
@@ -5731,7 +6329,7 @@ export const api = {
 
   // ---------------------------------------------------------------- Entra ID Support Agent
   // Every read is cache-only: a cold cache returns meta.loaded=false, never a 500 and never
-  // a silent live tenant scan. `entraRefresh` is the only call that touches Microsoft Graph.
+  // a silent live scan. `entraRefresh` is the only call that touches Microsoft Graph.
   entraStatus: (connectionId?: string | null) =>
     http<EntraStatus>(`/entra/status${entraQs(connectionId)}`),
   entraRefresh: (connectionId?: string | null, domains?: string[]) =>
@@ -5882,13 +6480,14 @@ export const api = {
     principalId: string,
     body: { types: string[]; days: number; justification?: string },
     connectionId?: string | null,
+    signal?: AbortSignal,
   ) =>
     http<InvestigateActivity>(
       `/entra/investigate/${encodeURIComponent(principalId)}/activity${entraQs(connectionId)}`,
-      { method: "POST", body: JSON.stringify(body) }),
+      { method: "POST", body: JSON.stringify(body), signal }),
   entraInvestigateMembers: (
     principalId: string,
-    body: { expand: string[]; direction?: "down" | "up" },
+    body: { expand: string[]; direction?: "down" | "up"; transitive?: boolean },
     connectionId?: string | null,
   ) =>
     http<InvestigateTree>(
@@ -5904,8 +6503,15 @@ export const api = {
     connectionId?: string | null,
   ) => http<{ meta: EntraMeta; apps: EntraAppRow[]; total: number; offset: number; limit: number;
               counts: Record<string, number>; capabilities: Record<string, boolean>;
+              signin: { measured: boolean; outcomes_measured: boolean; reason: string;
+                        window_days: number; scope: string; pending: boolean;
+                        pending_count: number; checked_total: number; in_scope_total: number };
               risk_components: { key: string; label: string; weight: number }[] }>(
     `/entra/apps${entraQs(connectionId, params as Record<string, string | number | undefined>)}`),
+  entraRefreshSignInOutcomes: (connectionId?: string | null) =>
+    http<{ ran: boolean; reason?: string; checked?: number; remaining?: number;
+           with_events?: number; state: Record<string, unknown> }>(
+      `/entra/apps/signin-outcomes/refresh${entraQs(connectionId)}`, { method: "POST", body: "{}" }),
   entraApp360: (objectId: string, connectionId?: string | null) =>
     http<EntraApp360>(`/entra/apps/${encodeURIComponent(objectId)}${entraQs(connectionId)}`),
   entraAppsConsent: (connectionId?: string | null) =>
@@ -6046,10 +6652,10 @@ export const api = {
       "/identity/app-registrations" +
         (connectionId ? `?connection_id=${encodeURIComponent(connectionId)}` : ""),
     ),
-  refreshAppRegistrations: (connectionId?: string | null) =>
+  refreshAppRegistrations: (connectionId?: string | null, mode: AppRegRefreshMode = "capped") =>
     http<AppRegistrationsResponse>(
       "/identity/app-registrations/refresh" +
-        (connectionId ? `?connection_id=${encodeURIComponent(connectionId)}` : ""),
+        `?mode=${mode}` + (connectionId ? `&connection_id=${encodeURIComponent(connectionId)}` : ""),
       { method: "POST", body: "{}" },
     ),
   // Multi-sheet Excel workbook (Applications / Credentials / Permissions / Owners / High
@@ -6058,9 +6664,15 @@ export const api = {
     `${API_BASE}/identity/app-registrations/workbook` +
     (connectionId ? `?connection_id=${encodeURIComponent(connectionId)}` : ""),
   appRegistrationsJob: (connectionId?: string | null) =>
-    http<{ job: { id: string; status: string; started_at: string; finished_at: string | null; progress_count: number; last_message: string; error: string } | null }>(
+    http<{ job: AppRegJob | null }>(
       "/identity/app-registrations/job" +
         (connectionId ? `?connection_id=${encodeURIComponent(connectionId)}` : ""),
+    ),
+  cancelAppRegistrationsRefresh: (connectionId?: string | null) =>
+    http<{ ok: boolean; resume_available: boolean }>(
+      "/identity/app-registrations/refresh/cancel" +
+        (connectionId ? `?connection_id=${encodeURIComponent(connectionId)}` : ""),
+      { method: "POST", body: "{}" },
     ),
   // Reservations Monitor — server cache; demo scope for synthetic data.
   reservationsOverview: (demo = false, connectionId = "") =>
@@ -6530,7 +7142,7 @@ export const api = {
    * Access Map facts.
    *
    * The server interns the fact table (per-column label dictionaries + rows of integers)
-   * because the object form measured 4 MiB on a real tenant against 520 KiB interned. Decoding
+   * because the object form measured 4 MiB at production scale against 520 KiB interned. Decoding
    * here keeps that entirely a transport concern — every caller sees ordinary objects.
    */
   iamFlow: async (params?: { scope_id?: string; subscription_ids?: string; workload_id?: string; principal_id?: string; connection_id?: string | null }): Promise<IamFlow> => {
@@ -6555,10 +7167,30 @@ export const api = {
   },
   iamRuns: () => http<{ runs: IamRun[] }>("/iam/runs"),
   iamRun: (id: string) => http<{ run: IamRun | null }>(`/iam/run/${encodeURIComponent(id)}`),
+  iamLeavers: (params?: IamLeaversFilter) =>
+    http<IamLeaversReport>(`/iam/leavers${iamLeaversQuery(params)}`),
+  iamLeaversRemediation: (fmt: string, params?: IamLeaversFilter) => {
+    const qs = iamLeaversQuery(params);
+    return http<IamLeaversRemediation>(
+      `/iam/leavers/remediation${qs}${qs ? "&" : "?"}fmt=${encodeURIComponent(fmt)}`,
+    );
+  },
+  // The export takes the SAME filters as the screen and routes them through the same server
+  // -side function. A file that disagrees with the screen it was launched from is the artifact
+  // that reaches the identity team, so the two must not be able to drift.
+  iamLeaversExportUrl: (
+    fmt: "csv" | "xlsx",
+    shape: "identities" | "grants",
+    params?: IamLeaversFilter,
+  ) => {
+    const qs = iamLeaversQuery(params);
+    const sep = qs ? "&" : "?";
+    return `${API_BASE}/iam/leavers/export${qs}${sep}fmt=${fmt}&shape=${shape}`;
+  },
   // Every filter the access grid can apply must be representable here. When it could only
   // carry the scope/workload narrowing, a CSV taken with a search term or the privileged
   // toggle active silently contained rows the grid was not showing.
-  iamExportUrl: (fmt: "csv" | "json", tab: string, filter?: { scope_id?: string; subscription_ids?: string; workload_id?: string; connection_id?: string | null; scope?: string; surface?: string; principal_type?: string; privileged_only?: boolean; search?: string }) => {
+  iamExportUrl: (fmt: "csv" | "json", tab: string, filter?: { scope_id?: string; subscription_ids?: string; workload_id?: string; connection_id?: string | null; scope?: string; surface?: string; principal_type?: string; privileged_only?: boolean; disabled_only?: boolean; search?: string }) => {
     const q = new URLSearchParams({ fmt, tab });
     if (filter?.scope_id) q.set("scope_id", filter.scope_id);
     if (filter?.subscription_ids) q.set("subscription_ids", filter.subscription_ids);
@@ -6567,6 +7199,7 @@ export const api = {
     if (filter?.surface) q.set("surface", filter.surface);
     if (filter?.principal_type) q.set("principal_type", filter.principal_type);
     if (filter?.privileged_only) q.set("privileged_only", "true");
+    if (filter?.disabled_only) q.set("disabled_only", "true");
     if (filter?.search) q.set("search", filter.search);
     if (filter?.connection_id) q.set("connection_id", filter.connection_id);
     return `${API_BASE}/iam/export?${q.toString()}`;
@@ -6663,12 +7296,25 @@ export const api = {
     return http<AmbaCoverage>(`/amba/refresh?${q.toString()}`, { method: "POST", body: "{}" });
   },
   alertAnalysis: (params: { workload_id?: string; subscription_id?: string; management_group_id?: string; connection_id?: string }) => {
-    const q = new URLSearchParams();
+    const q = new URLSearchParams({ compact: "true" });
     if (params.workload_id) q.set("workload_id", params.workload_id);
     if (params.subscription_id) q.set("subscription_id", params.subscription_id);
     if (params.management_group_id) q.set("management_group_id", params.management_group_id);
     if (params.connection_id) q.set("connection_id", params.connection_id);
     return http<AlertAnalysisSnapshot>(`/alert-analysis?${q.toString()}`);
+  },
+  alertAnalysisSection: <T>(
+    section: "rules" | "overlaps" | "gaps",
+    params: { workload_id?: string; subscription_id?: string; management_group_id?: string; connection_id?: string },
+    options: { page?: number; page_size?: number; search?: string; status?: string; risk?: string; gap_type?: string; signal?: string; sort?: string; direction?: "asc" | "desc"; group?: string } = {},
+  ) => {
+    const q = new URLSearchParams();
+    if (params.workload_id) q.set("workload_id", params.workload_id);
+    if (params.subscription_id) q.set("subscription_id", params.subscription_id);
+    if (params.management_group_id) q.set("management_group_id", params.management_group_id);
+    if (params.connection_id) q.set("connection_id", params.connection_id);
+    for (const [key, value] of Object.entries(options)) if (value !== undefined && value !== "") q.set(key, String(value));
+    return http<AlertAnalysisSectionPage<T>>(`/alert-analysis/sections/${section}?${q.toString()}`);
   },
   refreshAlertAnalysis: (params: { workload_id?: string; subscription_id?: string; management_group_id?: string; connection_id?: string }) => {
     const q = new URLSearchParams();
@@ -6679,7 +7325,7 @@ export const api = {
     return http<AlertAnalysisSnapshot>(`/alert-analysis/refresh?${q.toString()}`, { method: "POST", body: "{}" });
   },
   startAlertAnalysisRefresh: (params: { workload_id?: string; subscription_id?: string; management_group_id?: string; connection_id?: string }) => {
-    const q = new URLSearchParams();
+    const q = new URLSearchParams({ compact: "true" });
     if (params.workload_id) q.set("workload_id", params.workload_id);
     if (params.subscription_id) q.set("subscription_id", params.subscription_id);
     if (params.management_group_id) q.set("management_group_id", params.management_group_id);
@@ -6687,7 +7333,7 @@ export const api = {
     return http<AlertAnalysisRefreshJobResponse>(`/alert-analysis/refresh/start?${q.toString()}`, { method: "POST", body: "{}" });
   },
   alertAnalysisRefreshJob: (params: { workload_id?: string; subscription_id?: string; management_group_id?: string; connection_id?: string }) => {
-    const q = new URLSearchParams();
+    const q = new URLSearchParams({ compact: "true" });
     if (params.workload_id) q.set("workload_id", params.workload_id);
     if (params.subscription_id) q.set("subscription_id", params.subscription_id);
     if (params.management_group_id) q.set("management_group_id", params.management_group_id);
@@ -6936,7 +7582,7 @@ export const api = {
     http<NoiseGuardResult>("/alerts-manager/alert-rules/noise-guard", { method: "POST", body: JSON.stringify(body) }),
   simulateNotificationPath: (body: { connection_id?: string; rule_id?: string; rule_name?: string; family?: ManagedAlertRule["family"]; resource_id?: string; severity?: number; timestamp?: string; description?: string; action_group_ids?: string[]; selected_action_group_ids?: string[]; use_selected_only?: boolean; monitor_condition?: "Fired" | "Resolved" }) =>
     http<NotificationSimulation>("/alerts-manager/notifications/simulate", { method: "POST", body: JSON.stringify(body) }),
-  bulkSimulateNotificationPaths: (body: AlertsManagerScopeContext & { monitor_condition?: "Fired" | "Resolved"; include_disabled?: boolean; families?: ManagedAlertRule["family"][]; severities?: number[] }, signal?: AbortSignal) =>
+  bulkSimulateNotificationPaths: (body: AlertsManagerScopeContext & { monitor_condition?: "Fired" | "Resolved"; include_disabled?: boolean; families?: ManagedAlertRule["family"][]; severities?: number[]; activity_categories?: ActivityLogFilterCategory[]; service_health_event_types?: ServiceHealthEventType[] }, signal?: AbortSignal) =>
     http<BulkNotificationSimulation>("/alerts-manager/notifications/bulk-simulate", { method: "POST", body: JSON.stringify(body), signal }),
   actionGroupSuggestions: (params: { connection_id?: string; workload_id?: string; subject_kind: "resource" | "workload"; subject_id: string }) => {
     const q = new URLSearchParams({ subject_kind: params.subject_kind, subject_id: params.subject_id });
@@ -7053,7 +7699,17 @@ export const api = {
     }),
   resetTelemetryReference: () =>
     http<{ ok: boolean; reference: TelemetryReference }>("/telemetry/reference/reset", { method: "POST", body: "{}" }),
-  telemetryWorkspaces: () => http<{ workspaces: TelemetryWorkspace[]; approved: string[] }>("/telemetry/workspaces"),
+  telemetryWorkspaces: (
+    params: { discover?: boolean; connection_id?: string } = {}, signal?: AbortSignal,
+  ) => {
+    const query = new URLSearchParams();
+    if (params.discover) query.set("discover", "true");
+    if (params.connection_id) query.set("connection_id", params.connection_id);
+    const suffix = query.size ? `?${query}` : "";
+    return http<{ workspaces: TelemetryWorkspace[]; approved: string[]; discovered: boolean }>(
+      `/telemetry/workspaces${suffix}`, { signal },
+    );
+  },
   setTelemetryApprovedWorkspaces: (workspaces: string[]) =>
     http<{ ok: boolean; approved: string[] }>("/telemetry/approved-workspaces", {
       method: "PUT",
@@ -7353,6 +8009,47 @@ export const api = {
     }),
   // Performance Profiler
   perfFleet: () => http<PerfFleet>("/performance/fleet"),
+  perfFleetLatestBatch: (activeOnly = false) =>
+    http<{ batch: PerfFleetBatch | null }>(`/performance/fleet/batches/latest?active_only=${activeOnly ? "true" : "false"}`),
+  perfFleetBatch: (batchId: string) =>
+    http<{ batch: PerfFleetBatch }>(`/performance/fleet/batches/${encodeURIComponent(batchId)}`),
+  createPerfFleetBatch: (body: {
+    workload_ids: string[];
+    start_time: string;
+    end_time: string;
+    window: string;
+    idempotency_key: string;
+    connection_id?: string;
+  }) => http<{ batch: PerfFleetBatch }>("/performance/fleet/batches", { method: "POST", body: JSON.stringify(body) }),
+  cancelPerfFleetBatch: (batchId: string) =>
+    http<{ batch: PerfFleetBatch }>(`/performance/fleet/batches/${encodeURIComponent(batchId)}/cancel`, { method: "POST", body: "{}" }),
+  deletePerfFleetBatch: (batchId: string) =>
+    http<{ ok: boolean }>(`/performance/fleet/batches/${encodeURIComponent(batchId)}`, { method: "DELETE" }),
+  retryPerfFleetBatch: (batchId: string, idempotencyKey: string) =>
+    http<{ batch: PerfFleetBatch }>(`/performance/fleet/batches/${encodeURIComponent(batchId)}/retry`, {
+      method: "POST",
+      body: JSON.stringify({ idempotency_key: idempotencyKey }),
+    }),
+  workBatchLatest: (feature: string, activeOnly = false) =>
+    http<{ batch: WorkBatch | null }>(`/work-batches/latest?feature=${encodeURIComponent(feature)}&active_only=${activeOnly ? "true" : "false"}`),
+  workBatch: (batchId: string) =>
+    http<{ batch: WorkBatch }>(`/work-batches/${encodeURIComponent(batchId)}`),
+  createWorkBatch: (body: {
+    feature: string;
+    workload_ids?: string[];
+    connection_id?: string;
+    config?: Record<string, unknown>;
+    idempotency_key: string;
+  }) => http<{ batch: WorkBatch }>("/work-batches", { method: "POST", body: JSON.stringify(body) }),
+  cancelWorkBatch: (batchId: string) =>
+    http<{ batch: WorkBatch }>(`/work-batches/${encodeURIComponent(batchId)}/cancel`, { method: "POST", body: "{}" }),
+  retryWorkBatch: (batchId: string, idempotencyKey: string) =>
+    http<{ batch: WorkBatch }>(`/work-batches/${encodeURIComponent(batchId)}/retry`, {
+      method: "POST",
+      body: JSON.stringify({ idempotency_key: idempotencyKey }),
+    }),
+  deleteWorkBatch: (batchId: string) =>
+    http<{ ok: boolean }>(`/work-batches/${encodeURIComponent(batchId)}`, { method: "DELETE" }),
   // --- Cleanup tab (cross-scope) — one set per feature prefix ---
   cleanupList: (prefix: string) => http<CleanupData>(`${prefix}/cleanup`),
   cleanupTrash: (prefix: string, ids: string[]) =>
@@ -7636,8 +8333,12 @@ export const api = {
   }, signal?: AbortSignal) => http<InventoryNlResult>("/inventory/nl-search", { method: "POST", body: JSON.stringify(body), signal }),
   inventoryExplain: (resource: InventoryResource) =>
     http<{ explanation: string }>("/inventory/explain", { method: "POST", body: JSON.stringify({ resource }) }),
-  inventoryInsights: (connectionId?: string | null) =>
-    http<InventoryInsights>("/inventory/insights" + (connectionId ? `?connection_id=${encodeURIComponent(connectionId)}` : "")),
+  inventoryInsights: (connectionId?: string | null, generateAi = false, signal?: AbortSignal) => {
+    const q = new URLSearchParams();
+    if (connectionId) q.set("connection_id", connectionId);
+    if (generateAi) q.set("generate_ai", "1");
+    return http<InventoryInsights>(`/inventory/insights${q.size ? `?${q.toString()}` : ""}`, { signal });
+  },
   inventorySnapshots: (connectionId?: string | null) =>
     http<{ snapshots: InventorySnapshot[] }>("/inventory/snapshots" + (connectionId ? `?connection_id=${encodeURIComponent(connectionId)}` : "")),
   inventoryTakeSnapshot: (connectionId?: string | null) =>
@@ -7669,6 +8370,15 @@ export const api = {
     http<InventoryCost>(
       `/inventory/cost?force=${force ? 1 : 0}&cached_only=${cachedOnly ? 1 : 0}` + (connectionId ? `&connection_id=${encodeURIComponent(connectionId)}` : ""),
     ),
+  startInventoryCostRefresh: (connectionId?: string | null, force = true, scope = "") =>
+    http<{ job: InventoryCostRefreshJob }>("/inventory/cost/refresh", {
+      method: "POST",
+      body: JSON.stringify({ connection_id: connectionId ?? "", force, scope }),
+    }),
+  inventoryCostRefreshStatus: (connectionId?: string | null, scope = "") => {
+    const q = new URLSearchParams({ connection_id: connectionId ?? "", scope });
+    return http<{ job: InventoryCostRefreshJob | null }>(`/inventory/cost/refresh/status?${q.toString()}`);
+  },
   inventoryCostRollup: (connectionId?: string | null, force = false, cachedOnly = false) =>
     http<InventoryCostRollup>(
       `/inventory/cost-rollup?force=${force ? 1 : 0}&cached_only=${cachedOnly ? 1 : 0}` + (connectionId ? `&connection_id=${encodeURIComponent(connectionId)}` : ""),
@@ -7765,6 +8475,8 @@ export const api = {
   changeExplorerRun: (runId: string) => http<ChangeAnalysisRun>(`/changeexplorer/runs/${encodeURIComponent(runId)}`),
   changeExplorerChangeRaw: (runId: string, changeId: string) =>
     http<{ rawEventJson: Record<string, unknown> | null }>(`/changeexplorer/runs/${encodeURIComponent(runId)}/changes/${encodeURIComponent(changeId)}/raw`),
+  changeExplorerDiagnostics: (runId: string) =>
+    http<Pick<ChangeAnalysisRun, "runId" | "status" | "analysisOutcome" | "retryable" | "sourceProvenance" | "createdAt" | "completedAt">>(`/changeexplorer/runs/${encodeURIComponent(runId)}/diagnostics`),
   changeExplorerAsk: (body: { question: string; run_id?: string; workload_id?: string }, signal?: AbortSignal) =>
     http<ChangeAskResponse>("/changeexplorer/ask", { method: "POST", body: JSON.stringify(body), signal }),
   changeExplorerDeleteRun: (runId: string) =>
@@ -8360,6 +9072,13 @@ export interface ChangeAnalysisRun {
   narrative?: ChangeNarrativeBeat[];
   security?: ChangeSecuritySummary;
   caseFile?: ChangeCaseFile;
+  analysisOutcome?: "complete" | "partial";
+  retryable?: boolean;
+  sourceProvenance?: Record<string, {
+    source: string; status: "complete" | "partial" | "failed" | "unavailable";
+    complete: boolean; required: boolean; retryable: boolean; throttled: boolean;
+    rowCount: number; note: string;
+  }>;
 }
 export interface ChangeRunSummary {
   runId: string;
@@ -8577,6 +9296,53 @@ export interface InventoryCost {
   total: number;
   errors: string[];
   cached: boolean;
+}
+
+export interface InventoryCostRefreshEvent {
+  type: string;
+  at: string;
+  message: string;
+  subscription_id?: string;
+  index?: number;
+  subscriptions_total?: number;
+  subscriptions_done?: number;
+  resource_cost_rows?: number;
+  subscription_total?: number;
+  currency?: string;
+  duration_ms?: number;
+  error?: string;
+  attempt?: number;
+  max_attempts?: number;
+  delay_seconds?: number;
+}
+
+export interface InventoryCostRefreshJob {
+  id: string;
+  connection_id: string;
+  scope: string;
+  force: boolean;
+  status: "queued" | "running" | "succeeded" | "partial" | "failed";
+  message: string;
+  subscriptions_total: number;
+  subscriptions_visible: number;
+  subscriptions_omitted: number;
+  subscriptions_done: number;
+  subscriptions_succeeded: number;
+  subscriptions_failed: number;
+  active_subscriptions: Array<{
+    subscription_id: string;
+    index?: number;
+    started_at: string;
+    attempt?: number;
+    retry_delay_seconds?: number;
+  }>;
+  recent_events: InventoryCostRefreshEvent[];
+  result: InventoryCost | null;
+  error: string;
+  created_at: string;
+  started_at: string;
+  ended_at: string;
+  elapsed_ms: number;
 }
 
 export interface InventoryCostBucket {
@@ -9529,6 +10295,7 @@ export async function streamPerfRefresh(
   const reader = res.body.getReader();
   const decoder = new TextDecoder();
   let buffer = "";
+  let terminal = false;
   while (true) {
     let value: Uint8Array | undefined;
     let done = false;
@@ -9536,7 +10303,8 @@ export async function streamPerfRefresh(
       ({ value, done } = await reader.read());
     } catch (err) {
       if ((err as Error)?.name === "AbortError") return;
-      throw err;
+      handlers.onError?.(err instanceof Error ? err.message : String(err));
+      return;
     }
     if (done) break;
     buffer += decoder.decode(value, { stream: true });
@@ -9558,9 +10326,12 @@ export async function streamPerfRefresh(
       }
       if (event === "start") handlers.onStart?.(parsed as never);
       else if (event === "progress") handlers.onProgress?.(parsed as never);
-      else if (event === "done") handlers.onDone?.(parsed as unknown as PerfProfile);
-      else if (event === "error") handlers.onError?.((parsed.message as string) ?? "Profiling failed.");
+      else if (event === "done") { terminal = true; handlers.onDone?.(parsed as unknown as PerfProfile); }
+      else if (event === "error") { terminal = true; handlers.onError?.((parsed.message as string) ?? "Profiling failed."); }
     }
+  }
+  if (!terminal && !signal?.aborted) {
+    handlers.onError?.("Performance profile stream disconnected before completion.");
   }
 }
 
@@ -9891,7 +10662,7 @@ export async function streamIamRefresh(
  * One thing stopping a domain from being fully measured.
  *
  * `kind` is what makes it triageable: consent and azure_role the operator can fix today,
- * licence costs money, cap is a deliberate bound and needs no action at all.
+ * license costs money, cap is a deliberate bound and needs no action at all.
  */
 export type EntraBlocker = {
   kind: "consent" | "azure_role" | "licence" | "cap";
@@ -10243,6 +11014,8 @@ export type InvestigateAccess = {
   directory_roles: string[];
   directory_roles_active?: string[];
   directory_roles_eligible_only?: string[];
+  /** role name -> tier0 | tier1 | tier2, graded server-side. */
+  directory_role_tiers?: Record<string, string>;
   directory_assignments: Record<string, unknown>[];
   azure: Record<string, unknown> | null;
   azure_assignments: Record<string, unknown>[];
@@ -10289,7 +11062,35 @@ export type InvestigateDossier = InvestigateEnvelope & {
     activations: InvestigateSection<Record<string, unknown>[]>;
     /** Groups only. Absent for every other kind. */
     members?: InvestigateSection<InvestigateMembers>;
+    /** The way UP: groups this principal belongs to. Present for every kind that can be
+     *  in a group, which is everything except the Azure platform and the unresolvable. */
+    memberships?: InvestigateSection<InvestigateMemberships>;
   };
+};
+
+/** One group this principal belongs to, and why that membership matters. */
+export type InvestigateMembership = {
+  id: string;
+  display_name: string;
+  /** grants_azure_rbac | grants_directory_role | targeted_by_ca — why the group was
+   *  expanded at all, and therefore why it is worth reading. */
+  sources: string[];
+  dynamic: boolean;
+  role_assignable: boolean;
+  on_prem_synced: boolean;
+  membership_rule: string;
+};
+
+export type InvestigateMemberships = {
+  groups: InvestigateMembership[];
+  count: number;
+  /** False means no membership source could be read — NOT that the principal is in no
+   *  group. The count is a floor in every case: only groups that grant something were
+   *  ever expanded. */
+  readable: boolean;
+  role_assignable_count: number;
+  /** Server-supplied wording for each `sources` value, so the client never invents one. */
+  source_labels: Record<string, string>;
 };
 
 export type InvestigateSignin = {
@@ -10317,6 +11118,7 @@ export type InvestigateActivity = {
   window: { start: string; end: string; days: number };
   sections: Partial<{
     signins: InvestigateSection<InvestigateSignin[]>;
+    signins_noninteractive: InvestigateSection<InvestigateSignin[]>;
     audit: InvestigateSection<InvestigateAction[]>;
     azure_activity: InvestigateSection<InvestigateAction[]>;
     risk: InvestigateSection<InvestigateRisk[]>;
@@ -10341,6 +11143,11 @@ export type EntraAppRow = {
   credential_count: number; expiring_credentials: number; expired_credentials: number;
   assigned_principals: number; orphaned: boolean; risk_score: number;
   platform_managed: boolean;
+  // Derived: an attempt Graph stamped after the last success. "" = no evidence of a failure.
+  last_failed_signin: string;
+  // Newest sign-in seen inside the reporting window. "" = none seen, which is only the same
+  // as "never signed in" when the envelope says sign-in was measured.
+  last_signin: string;
 };
 
 export type EntraRiskComponent = {
@@ -10388,7 +11195,7 @@ export type EntraSimulationResult = {
     newly_blocked: number; newly_challenged: number; newly_granted: number;
     protection_lost: number;
     /** Sign-in verdict unchanged, but the SESSION may now do less (or more). A change that
-     *  only touches session controls used to categorise as `unchanged` and vanish. */
+     *  only touches session controls used to categorize as `unchanged` and vanish. */
     session_tightened: number;
     unchanged: number;
   };
@@ -10612,10 +11419,12 @@ export type EntraGuestRow = {
   lifecycle: string;
   invited_at: string; invited_days_ago: number | null;
   accepted_at: string; accepted_days_ago: number | null;
-  /** Interactive only — the one that evidences a person. */
+  /** Interactive only, and only when corroborated as successful. */
   last_human_signin: string; last_human_days_ago: number | null;
-  /** Includes non-interactive token refresh. Live, but not necessarily a human. */
+  /** Last sign-in that actually succeeded, including non-interactive token refresh. */
   last_any_signin: string; last_any_days_ago: number | null;
+  /** Last attempt that provably did NOT succeed. Distinguishes refused from never tried. */
+  last_refused_signin: string; last_refused_days_ago: number | null;
   signin_known: boolean;
   company_name: string; department: string; job_title: string;
   sponsors: { id: string; display_name: string }[];
@@ -10639,6 +11448,7 @@ export type EntraGuests = {
   counts: {
     invited: number; pending: number; accepted: number;
     never_used: number; dormant: number; active: number; not_measured: number;
+    disabled: number;
   };
   by_class: Record<string, number>;
   domain_count: number;
@@ -10789,21 +11599,39 @@ export async function streamEntraRefresh(
 }
 
 // ---- App Registrations background refresh (SSE) --------------------------------
-export type AppRegProgress = { seq: number; ts: string; level: "info" | "ok" | "warn" | "error"; message: string };
+export type AppRegProgress = {
+  seq: number;
+  ts: string;
+  level: "info" | "ok" | "warn" | "error";
+  message: string;
+  phase?: string;
+  current?: number;
+  total?: number | null;
+  percent?: number | null;
+  page?: number;
+  pages?: number;
+  page_size?: number;
+  retries?: number;
+  throttles?: number;
+  delay_seconds?: number;
+  resumed?: boolean;
+};
 
 /** Follow the background Application Registrations refresh over SSE. The server job keeps
  *  running even if this stream disconnects — re-calling re-attaches and replays the log. */
 export async function streamAppRegistrationsRefresh(
   handlers: {
-    onStart?: (d: { id: string; status: string; started_at: string }) => void;
+    onStart?: (d: { id: string; status: string; started_at: string; mode: AppRegRefreshMode; configured_limit: number; current: number; total: number | null; page: number; resumed: boolean }) => void;
     onProgress?: (d: AppRegProgress) => void;
     onDone?: (d: AppRegistrationsResponse) => void;
     onError?: (msg: string) => void;
+    onCancelled?: (d: { message: string; resume_available: boolean }) => void;
   },
   connectionId?: string | null,
+  mode: AppRegRefreshMode = "capped",
   signal?: AbortSignal,
 ): Promise<void> {
-  const qs = connectionId ? `?connection_id=${encodeURIComponent(connectionId)}` : "";
+  const qs = `?mode=${mode}${connectionId ? `&connection_id=${encodeURIComponent(connectionId)}` : ""}`;
   const res = await fetch(`${API_BASE}/identity/app-registrations/refresh/stream${qs}`, {
     method: "GET",
     credentials: "include",
@@ -10854,6 +11682,7 @@ export async function streamAppRegistrationsRefresh(
       else if (event === "progress") handlers.onProgress?.(parsed as unknown as AppRegProgress);
       else if (event === "done") handlers.onDone?.(parsed as unknown as AppRegistrationsResponse);
       else if (event === "error") handlers.onError?.((parsed.message as string) ?? "Refresh failed.");
+      else if (event === "cancelled") handlers.onCancelled?.(parsed as unknown as { message: string; resume_available: boolean });
       // "ping" heartbeats are ignored.
     }
   }
@@ -11206,6 +12035,132 @@ export interface AuthPolicies {
   sso_default_role: string;
 }
 
+/** Network access control (IP allowlist). See /admin/firewall. */
+export type FirewallMode = "off" | "monitor" | "enforce";
+
+export interface FirewallRuleIn {
+  cidr: string;
+  label: string;
+  enabled: boolean;
+}
+
+export interface FirewallRule extends FirewallRuleIn {
+  /** Human summary of the rule's breadth, e.g. "256 addresses" — derived server-side. */
+  scope: string;
+  valid: boolean;
+  created_by?: string;
+  created_at?: string;
+}
+
+export type FirewallImportStrategy = "merge" | "replace";
+export type FirewallImportFormat = "auto" | "txt" | "csv";
+
+export interface FirewallImportContext {
+  source_name: string;
+  strategy: FirewallImportStrategy;
+  skipped_existing: number;
+}
+
+export interface FirewallImportPreviewRequest {
+  text: string;
+  source_name: string;
+  format: FirewallImportFormat;
+  default_label: string;
+  strategy: FirewallImportStrategy;
+  mode: FirewallMode;
+  existing_rules: FirewallRuleIn[];
+}
+
+export interface FirewallImportDiagnostic {
+  line: number;
+  input: string;
+  cidr: string | null;
+  label: string;
+  enabled: boolean;
+  status: "invalid" | "valid" | "existing" | "retained" | "add";
+  message: string;
+}
+
+export interface FirewallImportSummary {
+  input_rows: number;
+  valid_rows: number;
+  invalid_rows: number;
+  duplicate_input: number;
+  canonicalized: number;
+  added: number;
+  retained: number;
+  skipped_existing: number;
+  removed: number;
+  result_total: number;
+  enabled_total: number;
+}
+
+export interface FirewallImportOverlap {
+  cidr: string;
+  overlaps: string;
+  message: string;
+}
+
+export interface FirewallImportPreview {
+  source_name: string;
+  format: "txt" | "csv";
+  strategy: FirewallImportStrategy;
+  can_apply: boolean;
+  errors: string[];
+  diagnostics: FirewallImportDiagnostic[];
+  overlaps: FirewallImportOverlap[];
+  overlap_count: number;
+  overlap_details_truncated: boolean;
+  result_rules: FirewallRule[];
+  your_ip: string | null;
+  your_ip_covered: boolean;
+  summary: FirewallImportSummary;
+}
+
+/** How the server arrived at your address — the answer to "why does it think I'm that IP?". */
+export interface FirewallResolutionEntry {
+  value: string;
+  valid: boolean;
+  classification: "client" | "infrastructure" | "unparseable";
+  selected: boolean;
+}
+
+export interface FirewallResolution {
+  resolved_ip: string | null;
+  socket_peer: string | null;
+  forwarded_header: string | null;
+  forwarded_honoured: boolean;
+  entries: FirewallResolutionEntry[];
+  reason: string;
+}
+
+export interface FirewallConfig {
+  mode: FirewallMode;
+  /** Mode after break-glass and the commit-confirm timer are applied. May differ from `mode`. */
+  effective_mode: FirewallMode;
+  rules: FirewallRule[];
+  /** ISO instant at which an unconfirmed `enforce` reverts to `monitor`. */
+  confirm_by: string | null;
+  /** The caller's address AS THE SERVER RESOLVED IT — not what the browser believes. */
+  your_ip: string | null;
+  your_ip_covered: boolean;
+  your_ip_rule: string | null;
+  break_glass_active: boolean;
+  confirm_window_minutes: number;
+  resolution: FirewallResolution | null;
+}
+
+export interface FirewallBlock {
+  id: string;
+  ip: string;
+  /** "enforce" = actually refused. "monitor" = WOULD have been refused. Never conflate them. */
+  mode: FirewallMode;
+  hits: number;
+  last_path: string;
+  first_seen: string | null;
+  last_seen: string | null;
+}
+
 export interface ConnectorFieldMeta {
   key: string;
   label: string;
@@ -11255,6 +12210,53 @@ export interface ConnectorToolInfo {
   connector_type: string;
 }
 
+export interface ToolCatalogEntry {
+  name: string;
+  description: string;
+  source: string;
+  domain: string;
+  bundles: string[];
+  kind: string;
+  selected?: boolean;
+  active?: boolean;
+  disabled?: boolean;
+  permission_withheld?: boolean;
+  reason?: string;
+}
+
+export interface ToolRoutingDiagnostics {
+  query: string;
+  agent_id?: string | null;
+  provider: {
+    id: string;
+    model: string;
+    max_tool_definitions: number;
+    native_tool_search: boolean;
+    api: string;
+    supports_responses: boolean;
+    responses_required_for_tools: boolean;
+    chat_tools_reasoning_effort_none: boolean;
+    capability_source: string;
+  };
+  routing: {
+    available: number;
+    selected: number;
+    withheld: number;
+    initial_budget: number;
+    max_per_turn: number;
+    schema_bytes_available: number;
+    schema_bytes_selected: number;
+    by_source: Record<string, number>;
+    by_domain: Record<string, number>;
+    selected_by_source: Record<string, number>;
+    selected_by_domain: Record<string, number>;
+    selected_tools: string[];
+    selection_reasons: Record<string, string>;
+  };
+  errors: Record<string, string>;
+  tools: ToolCatalogEntry[];
+}
+
 export interface CustomAgent {
   id: string;
   name: string;
@@ -11265,6 +12267,10 @@ export interface CustomAgent {
   connection_id: string;
   allow_all_azure: boolean;
   allow_all_entra?: boolean;
+  azure_tools?: string[];
+  azure_bundles?: string[];
+  entra_tools?: string[];
+  entra_bundles?: string[];
   connector_tools: string[];
   run_mode: string;
   enabled?: boolean;
@@ -11305,6 +12311,8 @@ export interface AgentDraft {
   instructions: string;
   connector_tools: string[];
   allow_all_azure: boolean;
+  azure_bundles?: string[];
+  entra_bundles?: string[];
   run_mode: string;
   suggested_provider: string;
   suggested_model: string;
@@ -11590,6 +12598,10 @@ export interface AgentConfig {
   connection_id: string | null;
   allow_all_azure: boolean;
   allow_all_entra?: boolean;
+  azure_tools?: string[];
+  azure_bundles?: string[];
+  entra_tools?: string[];
+  entra_bundles?: string[];
   connector_tools: string[];
   run_mode: string;
 }
@@ -11617,6 +12629,8 @@ export interface AgentEnhanceDraft {
   instructions: string;
   connector_tools: string[];
   allow_all_azure: boolean;
+  azure_bundles?: string[];
+  entra_bundles?: string[];
   run_mode: string;
   summary: string;
   changes: string[];
@@ -11627,6 +12641,8 @@ export interface AgentEnhanceCurrent {
   connector_tools: string[];
   run_mode: string;
   allow_all_azure: boolean;
+  azure_bundles?: string[];
+  entra_bundles?: string[];
 }
 export interface AgentEnhanceResult {
   draft: AgentEnhanceDraft;
@@ -11760,6 +12776,7 @@ export interface AzureConnection {
   id: string;
   display_name: string;
   tenant_id: string;
+  azure_cloud: "AzureCloud" | "AzureUSGovernment" | "AzureChinaCloud";
   auth_method: string;
   default_subscription: string;
   read_only: boolean;
@@ -11787,6 +12804,7 @@ export interface ConnectionUpsert {
   id?: string;
   display_name: string;
   tenant_id: string;
+  azure_cloud?: "AzureCloud" | "AzureUSGovernment" | "AzureChinaCloud";
   auth_method: string;
   default_subscription?: string;
   read_only?: boolean;
@@ -12267,10 +13285,20 @@ export interface AppSettings {
   entra_mcp_enabled?: boolean;
   /** Entra sign-in collection window, in days. Clamped to 1–90 by the server. */
   entra_signin_lookback_days?: number;
+  /** Normal Application Registrations refresh cap. Clamped to 50–5,000. */
+  app_registrations_limit?: number;
   auto_execute_writes: boolean;
   max_tool_iterations: number;
   tool_result_limit: number;
   tool_discovery_limit: number;
+  tool_routing_enabled?: boolean;
+  tool_initial_budget?: number;
+  tool_max_per_turn?: number;
+  tool_search_page_size?: number;
+  azure_mcp_disabled_tools?: string[];
+  entra_mcp_disabled_tools?: string[];
+  agent_skills_enabled?: boolean;
+  openai_native_tool_search_enabled?: boolean;
   request_timeout_seconds: number;
   command_execution_enabled: boolean;
   command_allowlist: string[];
@@ -12283,6 +13311,7 @@ export interface AppSettings {
   assessment_severity_weights: Record<string, number>;
   assessment_score_good: number;
   assessment_score_warn: number;
+  assessments_include_recovery?: boolean;
   workload_health_weights?: Record<string, number>;
   workload_nightly_refresh?: boolean;
   architecture_category_colors: Record<string, string>;
@@ -12302,6 +13331,12 @@ export interface AppSettings {
   arg_rate_limit_enabled?: boolean;
   arg_max_queries_per_window?: number;
   arg_rate_window_seconds?: number;
+  // Performance Profiler durable-fleet and process-wide Azure Monitor safety controls.
+  perfprofile_fleet_concurrency?: number;
+  perfprofile_fleet_start_delay_ms?: number;
+  perfprofile_metric_concurrency?: number;
+  perfprofile_metric_max_attempts?: number;
+  perfprofile_workload_timeout_s?: number;
 }
 
 export interface ChatgptStatus {
@@ -12408,6 +13443,14 @@ export interface Workload {
   // Workload Group ("application" / service family) this workload belongs to, or "" / undefined
   // when ungrouped. See the WorkloadGroup type + /workloads/groups endpoints.
   group_id?: string;
+}
+
+export interface WorkloadBulkTrashResult {
+  requested: number;
+  deleted: number;
+  already_trashed: number;
+  not_found: number;
+  deleted_ids: string[];
 }
 
 export interface WorkloadEvidence {
@@ -12761,6 +13804,8 @@ export interface SculptConfig {
   confidence_floor?: number;
   max_ai_calls?: number;
   naming_hint?: string;
+  /** Review-only: exclude candidates containing fewer resources, without rerunning AI. */
+  min_candidate_resources?: number;
   // ---- Seed mode (scope_kind="resource"): one resource id -> one workload ----
   seed_resource_id?: string;
   max_hops?: number;
@@ -13234,6 +14279,7 @@ export interface ArchNode {
   subscription_id: string;
   location: string;
   sku: string;
+  pricing_hint?: Record<string, unknown>;
   meta: Record<string, string>;
   group_id: string;
   x: number;
@@ -13284,6 +14330,68 @@ export interface Architecture {
   updated_by?: string;
   created_at?: string;
   updated_at?: string;
+}
+
+export type ArchitecturePriceStatus =
+  | "priced_monthly"
+  | "rate_only"
+  | "free"
+  | "ambiguous"
+  | "unmatched"
+  | "not_applicable"
+  | "unavailable";
+
+export interface ArchitecturePriceComponent {
+  meter_id: string;
+  service_name: string;
+  product_name: string;
+  sku_name: string;
+  meter_name: string;
+  retail_price: number;
+  unit_of_measure: string;
+  effective_start_date: string;
+  fixed_baseline: boolean;
+}
+
+export interface ArchitecturePriceCandidate {
+  meter_id: string;
+  product_name: string;
+  sku_name: string;
+  component_count: number;
+  components: ArchitecturePriceComponent[];
+}
+
+export interface ArchitectureNodePrice {
+  node_id: string;
+  arm_type: string;
+  status: ArchitecturePriceStatus;
+  currency: string;
+  region: string;
+  monthly_estimate: number | null;
+  quantity: number | null;
+  confidence: "none" | "low" | "medium" | "high";
+  components: ArchitecturePriceComponent[];
+  candidates: ArchitecturePriceCandidate[];
+  reason: string;
+  stale: boolean;
+}
+
+export interface ArchitecturePricing {
+  architecture_id: string;
+  source: "azure_retail_prices";
+  currency: string;
+  as_of: string;
+  monthly_hours: number;
+  stale: boolean;
+  partial: boolean;
+  error: string;
+  nodes: ArchitectureNodePrice[];
+  summary: {
+    known_fixed_monthly: number;
+    node_count: number;
+    covered_count: number;
+    counts: Partial<Record<ArchitecturePriceStatus, number>>;
+  };
 }
 
 export type ArchitectureState = "draft" | "in_review" | "ready" | "archived";
@@ -13496,6 +14604,57 @@ export interface KnowMeAsset {
   content_type: string;
   size: number;
 }
+export interface SlaExpression {
+  operator: "component" | "all" | "any";
+  component_id?: string;
+  children?: SlaExpression[];
+}
+export interface SlaJourney {
+  name: string;
+  boundary: string;
+  expression: SlaExpression;
+  exclusions: { component_id: string; reason: string }[];
+  independent_failures: true;
+  assumptions: string[];
+  external_dependencies: string[];
+}
+export interface SlaComponent {
+  component_id: string;
+  resource_id: string;
+  name: string;
+  resource_type: string;
+  location: string;
+  sku: string | null;
+  configuration: Record<string, unknown>;
+  status: "resolved" | "unresolved" | "unsupported" | "ineligible";
+  availability: string | null;
+  rule_id: string | null;
+  operation: string | null;
+  source_url: string | null;
+  source_version: string | null;
+  measurement_basis: string | null;
+  reason: string | null;
+  assumptions: string[];
+}
+export interface SlaSnapshot {
+  status: "calculated" | "needs_review" | "incomplete";
+  percentage: string | null;
+  availability: string | null;
+  calculated_at: string | null;
+  configuration_observed_at: string | null;
+  source_fingerprint: string;
+  input_fingerprint: string;
+  inventory_complete: boolean;
+  catalog_version: string;
+  calculator_version: string;
+  schema_version: string;
+  reviewed_by: string | null;
+  reviewed_at: string | null;
+  disclaimer: string;
+  unresolved: string[];
+  components: SlaComponent[];
+  model: SlaJourney | null;
+}
 export interface KnowMe {
   id: string;
   architecture_id: string;
@@ -13506,6 +14665,8 @@ export interface KnowMe {
   sections: KnowMeSection[];
   todos: KnowMeTodo[];
   assets?: KnowMeAsset[];
+  composite_sla?: SlaSnapshot | null;
+  deleted_at?: string | null;
   status: "draft" | "in_review" | "published" | "archived";
   is_reference?: boolean;
   source: "ai" | "edited" | "hybrid";
@@ -13533,6 +14694,7 @@ export interface KnowMeResponse {
   markdown: string;
   has_memory?: boolean;
   memory_updated_at?: string;
+  composite_sla_stale?: boolean;
   architecture: ArchitectureMemoryResponse["architecture"];
 }
 export interface KnowMeRevision {
@@ -13550,6 +14712,7 @@ export interface KnowMeRevision {
 export interface KnowMeRevisionContent extends KnowMeRevision {
   sections: KnowMeSection[];
   todos: KnowMeTodo[];
+  composite_sla?: SlaSnapshot | null;
 }
 /** One Know-Me document in the standalone index (a workload may have many). */
 export interface KnowMeDocument {
@@ -15117,9 +16280,9 @@ export interface DeepInvestigationSummary {
 export interface StreamHandlers {
   onToken: (text: string) => void;
   onStatus?: (data: { phase: string; message: string }) => void;
-  onToolStart?: (data: { tool_name: string; arguments: unknown; agent?: string; agent_name?: string; agent_icon?: string; node_id?: string; discovery?: boolean }) => void;
-  onToolResult?: (data: { tool_name: string; duration_ms: number; summary?: string; is_error?: boolean; agent?: string; agent_name?: string; agent_icon?: string; node_id?: string; discovery?: boolean }) => void;
-  onApprovalRequired?: (data: { tool_name: string; arguments: unknown }) => void;
+  onToolStart?: (data: { tool_call_id?: string; tool_name: string; arguments: unknown; agent?: string; agent_name?: string; agent_icon?: string; node_id?: string; discovery?: boolean }) => void;
+  onToolResult?: (data: { tool_call_id?: string; tool_name: string; duration_ms: number; summary?: string; is_error?: boolean; agent?: string; agent_name?: string; agent_icon?: string; node_id?: string; discovery?: boolean; artifacts?: Array<{ artifact_id: string; label: string; filename: string; url: string; kind: string }> }) => void;
+  onApprovalRequired?: (data: { tool_call_id?: string; tool_name: string; arguments: unknown }) => void;
   onPhase?: (data: { phase: string; label: string; summary: string | null }) => void;
   onHypothesis?: (data: HypothesisNode) => void;
   onHypothesisStatus?: (data: { id: string; status: string; evidence: string; agent?: string }) => void;
@@ -16122,3 +17285,296 @@ export type IamManagedIdentity = {
   }[];
 };
 // <<< iam-escalation-types
+
+// ==================================================================== Recovery Readiness
+/** Recover from WHAT, in HOW LONG, losing HOW MUCH.
+ *
+ *  Three states in here are routinely confused, and the UI must never render them alike:
+ *   - `none`      no recovery path exists for that failure. Worse than slow, not a degree of slow.
+ *   - `unknown`   a source could not be read. NOT a claim that the resource is unprotected.
+ *   - absent      the scenario does not apply to this resource type. Never a pass. */
+export type ResiliencyScenario =
+  | "instance_loss" | "zone_loss" | "region_loss" | "data_corruption" | "accidental_delete";
+
+export type ResiliencyRtoClass =
+  | "automatic" | "minutes" | "hours" | "day_plus" | "none" | "unknown";
+
+export type ResiliencyRpoState = "known" | "none" | "unknown";
+export type ResiliencyConfidence = "high" | "medium" | "low";
+export type ResiliencyBreachState = "met" | "breached" | "undetermined" | "not_applicable";
+
+export type ResiliencyScope = {
+  workloadId?: string | null;
+  subscriptionId?: string | null;
+  managementGroupId?: string | null;
+  connectionId?: string | null;
+};
+
+export function resiliencyScopeQuery(
+  scope: ResiliencyScope, extra: Record<string, string | number | boolean | undefined> = {},
+): string {
+  const params = new URLSearchParams();
+  if (scope.workloadId) params.set("workload_id", scope.workloadId);
+  if (scope.subscriptionId) params.set("subscription_id", scope.subscriptionId);
+  if (scope.managementGroupId) params.set("management_group_id", scope.managementGroupId);
+  if (scope.connectionId) params.set("connection_id", scope.connectionId);
+  for (const [key, value] of Object.entries(extra)) {
+    if (value !== undefined && value !== null && value !== "") params.set(key, String(value));
+  }
+  const qs = params.toString();
+  return qs ? `?${qs}` : "";
+}
+
+export type ResiliencyEvidence = { kind: string; detail: string; source: string };
+
+/**
+ * A condition under which the verdict stops being true.
+ *
+ * Deliberately not an evidence item: evidence explains why the answer is what it is, a
+ * caveat explains when it is worthless. Only accidental deletion carries these.
+ */
+export type ResiliencyCaveat = {
+  kind: "blast_radius" | "narrow_window" | "not_self_service" | "mitigation";
+  severity: "critical" | "warning" | "info";
+  detail: string;
+  doc_url: string;
+};
+
+export type ResiliencyProvenance = {
+  source: string; collected_at: string; unreadable: boolean; reason: string; truncated?: boolean;
+};
+
+export type ResiliencyVerdict = {
+  scenario: ResiliencyScenario;
+  /** Only meaningful when `rpo_state === "known"`. */
+  rpo_minutes: number | null;
+  rpo_state: ResiliencyRpoState;
+  rto_class: ResiliencyRtoClass;
+  /** A RANGE, never a midpoint, and only ever present alongside `rto_assumptions`. */
+  rto_band_minutes: [number, number] | null;
+  rto_assumptions: string[];
+  basis: ResiliencyEvidence[];
+  confidence: ResiliencyConfidence;
+  /** Radii this answer does not cover. Deletion only; never merged into `basis`. */
+  caveats?: ResiliencyCaveat[];
+  /** False means the scenario cannot happen to this resource type. Render as absent. */
+  applicable: boolean;
+  target?: { rpo_minutes?: number; rto_class?: ResiliencyRtoClass } | null;
+  breach?: { state: ResiliencyBreachState; rpo: boolean; rto: boolean;
+             target_rpo_minutes?: number; target_rto_class?: string; reason?: string };
+};
+
+export type ResiliencyResource = {
+  id: string; name: string; type: string; location: string;
+  resource_group: string; subscription_id: string;
+  workload_id?: string;
+  tier?: string; tier_label?: string; tier_source?: string;
+  redundancy: { zones: string[]; zone_redundant: boolean | null; replication: string; sku: string };
+  protection: {
+    /** THREE states, never a boolean — a boolean cannot express "we did not look". */
+    state: "protected" | "not_protected" | "unknown";
+    reason: string; policy_name: string; frequency: string;
+    retention_days: number | null; recovery_point_age_hours: number | null;
+    vault_redundancy: string;
+    native_backup: { kind: string; interval_minutes?: number | null; retention_days?: number | null;
+                     geo_redundant?: boolean };
+  };
+  dr: { replicated: boolean; rpo_seconds: number | null; replication_health: string;
+        last_test_failover_age_days: number | null };
+  /** Management locks covering this resource, including inherited ones. Prevention, not recovery. */
+  locks?: { level: string; scope_kind: string; name: string }[];
+  advisor: Record<string, unknown>[];
+  findings: Record<string, unknown>[];
+  size_gb: number | null;
+  verdicts: Record<string, ResiliencyVerdict>;
+  worst: { rto_class: ResiliencyRtoClass; scenario: string; undetermined: number;
+           no_recovery_path: string[] };
+  demo_profile?: string;
+};
+
+export type ResiliencyScenarioCounts = {
+  determined: number; no_recovery_path: number; undetermined: number;
+  not_applicable: number; total: number;
+};
+
+export type ResiliencySummary = {
+  resources: number;
+  by_scenario: Record<string, ResiliencyScenarioCounts>;
+  protection: Record<string, number>;
+  worst: { scenario: string; no_recovery_path: number };
+};
+
+export type ResiliencyBreach = {
+  resource_id: string; name: string; type: string; scenario: ResiliencyScenario; tier: string;
+  rto_class: ResiliencyRtoClass; rpo_minutes: number | null; rpo_state: ResiliencyRpoState;
+  target: { rpo_minutes?: number; rto_class?: string } | null;
+  no_recovery_path: boolean; total_data_loss: boolean; basis: ResiliencyEvidence[];
+};
+
+export type ResiliencyWorkloadScenario = {
+  applicable: boolean;
+  rto_class: ResiliencyRtoClass;
+  rpo_minutes: number | null;
+  rpo_state: ResiliencyRpoState;
+  weakest_link: { id: string; name: string; type: string; reason: string;
+                  shared_platform?: boolean } | null;
+  /** The aggregate is computed over DETERMINED components only; the rest are counted here
+   *  so a quarter-measured application cannot look fully assessed. */
+  coverage: { determined: number; total: number };
+  /** Conservative assumptions travel in the payload, not just in UI copy, because an
+   *  exported figure has to carry the caveats that qualify it. */
+  assumptions: string[];
+  no_recovery_path?: { id: string; name: string }[];
+};
+
+export type ResiliencyWorkload = {
+  workload_id: string; name: string; tier: string; components: number;
+  scenarios: Record<string, ResiliencyWorkloadScenario>;
+  worst: { scenario: string; rto_class: ResiliencyRtoClass;
+           weakest_link: { id: string; name: string } | null };
+};
+
+export type ResiliencySnapshot = {
+  schema_version: number;
+  /** False is the UI's cue to offer the Analyze button rather than render zeros. */
+  report_exists: boolean;
+  generated_at: string;
+  demo: boolean;
+  reason: string;
+  scope: { scope_kind: string; scope_id: string; subscriptions: string[] };
+  summary: ResiliencySummary;
+  resources: ResiliencyResource[];
+  breaches: ResiliencyBreach[];
+  breach_summary: Record<string, number>;
+  workloads: ResiliencyWorkload[];
+  provenance: Record<string, ResiliencyProvenance>;
+  targets_acknowledged?: boolean;
+  /** Resolved per read from the connection's cloud; "" when the cloud is unrecognized. */
+  portal_host?: string;
+  truncation: Record<string, { exported: number; known_total: number }>;
+};
+
+export type ResiliencySummaryResponse = {
+  report_exists: boolean; generated_at: string; demo: boolean;
+  summary: ResiliencySummary; breach_summary: Record<string, number>;
+  provenance: Record<string, ResiliencyProvenance>; targets_acknowledged: boolean;
+};
+
+export type ResiliencyResourcesResponse = {
+  report_exists: boolean; generated_at: string; total: number;
+  rows: ResiliencyResource[]; provenance: Record<string, ResiliencyProvenance>;
+};
+
+export type ResiliencyBreachesResponse = {
+  report_exists: boolean; rows: ResiliencyBreach[]; summary: Record<string, number>;
+  targets_acknowledged: boolean;
+};
+
+export type ResiliencyMeta = {
+  scenarios: { id: ResiliencyScenario; label: string; description: string;
+               redundancy_helps: boolean }[];
+  rto_classes: { id: ResiliencyRtoClass; label: string }[];
+  rpo_states: string[];
+  confidence_levels: string[];
+};
+
+export type ResiliencyJob = {
+  key: string; status: "running" | "done" | "error"; started_at: string;
+  finished_at?: string; error: string;
+  messages: { level: string; message: string; at: string }[];
+};
+
+export type ResiliencyTier = {
+  id: string; label: string;
+  scenarios: Record<string, { rto_class: ResiliencyRtoClass; rpo_minutes: number }>;
+};
+
+export type ResiliencyReference = {
+  version: number; updated_at: string; updated_by: string;
+  restore_rates: Record<string, number>;
+  mechanism_minutes: Record<string, number>;
+  tiers: ResiliencyTier[];
+  default_tier: string;
+  /** Defaults are usable on screen immediately; an EXPORT that quotes them is refused until
+   *  a person has agreed them. */
+  targets_acknowledged: boolean;
+  targets_acknowledged_by: string;
+  targets_acknowledged_at: string;
+};
+
+/** RPO figures describe only resources whose recovery point could be MEASURED. `excluded`
+ *  is how many they leave out, and must be rendered wherever the median is. */
+export type ResiliencyRpoSpread = {
+  known: number[];
+  count_known: number;
+  none: number;
+  unknown: number;
+  not_applicable: number;
+  best_minutes: number | null;
+  median_minutes: number | null;
+  worst_minutes: number | null;
+  excluded: number;
+};
+
+export type ResiliencyTypeRow = {
+  type: string;
+  scenario: string;
+  resources: number;
+  not_applicable: number;
+  worst_rto_class: ResiliencyRtoClass;
+  /** Its own bucket, never folded into a percentage. */
+  undetermined: number;
+  rto_counts: Record<string, number>;
+  rpo: ResiliencyRpoSpread;
+  no_recovery_path: number;
+  breached: number;
+  dominant_reason: string;
+  dominant_reason_count: number;
+  examples: string[];
+};
+
+export type ResiliencyReasonRow = {
+  scenario: string; reason: string; kind: string; source: string;
+  resources: number; types: string[]; no_recovery_path: number; examples: string[];
+};
+
+export type ResiliencyAnalysis = {
+  report_exists: boolean;
+  generated_at?: string;
+  resources: number;
+  by_type: ResiliencyTypeRow[];
+  rto_distribution: Record<string, Record<string, number>>;
+  rpo_distribution: Record<string, ResiliencyRpoSpread>;
+  reasons: ResiliencyReasonRow[];
+  worst_offenders: {
+    id: string; name: string; type: string; location: string;
+    no_recovery_path: string[]; breached: string[]; undetermined: number; reasons: string[];
+  }[];
+  /** Redundant resources whose answer for corruption/deletion is at least two RTO classes
+   *  worse than their answer for infrastructure loss. The product's thesis as a list. */
+  redundancy_gap: {
+    id: string; name: string; type: string; replication: string;
+    zone_redundant: boolean | null; worse_for: string[];
+    infra_rto_class: ResiliencyRtoClass; logical_rto_class: ResiliencyRtoClass;
+    unrecoverable: boolean; reason: string;
+  }[];
+};
+
+export type ResiliencyTrendPoint = {
+  generated_at: string; resources: number; no_recovery_path: number;
+  undetermined: number; breaches: number;
+  protected: number; not_protected: number; protection_unknown: number;
+};
+
+export type ResiliencyTrend = {
+  /** False for a single point: one measurement is not a direction. */
+  available: boolean;
+  points: ResiliencyTrendPoint[];
+  reason?: string;
+  first?: ResiliencyTrendPoint;
+  last?: ResiliencyTrendPoint;
+  deltas?: Record<string, number>;
+  /** True when "fewer unrecoverable" came from losing visibility, not gaining protection. */
+  reading_degraded?: boolean;
+  caveat?: string;
+};

@@ -27,10 +27,8 @@ from __future__ import annotations
 import io
 import json
 import logging
-import os
 import re
-import tempfile
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from html import escape
 from pathlib import Path
@@ -41,6 +39,7 @@ from sqlalchemy import DateTime, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
+from app.core import jsonstore
 from app.models import (
     AssessmentFindingState,
     AssessmentWaiver,
@@ -93,6 +92,10 @@ FILE_SECTIONS: tuple[FileSection, ...] = (
     # --- Core configuration (no secrets) -----------------------------------------
     FileSection("app_settings", "Application settings", "config", "app_settings.json"),
     FileSection("auth_settings", "Security policy settings", "config", "auth_settings.json"),
+    # Network access control (IP allowlist). Carries no secrets — a CIDR is not a credential —
+    # but it IS security-relevant configuration, so losing it on a restore would silently drop
+    # the allowlist and leave the restored deployment open.
+    FileSection("network_access", "Network access control (IP allowlist)", "config", "network_access.json"),
     FileSection("ai_prompts", "System prompt overrides", "config", "ai_prompts.json"),
     FileSection("custom_agents", "Sub agents", "config", "custom_agents.json", "agents"),
     FileSection("workbooks", "Workbooks", "config", "workbooks.json", "workbooks"),
@@ -144,27 +147,7 @@ def _data_path(filename: str) -> Path:
 def _read_json(filename: str) -> Any:
     """Parse a ``.data`` JSON file, or None when missing/unreadable."""
     path = _data_path(filename)
-    if not path.exists():
-        return None
-    try:
-        return json.loads(path.read_text(encoding="utf-8"))
-    except (json.JSONDecodeError, OSError) as exc:
-        logger.warning("Backup: could not read %s: %s", filename, exc)
-        return None
-
-
-def _atomic_write_json(filename: str, data: Any) -> None:
-    """Write ``data`` to a ``.data`` file atomically (temp file + os.replace)."""
-    path = _data_path(filename)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    fd, tmp = tempfile.mkstemp(dir=str(path.parent), suffix=".tmp")
-    try:
-        with os.fdopen(fd, "w", encoding="utf-8") as fh:
-            json.dump(data, fh, indent=2)
-        os.replace(tmp, path)
-    finally:
-        if os.path.exists(tmp):
-            os.remove(tmp)
+    return jsonstore.read_json(path, None)
 
 
 def _collection(data: Any, key: str) -> dict[str, Any]:
@@ -434,71 +417,98 @@ def _preserve_secrets(spec: FileSection, incoming: dict[str, Any], local: dict[s
     return out
 
 
+def _defuse_network_access(spec: FileSection, payload: Any) -> Any:
+    """Never let a RESTORE be the thing that locks an operator out of the application.
+
+    A backup taken on one deployment carries that deployment's allowlist. Restoring it
+    somewhere else — different office, different egress IP, a colleague's tenant — with
+    ``mode: enforce`` intact would start refusing the very administrator performing the
+    restore, on the very next request, from a screen they can no longer load.
+
+    The rules are preserved exactly; only the mode is downgraded to ``monitor``, so the
+    restored policy is visible and one click away from being enforced once its ranges have
+    been confirmed against the new environment.
+    """
+    if spec.id != "network_access" or not isinstance(payload, dict):
+        return payload
+    if payload.get("mode") != "enforce":
+        return payload
+    defused = dict(payload)
+    defused["mode"] = "monitor"
+    defused["confirm_by"] = None
+    logger.warning(
+        "Restore: network access was 'enforce' in the backup; imported as 'monitor' so the "
+        "restore cannot lock out the operator. Review the ranges, then enforce."
+    )
+    return defused
+
+
 def _restore_file(spec: FileSection, payload: Any, mode: str) -> dict[str, int]:
     """Apply a file section's payload to disk under the chosen conflict mode."""
     if payload is None:
         return {"created": 0, "updated": 0, "skipped": 0}
-    local = _read_json(spec.filename)
-    local_exists = local is not None
-
-    # ---- Document section (whole-file blob) -------------------------------------
-    if not spec.collection_key:
-        if spec.secret_kind == "llm_config":
-            return _restore_llm_config(spec, payload, mode, local)
-        if local_exists and mode == "skip":
-            return {"created": 0, "updated": 0, "skipped": 1}
-        if mode == "merge" and isinstance(local, dict) and isinstance(payload, dict):
-            merged = {**local, **payload}
-            _atomic_write_json(spec.filename, merged)
-        else:  # overwrite (or no local yet)
-            _atomic_write_json(spec.filename, payload)
-        return {"created": 0 if local_exists else 1, "updated": 1 if local_exists else 0, "skipped": 0}
-
-    # ---- Collection section (id-keyed) ------------------------------------------
-    incoming = _collection(payload, spec.collection_key)
-    base = local if isinstance(local, dict) else {}
-    current = dict(_collection(base, spec.collection_key))
-    created = updated = skipped = 0
-    for cid, record in incoming.items():
-        exists = cid in current
-        if exists and mode == "skip":
-            skipped += 1
-            continue
-        if isinstance(record, dict) and spec.secret_kind and exists and isinstance(current.get(cid), dict):
-            record = _preserve_secrets(spec, record, current[cid])
-        current[cid] = record
-        if exists:
-            updated += 1
-        else:
-            created += 1
-    out = dict(base)
-    out[spec.collection_key] = current
-    _atomic_write_json(spec.filename, out)
-    return {"created": created, "updated": updated, "skipped": skipped}
-
-
-def _restore_llm_config(spec: FileSection, payload: Any, mode: str, local: Any) -> dict[str, int]:
-    """Restore the llm_config document, preserving locally-stored provider api keys."""
-    if not isinstance(payload, dict):
+    payload = _defuse_network_access(spec, payload)
+    if not spec.collection_key and spec.secret_kind == "llm_config" and not isinstance(payload, dict):
         return {"created": 0, "updated": 0, "skipped": 0}
-    local_exists = local is not None
-    if local_exists and mode == "skip":
-        return {"created": 0, "updated": 0, "skipped": 1}
-    base = local if isinstance(local, dict) else {}
-    if mode == "merge":
-        merged = {**base, **payload}
-    else:
-        merged = dict(payload)
-    # Preserve local provider api keys (never overwrite a real key with a blank).
-    local_providers = base.get("providers") if isinstance(base.get("providers"), dict) else {}
-    in_providers = merged.get("providers") if isinstance(merged.get("providers"), dict) else {}
-    for name, prov in in_providers.items():
-        if isinstance(prov, dict) and not prov.get("api_key"):
-            lp = local_providers.get(name)
-            if isinstance(lp, dict) and lp.get("api_key"):
-                prov["api_key"] = lp["api_key"]
-    _atomic_write_json(spec.filename, merged)
-    return {"created": 0 if local_exists else 1, "updated": 1 if local_exists else 0, "skipped": 0}
+    result = {"created": 0, "updated": 0, "skipped": 0}
+
+    def _mutate(local: Any) -> Any:
+        local_exists = local is not None
+        if not spec.collection_key:
+            if spec.secret_kind == "llm_config":
+                if not isinstance(payload, dict):
+                    return local
+                if local_exists and mode == "skip":
+                    result["skipped"] = 1
+                    return local
+                base = local if isinstance(local, dict) else {}
+                merged = {**base, **payload} if mode == "merge" else dict(payload)
+                local_providers = (
+                    base.get("providers") if isinstance(base.get("providers"), dict) else {}
+                )
+                incoming_providers = (
+                    merged.get("providers")
+                    if isinstance(merged.get("providers"), dict)
+                    else {}
+                )
+                for name, provider in incoming_providers.items():
+                    if isinstance(provider, dict) and not provider.get("api_key"):
+                        local_provider = local_providers.get(name)
+                        if isinstance(local_provider, dict) and local_provider.get("api_key"):
+                            provider["api_key"] = local_provider["api_key"]
+                result["updated" if local_exists else "created"] = 1
+                return merged
+            if local_exists and mode == "skip":
+                result["skipped"] = 1
+                return local
+            result["updated" if local_exists else "created"] = 1
+            if mode == "merge" and isinstance(local, dict) and isinstance(payload, dict):
+                return {**local, **payload}
+            return payload
+
+        incoming = _collection(payload, spec.collection_key)
+        base = local if isinstance(local, dict) else {}
+        current = dict(_collection(base, spec.collection_key))
+        for cid, record in incoming.items():
+            exists = cid in current
+            if exists and mode == "skip":
+                result["skipped"] += 1
+                continue
+            if (
+                isinstance(record, dict)
+                and spec.secret_kind
+                and exists
+                and isinstance(current.get(cid), dict)
+            ):
+                record = _preserve_secrets(spec, record, current[cid])
+            current[cid] = record
+            result["updated" if exists else "created"] += 1
+        out = dict(base)
+        out[spec.collection_key] = current
+        return out
+
+    jsonstore.mutate_json(_data_path(spec.filename), None, _mutate)
+    return result
 
 
 # ------------------------------------------------------------------- db collect/restore

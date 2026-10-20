@@ -12,6 +12,7 @@ from sqlalchemy import (
     Boolean,
     JSON,
     DateTime,
+    Float,
     ForeignKey,
     Index,
     Integer,
@@ -62,6 +63,44 @@ class Chat(Base):
     )
 
 
+class RecentItem(Base):
+    """A user's bounded, cross-device navigation history.
+
+    This is deliberately separate from ``AuditLog``: viewing a page is personalization,
+    not a security event.  The API accepts only typed, allowlisted internal routes and
+    re-applies the current permission set on every read, so a role downgrade cannot turn
+    an old recent entry into an authorization bypass.
+    """
+
+    __tablename__ = "recent_items"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=_uuid)
+    tenant_id: Mapped[str] = mapped_column(String(128), index=True)
+    user_id: Mapped[str] = mapped_column(String(128), index=True)
+    kind: Mapped[str] = mapped_column(String(48))
+    item_key: Mapped[str] = mapped_column(String(256))
+    title: Mapped[str] = mapped_column(String(256))
+    subtitle: Mapped[str] = mapped_column(String(256), default="")
+    route: Mapped[str] = mapped_column(String(1024))
+    connection_id: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    workload_id: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    pinned: Mapped[bool] = mapped_column(Boolean, default=False)
+    visit_count: Mapped[int] = mapped_column(Integer, default=1)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
+    last_visited_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
+
+    __table_args__ = (
+        UniqueConstraint(
+            "tenant_id", "user_id", "kind", "item_key",
+            name="uq_recent_item_user_kind_key",
+        ),
+        Index(
+            "ix_recent_items_user_visited",
+            "tenant_id", "user_id", "last_visited_at",
+        ),
+    )
+
+
 class Message(Base):
     __tablename__ = "messages"
 
@@ -108,6 +147,106 @@ class ToolCall(Base):
     duration_ms: Mapped[int | None] = mapped_column(Integer, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
 
+    __table_args__ = (
+        Index("ix_tool_calls_tenant_created", "tenant_id", "created_at"),
+        Index(
+            "ix_tool_calls_tenant_status_created",
+            "tenant_id", "status", "created_at",
+        ),
+    )
+
+
+class DurableJobSlot(Base):
+    """The single coordination row for one tenant/feature/key job scope.
+
+    The slot makes lease acquisition atomic on both PostgreSQL and SQLite. ``current_job_id``
+    points at the latest attempt while the lease fields fence the replica allowed to execute it.
+    """
+
+    __tablename__ = "durable_job_slots"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=_uuid)
+    tenant_id: Mapped[str] = mapped_column(String(128))
+    feature: Mapped[str] = mapped_column(String(64))
+    job_key: Mapped[str] = mapped_column(String(512))
+    current_job_id: Mapped[str | None] = mapped_column(
+        ForeignKey("durable_jobs.id", ondelete="SET NULL"), nullable=True
+    )
+    lease_owner: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    lease_token: Mapped[str | None] = mapped_column(String(36), nullable=True)
+    lease_expires_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
+
+    __table_args__ = (
+        UniqueConstraint(
+            "tenant_id", "feature", "job_key", name="uq_durable_job_slot_scope"
+        ),
+        Index("ix_durable_job_slots_lease", "lease_expires_at"),
+    )
+
+
+class DurableJob(Base):
+    """Durable metadata for one generic job or chat turn execution."""
+
+    __tablename__ = "durable_jobs"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=_uuid)
+    tenant_id: Mapped[str] = mapped_column(String(128))
+    feature: Mapped[str] = mapped_column(String(64))
+    job_key: Mapped[str] = mapped_column(String(512))
+    status: Mapped[str] = mapped_column(String(16), default="running")
+    owner_id: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    lease_token: Mapped[str | None] = mapped_column(String(36), nullable=True)
+    lease_expires_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    lease_heartbeat_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    cancel_requested: Mapped[bool] = mapped_column(Boolean, default=False)
+    attempt: Mapped[int] = mapped_column(Integer, default=1)
+    next_event_seq: Mapped[int] = mapped_column(Integer, default=0)
+    metadata_json: Mapped[dict] = mapped_column(JSON, default=dict)
+    result_json: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    started_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
+    finished_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
+
+    __table_args__ = (
+        Index(
+            "ix_durable_jobs_scope_started",
+            "tenant_id", "feature", "job_key", "started_at",
+        ),
+        Index("ix_durable_jobs_active", "tenant_id", "feature", "status"),
+        Index("ix_durable_jobs_cleanup", "status", "expires_at"),
+    )
+
+
+class DurableJobEvent(Base):
+    """One ordered, replayable progress or SSE event for a durable job."""
+
+    __tablename__ = "durable_job_events"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=_uuid)
+    job_id: Mapped[str] = mapped_column(
+        ForeignKey("durable_jobs.id", ondelete="CASCADE"), index=True
+    )
+    seq: Mapped[int] = mapped_column(Integer)
+    event_type: Mapped[str] = mapped_column(String(64))
+    data_json: Mapped[dict] = mapped_column(JSON, default=dict)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
+
+    __table_args__ = (
+        UniqueConstraint("job_id", "seq", name="uq_durable_job_event_seq"),
+        Index("ix_durable_job_events_job_seq", "job_id", "seq"),
+    )
+
 
 class Approval(Base):
     __tablename__ = "approvals"
@@ -121,6 +260,13 @@ class Approval(Base):
     reason: Mapped[str | None] = mapped_column(Text, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
     decided_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+    __table_args__ = (
+        Index(
+            "ix_approvals_tenant_decision_created",
+            "tenant_id", "decision", "created_at",
+        ),
+    )
 
 
 class AuditLog(Base):
@@ -136,6 +282,33 @@ class AuditLog(Base):
     model: Mapped[str | None] = mapped_column(String(128), nullable=True)
     metadata_json: Mapped[dict] = mapped_column(JSON, default=dict)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
+
+
+class IpBlockEvent(Base):
+    """Aggregated record of requests refused (or that would be refused) by the IP allowlist.
+
+    Deliberately NOT the audit log. A single internet scanner produces tens of thousands of
+    hits, which would bury genuine operator actions and make the audit view useless; this table
+    also needs its own retention and its own pagination for the "Recent blocks" panel.
+
+    One row per source IP per flush window, not one row per request, for the same reason.
+
+    ``mode`` distinguishes a real block from a monitor-mode *would-be* block. Those two are
+    opposite facts about the system and must never be conflated — a monitor-mode entry means
+    "this WOULD have been refused if you were enforcing", and reading it as a block would make
+    the whole point of monitor mode misleading.
+    """
+
+    __tablename__ = "ip_block_events"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=_uuid)
+    ip: Mapped[str] = mapped_column(String(64), index=True)
+    # "enforce" = actually refused. "monitor" = would have been refused.
+    mode: Mapped[str] = mapped_column(String(16), default="enforce", index=True)
+    hits: Mapped[int] = mapped_column(Integer, default=1)
+    last_path: Mapped[str] = mapped_column(String(512), default="")
+    first_seen: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
+    last_seen: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now, index=True)
 
 
 class AlertManagerChange(Base):
@@ -293,6 +466,17 @@ class Usage(Base):
     completion_tokens: Mapped[int] = mapped_column(Integer, default=0)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
 
+    __table_args__ = (
+        Index(
+            "ix_usage_tenant_provider_model",
+            "tenant_id", "provider", "model",
+        ),
+        Index(
+            "ix_usage_tenant_model_created",
+            "tenant_id", "model", "created_at",
+        ),
+    )
+
 
 class ScheduledTask(Base):
     """A recurring automation: trigger → custom agent → tools → notify.
@@ -332,10 +516,20 @@ class ScheduledTask(Base):
     completed_runs: Mapped[int] = mapped_column(Integer, default=0)
     last_run_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     next_run_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    lease_owner: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    lease_token: Mapped[str | None] = mapped_column(String(36), nullable=True)
+    lease_expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    lease_heartbeat_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    lease_occurrence_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     deleted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     created_by: Mapped[str] = mapped_column(String(128), default="")
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
+
+    __table_args__ = (
+        Index("ix_scheduled_tasks_due_claim", "status", "next_run_at", "lease_expires_at"),
+        Index("ix_scheduled_tasks_occurrence_claim", "status", "lease_occurrence_at", "lease_expires_at"),
+    )
 
 
 class TaskRun(Base):
@@ -393,6 +587,178 @@ class MissionRun(Base):
     ended_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     duration_ms: Mapped[int | None] = mapped_column(Integer, nullable=True)
     deleted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)  # soft-delete (trash)
+
+
+class PerfProfileFleetBatch(Base):
+    """Durable server-owned Performance Profiler fleet request.
+
+    The browser submits one batch and may then disappear; the worker advances the item rows from
+    SQL, so queued workloads survive navigation, reloads, and process restarts.
+    """
+
+    __tablename__ = "perf_profile_fleet_batches"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=_uuid)
+    tenant_id: Mapped[str] = mapped_column(String(128), index=True)
+    idempotency_key: Mapped[str] = mapped_column(String(128))
+    status: Mapped[str] = mapped_column(String(16), default="queued", index=True)
+    window: Mapped[str] = mapped_column(String(64), default="P1D")
+    start_time: Mapped[str] = mapped_column(String(64), default="")
+    end_time: Mapped[str] = mapped_column(String(64), default="")
+    total: Mapped[int] = mapped_column(Integer, default=0)
+    completed: Mapped[int] = mapped_column(Integer, default=0)
+    succeeded: Mapped[int] = mapped_column(Integer, default=0)
+    partial: Mapped[int] = mapped_column(Integer, default=0)
+    failed: Mapped[int] = mapped_column(Integer, default=0)
+    cancelled: Mapped[int] = mapped_column(Integer, default=0)
+    cancel_requested: Mapped[bool] = mapped_column(Boolean, default=False)
+    error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    triggered_by: Mapped[str] = mapped_column(String(128), default="")
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
+    started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    ended_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+    __table_args__ = (
+        UniqueConstraint("tenant_id", "idempotency_key", name="uq_perf_fleet_tenant_idempotency"),
+        Index("ix_perf_fleet_tenant_created", "tenant_id", "created_at"),
+        Index("ix_perf_fleet_status_created", "status", "created_at"),
+    )
+
+
+class PerfProfileFleetItem(Base):
+    """One workload within a durable profiler fleet batch."""
+
+    __tablename__ = "perf_profile_fleet_items"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=_uuid)
+    batch_id: Mapped[str] = mapped_column(
+        ForeignKey("perf_profile_fleet_batches.id", ondelete="CASCADE"), index=True
+    )
+    tenant_id: Mapped[str] = mapped_column(String(128), index=True)
+    workload_id: Mapped[str] = mapped_column(String(36), index=True)
+    workload_name: Mapped[str] = mapped_column(String(256), default="")
+    connection_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
+    status: Mapped[str] = mapped_column(String(16), default="queued", index=True)
+    run_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
+    resources_completed: Mapped[int] = mapped_column(Integer, default=0)
+    resources_total: Mapped[int] = mapped_column(Integer, default=0)
+    collection_json: Mapped[dict] = mapped_column(JSON, default=dict)
+    error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    lease_owner: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    lease_token: Mapped[str | None] = mapped_column(String(36), nullable=True)
+    lease_expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    lease_heartbeat_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    ended_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    duration_ms: Mapped[int | None] = mapped_column(Integer, nullable=True)
+
+    __table_args__ = (
+        UniqueConstraint("batch_id", "workload_id", name="uq_perf_fleet_batch_workload"),
+        Index("ix_perf_fleet_items_batch_status", "batch_id", "status"),
+        Index("ix_perf_fleet_items_status_started", "status", "started_at"),
+        Index("ix_perf_fleet_items_claim", "status", "lease_expires_at", "batch_id"),
+    )
+
+
+class WorkBatch(Base):
+    """Generic durable control plane for non-profiler fleet/background work.
+
+    Feature-specific results stay in their native stores. These rows own admission, progress,
+    retry, cancellation and restart recovery so a browser or process restart cannot lose the
+    unstarted tail of a multi-item operation.
+    """
+
+    __tablename__ = "work_batches"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=_uuid)
+    tenant_id: Mapped[str] = mapped_column(String(128), index=True)
+    feature: Mapped[str] = mapped_column(String(48), index=True)
+    idempotency_key: Mapped[str] = mapped_column(String(128))
+    status: Mapped[str] = mapped_column(String(16), default="queued", index=True)
+    config_json: Mapped[dict] = mapped_column(JSON, default=dict)
+    total: Mapped[int] = mapped_column(Integer, default=0)
+    completed: Mapped[int] = mapped_column(Integer, default=0)
+    succeeded: Mapped[int] = mapped_column(Integer, default=0)
+    partial: Mapped[int] = mapped_column(Integer, default=0)
+    failed: Mapped[int] = mapped_column(Integer, default=0)
+    cancelled: Mapped[int] = mapped_column(Integer, default=0)
+    cancel_requested: Mapped[bool] = mapped_column(Boolean, default=False)
+    error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    triggered_by: Mapped[str] = mapped_column(String(128), default="")
+    trigger: Mapped[str] = mapped_column(String(24), default="manual")
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
+    started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    ended_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+    __table_args__ = (
+        UniqueConstraint("tenant_id", "feature", "idempotency_key", name="uq_work_batch_tenant_feature_idempotency"),
+        Index("ix_work_batch_tenant_feature_created", "tenant_id", "feature", "created_at"),
+        Index("ix_work_batch_status_created", "status", "created_at"),
+    )
+
+
+class WorkBatchItem(Base):
+    """One durable unit of work within a :class:`WorkBatch`."""
+
+    __tablename__ = "work_batch_items"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=_uuid)
+    batch_id: Mapped[str] = mapped_column(ForeignKey("work_batches.id", ondelete="CASCADE"), index=True)
+    tenant_id: Mapped[str] = mapped_column(String(128), index=True)
+    item_key: Mapped[str] = mapped_column(String(256))
+    workload_id: Mapped[str | None] = mapped_column(String(128), nullable=True, index=True)
+    workload_name: Mapped[str] = mapped_column(String(256), default="")
+    connection_id: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    status: Mapped[str] = mapped_column(String(16), default="queued", index=True)
+    attempt: Mapped[int] = mapped_column(Integer, default=0)
+    max_attempts: Mapped[int] = mapped_column(Integer, default=3)
+    progress_current: Mapped[int] = mapped_column(Integer, default=0)
+    progress_total: Mapped[int] = mapped_column(Integer, default=0)
+    message: Mapped[str] = mapped_column(Text, default="")
+    result_ref: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    result_json: Mapped[dict] = mapped_column(JSON, default=dict)
+    error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    retryable: Mapped[bool] = mapped_column(Boolean, default=False)
+    available_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    lease_owner: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    lease_token: Mapped[str | None] = mapped_column(String(36), nullable=True)
+    lease_expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    lease_heartbeat_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    ended_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    duration_ms: Mapped[int | None] = mapped_column(Integer, nullable=True)
+
+    __table_args__ = (
+        UniqueConstraint("batch_id", "item_key", name="uq_work_batch_item_key"),
+        Index("ix_work_batch_items_batch_status", "batch_id", "status"),
+        Index("ix_work_batch_items_status_started", "status", "started_at"),
+        Index("ix_work_batch_items_status_available", "status", "available_at"),
+        Index("ix_work_batch_items_lane", "tenant_id", "connection_id", "status"),
+        Index("ix_work_batch_items_claim", "status", "lease_expires_at", "available_at"),
+    )
+
+
+class DistributedRateLimit(Base):
+    """Cross-replica sliding-window and hard-block state for an external principal quota."""
+
+    __tablename__ = "distributed_rate_limits"
+
+    key: Mapped[str] = mapped_column(String(64), primary_key=True)
+    starts_json: Mapped[list] = mapped_column(JSON, default=list)
+    blocked_until_epoch: Mapped[float] = mapped_column(Float, default=0.0)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now, onupdate=_now)
+
+
+class ChangeExplorerAnalysisLease(Base):
+    """Crash-safe cross-replica admission lease for one Change Explorer analysis."""
+
+    __tablename__ = "changeexplorer_analysis_leases"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=_uuid)
+    lane_hash: Mapped[str] = mapped_column(String(64), unique=True, index=True)
+    owner: Mapped[str] = mapped_column(String(64))
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
 
 
 class WorkbookRun(Base):
@@ -493,6 +859,17 @@ class AssessmentRun(Base):
     duration_ms: Mapped[int | None] = mapped_column(Integer, nullable=True)
     deleted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)  # soft-delete (trash)
 
+    __table_args__ = (
+        Index(
+            "ix_assessment_runs_tenant_deleted_started",
+            "tenant_id", "deleted_at", "started_at",
+        ),
+        Index(
+            "ix_assessment_runs_tenant_workload_deleted_started",
+            "tenant_id", "workload_id", "deleted_at", "started_at",
+        ),
+    )
+
 
 class AssessmentWaiver(Base):
     """A risk acceptance / waiver suppressing a control finding for a workload.
@@ -580,6 +957,10 @@ class IamScanRun(Base):
     started_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
     ended_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     duration_ms: Mapped[int | None] = mapped_column(Integer, nullable=True)
+
+    __table_args__ = (
+        Index("ix_rbac_scan_runs_tenant_started", "tenant_id", "started_at"),
+    )
 
 
 class IamFindingState(Base):
@@ -705,6 +1086,10 @@ class QuotaScanRun(Base):
     ended_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     duration_ms: Mapped[int | None] = mapped_column(Integer, nullable=True)
 
+    __table_args__ = (
+        Index("ix_quota_scan_runs_tenant_started", "tenant_id", "started_at"),
+    )
+
 
 class Notification(Base):
     """A normalized event published to the notification engine (in-app + channels)."""
@@ -724,6 +1109,10 @@ class Notification(Base):
     read: Mapped[bool] = mapped_column(default=False)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
 
+    __table_args__ = (
+        Index("ix_notifications_tenant_created", "tenant_id", "created_at"),
+    )
+
 
 class NotificationDelivery(Base):
     """One channel delivery attempt for a notification (in-app or a connector)."""
@@ -740,6 +1129,13 @@ class NotificationDelivery(Base):
     attempts: Mapped[int] = mapped_column(Integer, default=0)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
     sent_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+    __table_args__ = (
+        Index(
+            "ix_notification_deliveries_tenant_channel_notification",
+            "tenant_id", "channel", "notification_id",
+        ),
+    )
 
 
 class NotificationRule(Base):
@@ -837,6 +1233,13 @@ class Case(Base):
     resolved_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     deleted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
+    __table_args__ = (
+        Index(
+            "ix_cases_tenant_deleted_status_updated",
+            "tenant_id", "deleted_at", "status", "updated_at",
+        ),
+    )
+
 
 class CaseEvent(Base):
     """One append-only entry in a Case's timeline.
@@ -855,6 +1258,13 @@ class CaseEvent(Base):
     message: Mapped[str | None] = mapped_column(Text, nullable=True)
     payload_json: Mapped[dict] = mapped_column(JSON, default=dict)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
+
+    __table_args__ = (
+        Index(
+            "ix_case_events_tenant_case_created",
+            "tenant_id", "case_id", "created_at",
+        ),
+    )
 
 
 # Auth / access-control models (users, roles, groups, sessions, identity providers).

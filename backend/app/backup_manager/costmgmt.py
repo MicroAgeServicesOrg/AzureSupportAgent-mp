@@ -22,7 +22,6 @@ once or twice a day, so the module's short-lived in-memory inventory cache is th
 from __future__ import annotations
 
 import asyncio
-import json
 import logging
 import random
 import time
@@ -31,6 +30,7 @@ from pathlib import Path
 from typing import Any
 
 from app.backup_manager import service
+from app.core import jsonstore
 
 log = logging.getLogger("app.backup_manager.costmgmt")
 
@@ -195,7 +195,8 @@ async def backup_actuals(
 
     all_rows: list[dict[str, Any]] = []
     errors: list[str] = []
-    currency = ""
+    succeeded_subscriptions = 0
+    currencies: set[str] = set()
     for result in results:
         if isinstance(result, BaseException):
             errors.append(service.safe_error(str(result)))
@@ -204,6 +205,7 @@ async def backup_actuals(
         if error:
             errors.append(f"{subscription_id}: {error}")
             continue
+        succeeded_subscriptions += 1
         index = {name: position for position, name in enumerate(columns)}
         for row in rows:
             def cell(name: str) -> Any:
@@ -214,7 +216,9 @@ async def backup_actuals(
                 cost = float(cell("Cost") or 0.0)
             except (TypeError, ValueError):
                 continue
-            currency = currency or str(cell("Currency") or "")
+            row_currency = str(cell("Currency") or "")
+            if row_currency:
+                currencies.add(row_currency)
             all_rows.append({
                 "subscription_id": subscription_id,
                 "resource_id": str(cell("ResourceId") or ""),
@@ -222,32 +226,48 @@ async def backup_actuals(
                 "meter_subcategory": str(cell("MeterSubCategory") or ""),
                 "date": str(cell("UsageDate") or ""),
                 "cost": cost,
+                "currency": row_currency,
             })
 
     by_vault: dict[str, float] = {}
     by_meter: dict[str, float] = {}
     by_day: dict[str, float] = {}
+    totals_by_currency: dict[str, float] = {}
     for row in all_rows:
         key = service.canonical_id(row["resource_id"])
         by_vault[key] = by_vault.get(key, 0.0) + row["cost"]
         by_meter[row["meter"]] = by_meter.get(row["meter"], 0.0) + row["cost"]
         if row["date"]:
             by_day[row["date"]] = by_day.get(row["date"], 0.0) + row["cost"]
+        code = str(row.get("currency") or "")
+        totals_by_currency[code] = totals_by_currency.get(code, 0.0) + row["cost"]
 
     available = bool(all_rows) or not errors
+    currency = next(iter(currencies)) if len(currencies) == 1 else ""
+    mixed_currency = len(currencies) > 1
     return {
         "available": available,
         "rows": all_rows,
-        "by_vault": by_vault,
-        "by_meter": dict(sorted(by_meter.items(), key=lambda kv: -kv[1])),
-        "daily": [{"date": d, "cost": round(c, 4)} for d, c in sorted(by_day.items())],
+        "by_vault": {} if mixed_currency else by_vault,
+        "by_meter": {} if mixed_currency else dict(sorted(by_meter.items(), key=lambda kv: -kv[1])),
+        "daily": [] if mixed_currency else [{"date": d, "cost": round(c, 4)} for d, c in sorted(by_day.items())],
         "currency": currency,
-        "total": round(sum(by_vault.values()), 2),
+        "currencies": sorted(currencies),
+        "mixed_currency": mixed_currency,
+        "totals_by_currency": {code: round(value, 2) for code, value in sorted(totals_by_currency.items())},
+        "total": round(sum(by_vault.values()), 2) if not mixed_currency else 0.0,
         "period": period,
         "partial_period": period["partial"] == "true",
         "cost_type": cost_type,
         "subscriptions": list(subscriptions),
-        "reason": "; ".join(errors)[:800] if errors else ("" if all_rows else "No backup or Site Recovery charges in this period."),
+        "subscriptions_succeeded": succeeded_subscriptions,
+        "subscriptions_failed": len(errors),
+        "partial": bool(errors),
+        "reason": (
+            "Multiple billing currencies are present; totals are reported separately and are not summed."
+            if mixed_currency else "; ".join(errors)[:800] if errors
+            else ("" if all_rows else "No backup or Site Recovery charges in this period.")
+        ),
         "remedy": (
             "Grant the connection Cost Management Reader on the subscription, and confirm the "
             "tenant allows non-billing readers to view charges."
@@ -257,23 +277,8 @@ async def backup_actuals(
 
 # --------------------------------------------------------------------------- cache
 def _read_cache() -> dict[str, Any]:
-    if _CACHE_PATH.exists():
-        try:
-            data = json.loads(_CACHE_PATH.read_text(encoding="utf-8"))
-            if isinstance(data, dict):
-                return data
-        except (json.JSONDecodeError, OSError):
-            pass
-    return {}
-
-
-def _write_cache(data: dict[str, Any]) -> None:
-    try:
-        _CACHE_PATH.parent.mkdir(parents=True, exist_ok=True)
-        # Raw per-row detail is large and not needed once aggregated; keep the cache lean.
-        _CACHE_PATH.write_text(json.dumps(data, indent=2), encoding="utf-8")
-    except OSError as exc:  # noqa: BLE001
-        log.debug("backup_manager: could not persist cost cache: %s", exc)
+    data = jsonstore.read_json(_CACHE_PATH, {})
+    return data if isinstance(data, dict) else {}
 
 
 async def cached_actuals(
@@ -307,12 +312,22 @@ async def cached_actuals(
     )
     if result.get("available"):
         lean = {k: v for k, v in result.items() if k != "rows"}
-        cache[key] = {"cached_at": time.time(), "result": lean}
-        # Bound the cache so a large multi-scope estate cannot grow it without limit.
-        if len(cache) > 64:
-            for stale_key in sorted(cache, key=lambda k: cache[k].get("cached_at", 0))[:-64]:
-                cache.pop(stale_key, None)
-        _write_cache(cache)
+        cached_at = time.time()
+
+        def _mutate(stored: dict[str, Any]) -> None:
+            stored[key] = {"cached_at": cached_at, "result": lean}
+            # Bound the cache so a large multi-scope estate cannot grow it without limit.
+            if len(stored) > 64:
+                stale_keys = sorted(
+                    stored, key=lambda stored_key: stored[stored_key].get("cached_at", 0)
+                )[:-64]
+                for stale_key in stale_keys:
+                    stored.pop(stale_key, None)
+
+        try:
+            jsonstore.mutate_json(_CACHE_PATH, {}, _mutate)
+        except OSError as exc:  # noqa: BLE001
+            log.debug("backup_manager: could not persist cost cache: %s", exc)
     result["cache_age_seconds"] = 0
     return result
 

@@ -5,6 +5,9 @@ import JSZip from "jszip";
 import { api, streamRefreshLlmModels, streamTestLlmProvider, type AiPrompt, type AppSettings, type ArchitectureCategory, type AuditEntry, type BackupConflictMode, type BackupImportPreview, type LlmTestStep, type SandboxVm, type SandboxVmRun, type SiemDestination, type Workload } from "../api";
 import { ensureUtc, formatError } from "../utils/format";
 import { ConnectorsSection } from "./AutomationsView";
+import { useAuth } from "./AuthContext";
+import { filterPermissionedGroups } from "../utils/accessControl";
+import { adminWritePermission } from "./routeAccess";
 // Heavy admin sub-sections — lazy so visiting /admin only pulls the small General/
 // Providers/etc. cards, not every reference-set editor in the bundle.
 const SecurityPanel = lazy(() => import("./SecurityView").then((m) => ({ default: m.SecurityPanel })));
@@ -15,6 +18,18 @@ const BackupDrReferenceEditor = lazy(() => import("./BackupDrReferenceEditor").t
 
 const AdminSubLoading = () => <div className="p-6 text-sm text-gray-500">Loading…</div>;
 const wrap = (node: React.ReactNode) => <Suspense fallback={<AdminSubLoading />}>{node}</Suspense>;
+
+function ReadOnlySection({ readOnly, children }: { readOnly: boolean; children: React.ReactNode }) {
+  if (!readOnly) return <>{children}</>;
+  return (
+    <div className="flex h-full min-h-0 flex-col">
+      <div className="mx-8 mt-4 rounded-lg border border-sky-200 bg-sky-50 px-3 py-2 text-xs text-sky-800">
+        Read-only access — the active role can inspect this configuration but cannot change it.
+      </div>
+      <fieldset disabled className="contents">{children}</fieldset>
+    </div>
+  );
+}
 import {
   ADMIN_NAV,
   ADMIN_SECTION_IDS,
@@ -160,13 +175,15 @@ function fmtUsd(v: number): string {
  *  Maps over ADMIN_NAV so a new section appears here + in the sidebar automatically. A quick
  *  filter keeps it usable as the section count grows (enterprise apps have many settings). */
 function SettingsOverview() {
+  const { user } = useAuth();
   const [q, setQ] = useState("");
   const term = q.trim().toLowerCase();
+  const permittedItems = filterPermissionedGroups(ADMIN_NAV, user);
 
   // Preserve the ADMIN_NAV order but split into the same groups the sidebar uses. Each item
   // carries the group of the nearest preceding item that declared one.
   const groups: { name: string; items: typeof ADMIN_NAV }[] = [];
-  for (const item of ADMIN_NAV) {
+  for (const item of permittedItems) {
     if (item.group || groups.length === 0) {
       groups.push({ name: item.group ?? "Settings", items: [] });
     }
@@ -181,7 +198,7 @@ function SettingsOverview() {
 
   return (
     <div className="h-full overflow-y-auto bg-gray-50">
-      <div className="mx-auto max-w-5xl space-y-6 p-8">
+      <div className="w-full max-w-none space-y-6 p-8">
         <div className="flex flex-wrap items-end justify-between gap-3">
           <div>
             <h1 className="text-xl font-semibold text-gray-900">Settings</h1>
@@ -194,7 +211,7 @@ function SettingsOverview() {
             value={q}
             onChange={(e) => setQ(e.target.value)}
             placeholder="Search settings…"
-            className="w-56 rounded-lg border border-gray-300 px-3 py-2 text-sm focus:border-brand-dark focus:outline-none"
+            className="w-56 rounded-lg border border-gray-300 px-3 py-2 text-sm focus:border-brand-dark focus:outline-hidden"
           />
         </div>
 
@@ -205,15 +222,15 @@ function SettingsOverview() {
         ) : (
           visibleGroups.map((g) => (
             <div key={g.name}>
-              <div className="mb-2 text-[11px] font-semibold uppercase tracking-wide text-gray-400">
+              <div className="mb-2 text-[11px] font-semibold uppercase tracking-wide text-gray-500">
                 {g.name}
               </div>
-              <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-3">
+              <div className="grid grid-cols-[repeat(auto-fit,minmax(240px,1fr))] gap-3">
                 {g.items.map((i) => (
                   <Link
                     key={i.id}
                     to={`/admin/${i.id}`}
-                    className="group flex items-start gap-3 rounded-xl border bg-white p-4 transition hover:border-brand-dark/40 hover:shadow-sm"
+                    className="group flex items-start gap-3 rounded-xl border bg-white p-4 transition hover:border-brand-dark/40 hover:shadow-xs"
                   >
                     <span className="text-xl leading-none">{i.icon}</span>
                     <span className="min-w-0">
@@ -234,8 +251,11 @@ function SettingsOverview() {
 /** Settings content panel. Rendered inside the chat shell (the chat sidebar stays
  *  visible); section is driven by the /admin/:section URL. */
 export function AdminPanel({ section }: { section: AdminSection }) {
-  const tools = useQuery({ queryKey: ["tools"], queryFn: api.listTools });
-  const usage = useQuery({ queryKey: ["usage"], queryFn: api.usage });
+  const { has } = useAuth();
+  const writePermission = adminWritePermission(section);
+  const canWrite = !writePermission || has(writePermission);
+  const readOnly = !canWrite && section !== "audit";
+  const usage = useQuery({ queryKey: ["usage"], queryFn: api.usage, enabled: section === "usage" });
 
   // Bare /admin → a Settings overview landing page with links to every section.
   if (section === "overview") {
@@ -246,9 +266,9 @@ export function AdminPanel({ section }: { section: AdminSection }) {
   if (section === "access" || ACCESS_SUB_IDS.has(section)) {
     return wrap(<AccessControlPanel section={section} />);
   }
-  // Standalone security sections (Active Sessions, Security Policy) keep their own panel.
-  if (section === "sessions" || section === "policies") {
-    return wrap(<SecurityPanel section={section as SecuritySection} />);
+  // Standalone security sections use the full host through their shared panel.
+  if (section === "sessions" || section === "policies" || section === "firewall") {
+    return wrap(<SecurityPanel section={section as SecuritySection} fullWidth />);
   }
   // AMBA Reference Set gets a dedicated full-page two-pane rich editor.
   if (section === "amba") {
@@ -261,7 +281,7 @@ export function AdminPanel({ section }: { section: AdminSection }) {
     return wrap(<BackupDrReferenceEditor />);
   }
 
-  return (
+  const content = (
     <div className="h-full overflow-y-auto bg-gray-50">
       <div className="space-y-6 p-8">
         {section === "providers" && <AIProviderCard />}
@@ -275,44 +295,7 @@ export function AdminPanel({ section }: { section: AdminSection }) {
         {section === "telemetrychanges" && <TelemetryChangeRequestsCard />}
         {section === "backupdrchanges" && <BackupDrChangeRequestsCard />}
         {section === "radar" && <RadarReferenceCard />}
-        {section === "tools" && (
-          <Card title="Azure MCP Tools">
-            {tools.isError && (
-              <p className="text-sm text-red-600">
-                MCP server unavailable. Check the connection and Azure sign-in.
-              </p>
-            )}
-            {tools.isLoading && (
-              <div className="grid grid-cols-1 gap-2 sm:grid-cols-2">
-                {Array.from({ length: 6 }).map((_, i) => (
-                  <div key={i} className="h-16 animate-pulse rounded border bg-gray-100" />
-                ))}
-              </div>
-            )}
-            {!tools.isLoading && !tools.isError && tools.data?.length === 0 && (
-              <p className="text-sm text-gray-500">No tools are currently exposed.</p>
-            )}
-            <div className="grid grid-cols-1 gap-2 sm:grid-cols-2">
-              {tools.data?.map((t) => (
-                <div key={t.name} className="rounded border bg-white p-3 text-sm">
-                  <div className="flex items-center justify-between">
-                    <span className="font-mono font-medium">{t.name}</span>
-                    <span
-                      className={`rounded px-2 py-0.5 text-xs ${
-                        t.kind === "write"
-                          ? "bg-amber-100 text-amber-800"
-                          : "bg-green-100 text-green-800"
-                      }`}
-                    >
-                      {t.kind}
-                    </span>
-                  </div>
-                  <p className="mt-1 text-xs text-gray-500">{t.description}</p>
-                </div>
-              ))}
-            </div>
-          </Card>
-        )}
+        {section === "tools" && <AzureMcpToolsCard />}
 
         {section === "tools" && <BuiltinToolsCard />}
 
@@ -369,17 +352,19 @@ export function AdminPanel({ section }: { section: AdminSection }) {
           </Card>
         )}
 
-        {section === "audit" && <AuditCard />}
+        {section === "audit" && <AuditCard canManageSiem={has("settings.write")} />}
         {section === "backup" && <BackupRestoreCard />}
         {section === "demodata" && <DemoDataCard />}
       </div>
     </div>
   );
+
+  return <ReadOnlySection readOnly={readOnly}>{content}</ReadOnlySection>;
 }
 
 function Card({ title, children }: { title: string; children: React.ReactNode }) {
   return (
-    <section className="rounded-lg border bg-white p-4 shadow-sm">
+    <section className="rounded-lg border bg-white p-4 shadow-xs">
       <h2 className="mb-3 font-medium">{title}</h2>
       {children}
     </section>
@@ -747,6 +732,7 @@ const AUTH_METHOD_LABELS: Record<string, string> = {
 const BLANK_FORM: import("../api").ConnectionUpsert = {
   display_name: "",
   tenant_id: "",
+  azure_cloud: "AzureCloud",
   auth_method: "default_chain",
   default_subscription: "",
   read_only: true,
@@ -841,6 +827,7 @@ function ConnectionsCard() {
       id: c.id,
       display_name: c.display_name,
       tenant_id: c.tenant_id,
+      azure_cloud: c.azure_cloud ?? "AzureCloud",
       auth_method: c.auth_method,
       default_subscription: c.default_subscription,
       read_only: c.read_only,
@@ -983,23 +970,23 @@ function ConnectionsCard() {
                   <div className="flex items-center gap-2">
                     <span className={`font-medium ${c.disabled ? "text-gray-400" : ""}`}>{c.display_name}</span>
                     {c.is_default && (
-                      <span className="rounded bg-brand/10 px-1.5 py-0.5 text-[10px] font-medium text-brand">
+                      <span className="rounded-sm bg-brand/10 px-1.5 py-0.5 text-[10px] font-medium text-brand">
                         default
                       </span>
                     )}
                     {c.disabled ? (
-                      <span className="rounded bg-gray-200 px-1.5 py-0.5 text-[10px] font-medium text-gray-600">
+                      <span className="rounded-sm bg-gray-200 px-1.5 py-0.5 text-[10px] font-medium text-gray-600">
                         disabled
                       </span>
                     ) : (
                       <StatusDot status={c.status} />
                     )}
                     {c.read_only ? (
-                      <span className="rounded bg-green-100 px-1.5 py-0.5 text-[10px] text-green-800">
+                      <span className="rounded-sm bg-green-100 px-1.5 py-0.5 text-[10px] text-green-800">
                         read-only
                       </span>
                     ) : (
-                      <span className="rounded bg-amber-100 px-1.5 py-0.5 text-[10px] text-amber-800">
+                      <span className="rounded-sm bg-amber-100 px-1.5 py-0.5 text-[10px] text-amber-800">
                         writes enabled
                       </span>
                     )}
@@ -1026,7 +1013,7 @@ function ConnectionsCard() {
                   <button
                     onClick={() => void test(c.id)}
                     disabled={busyId === c.id}
-                    className="rounded border px-2 py-1 text-gray-600 hover:bg-gray-50 disabled:opacity-50"
+                    className="rounded-sm border px-2 py-1 text-gray-600 hover:bg-gray-50 disabled:opacity-50"
                   >
                     Test
                   </button>
@@ -1034,7 +1021,7 @@ function ConnectionsCard() {
                     onClick={() => void validateEntra(c.id)}
                     disabled={busyId === `entra-${c.id}`}
                     title="Check the app's Microsoft Graph permissions for the EntraID MCP server"
-                    className="rounded border px-2 py-1 text-gray-600 hover:bg-gray-50 disabled:opacity-50"
+                    className="rounded-sm border px-2 py-1 text-gray-600 hover:bg-gray-50 disabled:opacity-50"
                   >
                     {busyId === `entra-${c.id}` ? "Checking…" : "Test EntraID"}
                   </button>
@@ -1043,7 +1030,7 @@ function ConnectionsCard() {
                       onClick={() => void makeDefault(c.id)}
                       disabled={busyId === c.id || c.disabled}
                       title={c.disabled ? "Enable this tenant first" : undefined}
-                      className="rounded border px-2 py-1 text-gray-600 hover:bg-gray-50 disabled:opacity-50"
+                      className="rounded-sm border px-2 py-1 text-gray-600 hover:bg-gray-50 disabled:opacity-50"
                     >
                       Set default
                     </button>
@@ -1052,20 +1039,20 @@ function ConnectionsCard() {
                     onClick={() => void toggleDisabled(c)}
                     disabled={busyId === c.id}
                     title={c.disabled ? "Enable this tenant" : "Disable — hide from the chat tenant picker"}
-                    className="rounded border px-2 py-1 text-gray-600 hover:bg-gray-50 disabled:opacity-50"
+                    className="rounded-sm border px-2 py-1 text-gray-600 hover:bg-gray-50 disabled:opacity-50"
                   >
                     {c.disabled ? "Enable" : "Disable"}
                   </button>
                   <button
                     onClick={() => startEdit(c)}
-                    className="rounded border px-2 py-1 text-gray-600 hover:bg-gray-50"
+                    className="rounded-sm border px-2 py-1 text-gray-600 hover:bg-gray-50"
                   >
                     Edit
                   </button>
                   <button
                     onClick={() => void remove(c.id)}
                     disabled={busyId === c.id}
-                    className="rounded border border-red-200 px-2 py-1 text-red-600 hover:bg-red-50 disabled:opacity-50"
+                    className="rounded-sm border border-red-200 px-2 py-1 text-red-600 hover:bg-red-50 disabled:opacity-50"
                   >
                     Delete
                   </button>
@@ -1127,7 +1114,7 @@ function ConnectionForm({
   const set = (patch: Partial<import("../api").ConnectionUpsert>) =>
     setForm({ ...form, ...patch });
   const input =
-    "w-full rounded-lg border px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-brand";
+    "w-full rounded-lg border px-3 py-2 text-sm focus:outline-hidden focus:ring-2 focus:ring-brand";
   const label = "mb-1 block text-xs font-medium text-gray-600";
 
   // Live subscription discovery using the saved connection's credentials.
@@ -1195,6 +1182,20 @@ function ConnectionForm({
             placeholder="00000000-0000-0000-0000-000000000000"
           />
         </div>
+      </div>
+
+      <div>
+        <label className={label}>Azure cloud</label>
+        <select
+          className={input}
+          value={form.azure_cloud ?? "AzureCloud"}
+          onChange={(e) => set({ azure_cloud: e.target.value as import("../api").ConnectionUpsert["azure_cloud"] })}
+        >
+          <option value="AzureCloud">Azure public cloud</option>
+          <option value="AzureUSGovernment">Azure US Government</option>
+          <option value="AzureChinaCloud">Azure China</option>
+        </select>
+        <div className="mt-1 text-[11px] text-gray-500">Controls cloud-aware Azure portal links in reports and resource actions.</div>
       </div>
 
       <div>
@@ -1272,13 +1273,11 @@ function ConnectionForm({
         </div>
       )}
 
-      {form.auth_method === "azure_cli" && <AzureCliFields tenantId={form.tenant_id} />}
-
       {form.auth_method === "az_cli_token" && <AzCliTokenFields form={form} set={set} />}
 
       {form.auth_method === "default_chain" && (
         <div className="rounded-lg border border-gray-200 bg-white px-3 py-2.5 text-xs text-gray-600">
-          Uses the host's <code className="rounded bg-gray-100 px-1">az login</code> /
+          Uses the host's <code className="rounded-sm bg-gray-100 px-1">az login</code> /
           managed identity (DefaultAzureCredential). Best for a single tenant the server
           is already signed into.
         </div>
@@ -1374,36 +1373,6 @@ function ConnectionForm({
   );
 }
 
-function AzureCliFields({ tenantId }: { tenantId: string }) {
-  return (
-    <div className="rounded-lg border border-green-200 bg-green-50 p-3 text-xs text-green-900">
-      <div className="mb-1 font-semibold">Sign in once — stays connected</div>
-      <p className="mb-2">
-        Uses the host's Azure CLI session for this tenant. The CLI keeps the session
-        refreshed automatically (~90 days, rolling), so you never paste tokens and it
-        won't expire after an hour — just like a normal{" "}
-        <code className="rounded bg-white px-1">az login</code> connection.
-      </p>
-      <ol className="list-decimal space-y-1 pl-4">
-        <li>
-          On the machine running this app, sign in to the tenant:
-          <pre className="mt-1 overflow-x-auto rounded bg-white px-2 py-1 font-mono text-[11px] text-gray-800">
-            az login --tenant {tenantId || "<TENANT_ID>"}
-          </pre>
-        </li>
-        <li>
-          Enter the Tenant ID above, then <strong>Save</strong> and <strong>Test</strong>.
-          That's it — no token to paste.
-        </li>
-      </ol>
-      <div className="mt-2 text-[11px] text-green-800">
-        Re-authentication is only needed if you sign out of the CLI or the session is
-        revoked. For a fully unattended service, use a service principal instead.
-      </div>
-    </div>
-  );
-}
-
 function CmdBlock({ cmd }: { cmd: string }) {
   const [copied, setCopied] = useState(false);
   return (
@@ -1412,11 +1381,11 @@ function CmdBlock({ cmd }: { cmd: string }) {
         type="button"
         onClick={() => { void navigator.clipboard?.writeText(cmd); setCopied(true); setTimeout(() => setCopied(false), 1200); }}
         title="Copy command"
-        className="shrink-0 rounded border border-gray-200 bg-white px-1.5 text-[10px] text-gray-500 hover:bg-gray-50 hover:text-gray-700"
+        className="shrink-0 rounded-sm border border-gray-200 bg-white px-1.5 text-[10px] text-gray-500 hover:bg-gray-50 hover:text-gray-700"
       >
         {copied ? "✓ Copied" : "⧉ Copy"}
       </button>
-      <pre className="flex-1 overflow-x-auto rounded bg-white px-2 py-1 font-mono text-[11px] text-gray-800">{cmd}</pre>
+      <pre className="flex-1 overflow-x-auto rounded-sm bg-white px-2 py-1 font-mono text-[11px] text-gray-800">{cmd}</pre>
     </div>
   );
 }
@@ -1429,7 +1398,7 @@ function AzCliTokenFields({
   set: (patch: Partial<import("../api").ConnectionUpsert>) => void;
 }) {
   const input =
-    "w-full rounded-lg border px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-brand";
+    "w-full rounded-lg border px-3 py-2 text-sm focus:outline-hidden focus:ring-2 focus:ring-brand";
   const label = "mb-1 block text-xs font-medium text-gray-600";
   return (
     <div className="space-y-3">
@@ -1448,8 +1417,8 @@ function AzCliTokenFields({
         </ol>
         <div className="mt-2 text-[11px] text-blue-800">
           The token is short-lived (~1 hour) and cannot be refreshed — the Azure CLI
-          does not expose refresh tokens. For an always-on connection that auto-refreshes,
-          switch to <strong>“Azure CLI sign-in”</strong> above, or use a service principal.
+          does not expose refresh tokens. For an always-on connection, use a service
+          principal or <strong>Host identity</strong> instead.
         </div>
       </div>
       <div>
@@ -1521,6 +1490,134 @@ const ENTRA_GRAPH_PERMISSIONS: { name: string; desc: string }[] = [
   { name: "Application.ReadWrite.All", desc: "Create, update, and delete applications (app registrations) and service principals" },
 ];
 
+function AzureMcpToolsCard() {
+  const qc = useQueryClient();
+  const q = useQuery({ queryKey: ["tools"], queryFn: api.listTools, retry: false });
+  const routingQ = useQuery({
+    queryKey: ["toolRoutingDiagnostics", "azure"],
+    queryFn: () => api.toolRoutingDiagnostics("Diagnose VM network health and performance"),
+    retry: false,
+  });
+  const [search, setSearch] = useState("");
+  const [bundle, setBundle] = useState("");
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState("");
+  const tools = q.data?.tools ?? [];
+  const bundles = q.data?.bundles ?? [];
+  const disabled = new Set(q.data?.disabled ?? []);
+  const term = search.trim().toLowerCase();
+  const visible = tools.filter((tool) => {
+    if (bundle && !tool.bundles.includes(bundle)) return false;
+    if (!term) return true;
+    return `${tool.name} ${tool.description} ${tool.bundles.join(" ")}`.toLowerCase().includes(term);
+  });
+
+  async function saveDisabled(next: Set<string>) {
+    setSaving(true);
+    setError("");
+    try {
+      await api.updateAppSettings({ azure_mcp_disabled_tools: [...next].sort() });
+      await Promise.all([
+        qc.invalidateQueries({ queryKey: ["tools"] }),
+        qc.invalidateQueries({ queryKey: ["toolRoutingDiagnostics"] }),
+        qc.invalidateQueries({ queryKey: ["appSettings"] }),
+      ]);
+    } catch (e) {
+      setError(formatError(e));
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  function toggleTool(name: string, on: boolean) {
+    const next = new Set(disabled);
+    if (on) next.delete(name);
+    else next.add(name);
+    void saveDisabled(next);
+  }
+
+  function toggleBundle(name: string) {
+    const names = tools.filter((tool) => tool.bundles.includes(name)).map((tool) => tool.name);
+    const allOn = names.every((toolName) => !disabled.has(toolName));
+    const next = new Set(disabled);
+    for (const toolName of names) {
+      if (allOn) next.add(toolName);
+      else next.delete(toolName);
+    }
+    void saveDisabled(next);
+  }
+
+  return (
+    <Card title="Azure MCP Tools">
+      <p className="mb-3 text-sm text-gray-500">
+        Azure service tools are indexed once, routed by request, and loaded progressively.
+        Disable a namespace here to remove it from normal chat, deep investigation, catalog
+        search, skills, and custom-agent expansion.
+      </p>
+      {routingQ.data && (
+        <div className="mb-4 space-y-2">
+          <div className="grid grid-cols-2 gap-2 sm:grid-cols-4">
+            {[
+              ["Catalog", routingQ.data.routing.available],
+              ["Initially exposed", routingQ.data.routing.selected],
+              ["Per-turn ceiling", routingQ.data.routing.max_per_turn],
+              ["Provider hard limit", routingQ.data.provider.max_tool_definitions],
+            ].map(([statLabel, value]) => (
+              <div key={String(statLabel)} className="rounded-lg border bg-gray-50 px-3 py-2">
+                <div className="text-lg font-semibold text-gray-800">{value}</div>
+                <div className="text-[11px] text-gray-500">{statLabel}</div>
+              </div>
+            ))}
+          </div>
+          <div className="rounded-md border border-blue-200 bg-blue-50 px-3 py-2 text-xs text-blue-800">
+            {routingQ.data.provider.id} · {routingQ.data.provider.model || "default model"} uses <span className="font-semibold">{routingQ.data.provider.api.replaceAll("_", " ")}</span>
+            {routingQ.data.provider.responses_required_for_tools ? " (required for function tools)" : ""}.
+            {routingQ.data.provider.native_tool_search ? " Native tool search is supported independently." : " Local bounded routing remains active."}
+          </div>
+        </div>
+      )}
+      {saving && <p className="mb-2 text-xs text-gray-400">Saving…</p>}
+      {error && <div className="mb-3 rounded-sm border border-red-200 bg-red-50 px-3 py-2 text-xs text-red-700">{error}</div>}
+      {q.isError && <p className="text-sm text-red-600">MCP server unavailable. Check the connection and Azure sign-in.</p>}
+      {q.isLoading && <div className="h-24 animate-pulse rounded-sm border bg-gray-100" />}
+      {!q.isLoading && !q.isError && tools.length === 0 && <p className="text-sm text-gray-500">No tools are currently exposed.</p>}
+      {tools.length > 0 && (
+        <>
+          <div className="mb-2 flex flex-wrap gap-2">
+            <input className="min-w-56 flex-1 rounded-lg border border-gray-200 px-3 py-1.5 text-sm" value={search} onChange={(e) => setSearch(e.target.value)} placeholder="Search Azure tools…" aria-label="Search Azure tools" />
+            <select className="rounded-lg border border-gray-200 px-3 py-1.5 text-sm" value={bundle} onChange={(e) => setBundle(e.target.value)} aria-label="Filter by Azure tool bundle">
+              <option value="">All bundles</option>
+              {bundles.map((name) => <option key={name} value={name}>{name}</option>)}
+            </select>
+          </div>
+          <div className="mb-3 flex flex-wrap gap-1.5">
+            {bundles.map((name) => {
+              const names = tools.filter((tool) => tool.bundles.includes(name)).map((tool) => tool.name);
+              const allOn = names.length > 0 && names.every((toolName) => !disabled.has(toolName));
+              return <button type="button" key={name} onClick={() => toggleBundle(name)} className={`rounded-full border px-2.5 py-1 text-[11px] ${allOn ? "border-brand/30 bg-brand/5 text-brand" : "border-gray-200 text-gray-500"}`}>{allOn ? "✓ " : ""}{name} · {names.length}</button>;
+            })}
+          </div>
+          <div className="grid grid-cols-1 gap-2 sm:grid-cols-2">
+            {visible.map((tool) => (
+              <div key={tool.name} className="rounded-sm border bg-white p-3 text-sm">
+                <div className="flex items-center justify-between gap-2">
+                  <span className="font-mono font-medium">{tool.name}</span>
+                  <div className="flex items-center gap-2">
+                    <span className={`rounded-sm px-2 py-0.5 text-xs ${tool.kind === "write" ? "bg-amber-100 text-amber-800" : "bg-green-100 text-green-800"}`}>{tool.kind}</span>
+                    <Toggle label="" ariaLabel={`Enable Azure tool ${tool.name}`} checked={!disabled.has(tool.name)} onChange={(on) => toggleTool(tool.name, on)} />
+                  </div>
+                </div>
+                <p className="mt-1 text-xs text-gray-500">{tool.description}</p>
+                <div className="mt-1 flex flex-wrap gap-1">{tool.bundles.map((name) => <span key={name} className="rounded-sm bg-gray-100 px-1.5 py-0.5 text-[10px] text-gray-500">{name}</span>)}</div>
+              </div>
+            ))}
+          </div>
+        </>
+      )}
+    </Card>
+  );
+}
+
 /** Built-in first-party utility tools (web fetch + network diagnostics) with an admin
  *  kill-switch and per-tool enable/disable. All tools are read-only + SSRF-guarded. */
 function BuiltinToolsCard() {
@@ -1584,7 +1681,7 @@ function BuiltinToolsCard() {
       {q.isLoading && (
         <div className="grid grid-cols-1 gap-2 sm:grid-cols-2">
           {Array.from({ length: 6 }).map((_, i) => (
-            <div key={i} className="h-16 animate-pulse rounded border bg-gray-100" />
+            <div key={i} className="h-16 animate-pulse rounded-sm border bg-gray-100" />
           ))}
         </div>
       )}
@@ -1593,11 +1690,11 @@ function BuiltinToolsCard() {
         {allTools.map((t) => {
           const off = disabled.has(t.name);
           return (
-            <div key={t.name} className="rounded border bg-white p-3 text-sm">
+            <div key={t.name} className="rounded-sm border bg-white p-3 text-sm">
               <div className="flex items-center justify-between gap-2">
                 <span className="font-mono font-medium">{t.name}</span>
                 <div className="flex items-center gap-2">
-                  <span className="rounded bg-green-100 px-2 py-0.5 text-xs text-green-800">read</span>
+                  <span className="rounded-sm bg-green-100 px-2 py-0.5 text-xs text-green-800">read</span>
                   <Toggle
                     label=""
                     ariaLabel={`Enable tool ${t.name}`}
@@ -1622,12 +1719,27 @@ function BuiltinToolsCard() {
 function EntraToolsCard() {
   const qc = useQueryClient();
   const q = useQuery({ queryKey: ["entraTools"], queryFn: api.listEntraTools, retry: false });
+  const routingQ = useQuery({
+    queryKey: ["toolRoutingDiagnostics", "entra"],
+    queryFn: () => api.toolRoutingDiagnostics("Investigate a user's MFA and Conditional Access"),
+    retry: false,
+  });
   const [error, setError] = useState("");
   const [saving, setSaving] = useState(false);
+  const [search, setSearch] = useState("");
+  const [bundle, setBundle] = useState("");
 
   const enabled = q.data?.enabled ?? false;
   const connectionConfigured = q.data?.connection_configured ?? false;
   const allTools = q.data?.tools ?? [];
+  const disabled = new Set(q.data?.disabled ?? []);
+  const bundles = q.data?.bundles ?? [];
+  const term = search.trim().toLowerCase();
+  const visibleTools = allTools.filter((t) => {
+    if (bundle && !t.bundles.includes(bundle)) return false;
+    if (!term) return true;
+    return `${t.name} ${t.description} ${t.bundles.join(" ")}`.toLowerCase().includes(term);
+  });
 
   async function toggleEnabled(v: boolean) {
     setSaving(true);
@@ -1641,6 +1753,41 @@ function EntraToolsCard() {
     } finally {
       setSaving(false);
     }
+  }
+
+  async function saveDisabled(next: Set<string>) {
+    setSaving(true);
+    setError("");
+    try {
+      await api.updateAppSettings({ entra_mcp_disabled_tools: [...next].sort() });
+      await Promise.all([
+        qc.invalidateQueries({ queryKey: ["entraTools"] }),
+        qc.invalidateQueries({ queryKey: ["toolRoutingDiagnostics"] }),
+        qc.invalidateQueries({ queryKey: ["appSettings"] }),
+      ]);
+    } catch (e) {
+      setError(formatError(e));
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  function toggleTool(name: string, on: boolean) {
+    const next = new Set(disabled);
+    if (on) next.delete(name);
+    else next.add(name);
+    void saveDisabled(next);
+  }
+
+  function toggleBundle(name: string) {
+    const names = allTools.filter((t) => t.bundles.includes(name)).map((t) => t.name);
+    const allOn = names.every((n) => !disabled.has(n));
+    const next = new Set(disabled);
+    for (const toolName of names) {
+      if (allOn) next.add(toolName);
+      else next.delete(toolName);
+    }
+    void saveDisabled(next);
   }
 
   return (
@@ -1679,6 +1826,36 @@ function EntraToolsCard() {
           </div>
         )}
 
+        {routingQ.data && (
+          <div className="mb-4 space-y-2">
+            <div className="grid grid-cols-2 gap-2 sm:grid-cols-4">
+              {[
+                ["Catalog", routingQ.data.routing.available],
+                ["Initially exposed", routingQ.data.routing.selected],
+                ["Per-turn ceiling", routingQ.data.routing.max_per_turn],
+                ["Provider hard limit", routingQ.data.provider.max_tool_definitions],
+              ].map(([statLabel, value]) => (
+                <div key={String(statLabel)} className="rounded-lg border bg-gray-50 px-3 py-2">
+                  <div className="text-lg font-semibold text-gray-800">{value}</div>
+                  <div className="text-[11px] text-gray-500">{statLabel}</div>
+                </div>
+              ))}
+            </div>
+            <div className="rounded-md border border-blue-200 bg-blue-50 px-3 py-2 text-xs text-blue-800">
+              {routingQ.data.provider.id} · {routingQ.data.provider.model || "default model"} uses <span className="font-semibold">{routingQ.data.provider.api.replaceAll("_", " ")}</span>
+              {routingQ.data.provider.responses_required_for_tools ? " (required for function tools)" : ""}.
+              {routingQ.data.provider.native_tool_search ? " Native tool search is supported independently." : " Local bounded routing remains active."}
+            </div>
+          </div>
+        )}
+        {routingQ.data && routingQ.data.routing.available > routingQ.data.provider.max_tool_definitions && (
+          <div className="mb-3 rounded-md border border-blue-200 bg-blue-50 px-3 py-2 text-xs text-blue-800">
+            The full catalog is larger than {routingQ.data.provider.id}&apos;s limit, so the
+            router exposes only relevant tools and loads more on demand. No arbitrary
+            truncation is used.
+          </div>
+        )}
+
         {q.isError && (
           <p className="text-sm text-red-600">
             EntraID MCP server unavailable: {formatError(q.error)}
@@ -1687,29 +1864,71 @@ function EntraToolsCard() {
         {q.isLoading && (
           <div className="grid grid-cols-1 gap-2 sm:grid-cols-2">
             {Array.from({ length: 6 }).map((_, i) => (
-              <div key={i} className="h-16 animate-pulse rounded border bg-gray-100" />
+              <div key={i} className="h-16 animate-pulse rounded-sm border bg-gray-100" />
             ))}
           </div>
         )}
         {!q.isLoading && !q.isError && allTools.length === 0 && (
           <p className="text-sm text-gray-500">No tools are currently exposed.</p>
         )}
+        {!q.isLoading && !q.isError && allTools.length > 0 && (
+          <>
+            <div className="mb-2 flex flex-wrap gap-2">
+              <input
+                className="min-w-56 flex-1 rounded-lg border border-gray-200 px-3 py-1.5 text-sm"
+                value={search}
+                onChange={(e) => setSearch(e.target.value)}
+                placeholder="Search Entra tools…"
+                aria-label="Search Entra tools"
+              />
+              <select
+                className="rounded-lg border border-gray-200 px-3 py-1.5 text-sm"
+                value={bundle}
+                onChange={(e) => setBundle(e.target.value)}
+                aria-label="Filter by Entra tool bundle"
+              >
+                <option value="">All bundles</option>
+                {bundles.map((name) => <option key={name} value={name}>{name}</option>)}
+              </select>
+            </div>
+            <div className="mb-3 flex flex-wrap gap-1.5">
+              {bundles.map((name) => {
+                const names = allTools.filter((t) => t.bundles.includes(name)).map((t) => t.name);
+                const allOn = names.length > 0 && names.every((n) => !disabled.has(n));
+                return (
+                  <button
+                    key={name}
+                    type="button"
+                    onClick={() => toggleBundle(name)}
+                    className={`rounded-full border px-2.5 py-1 text-[11px] ${allOn ? "border-brand/30 bg-brand/5 text-brand" : "border-gray-200 text-gray-500"}`}
+                  >
+                    {allOn ? "✓ " : ""}{name} · {names.length}
+                  </button>
+                );
+              })}
+            </div>
+          </>
+        )}
         <div className="grid grid-cols-1 gap-2 sm:grid-cols-2">
-          {allTools.map((t) => (
-            <div key={t.name} className="rounded border bg-white p-3 text-sm">
-              <div className="flex items-center justify-between">
+          {visibleTools.map((t) => (
+            <div key={t.name} className={`rounded-sm border bg-white p-3 text-sm ${t.permission_withheld ? "opacity-60" : ""}`}>
+              <div className="flex items-center justify-between gap-2">
                 <span className="font-mono font-medium">{t.name}</span>
-                <span
-                  className={`rounded px-2 py-0.5 text-xs ${
-                    t.kind === "write"
-                      ? "bg-amber-100 text-amber-800"
-                      : "bg-green-100 text-green-800"
-                  }`}
-                >
-                  {t.kind}
-                </span>
+                <div className="flex items-center gap-2">
+                  <span className={`rounded-sm px-2 py-0.5 text-xs ${t.kind === "write" ? "bg-amber-100 text-amber-800" : "bg-green-100 text-green-800"}`}>{t.kind}</span>
+                  <Toggle
+                    label=""
+                    ariaLabel={`Enable Entra tool ${t.name}`}
+                    checked={enabled && !disabled.has(t.name) && !t.permission_withheld}
+                    onChange={(v) => toggleTool(t.name, v)}
+                  />
+                </div>
               </div>
               <p className="mt-1 text-xs text-gray-500">{t.description}</p>
+              <div className="mt-1 flex flex-wrap gap-1">
+                {t.bundles.map((name) => <span key={name} className="rounded-sm bg-gray-100 px-1.5 py-0.5 text-[10px] text-gray-500">{name}</span>)}
+                {t.permission_withheld && <span className="rounded-sm bg-amber-100 px-1.5 py-0.5 text-[10px] text-amber-700">permission withheld</span>}
+              </div>
             </div>
           ))}
         </div>
@@ -1773,7 +1992,7 @@ function SiemExportCard() {
   }
 
   return (
-    <section className="rounded-lg border bg-white p-4 shadow-sm">
+    <section className="rounded-lg border bg-white p-4 shadow-xs">
       <div className="mb-1 flex items-center justify-between gap-2">
         <h2 className="font-medium">Continuous SIEM export</h2>
         <button
@@ -2032,7 +2251,7 @@ function SiemDestinationRow({ dest }: { dest: SiemDestination }) {
                 <input
                   value={cfg.name}
                   onChange={(e) => patch({ name: e.target.value })}
-                  className="mt-1 w-full rounded-lg border px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-brand"
+                  className="mt-1 w-full rounded-lg border px-3 py-2 text-sm focus:outline-hidden focus:ring-2 focus:ring-brand"
                 />
               </label>
               <label className="block">
@@ -2040,7 +2259,7 @@ function SiemDestinationRow({ dest }: { dest: SiemDestination }) {
                 <select
                   value={cfg.type}
                   onChange={(e) => patch({ type: e.target.value })}
-                  className="mt-1 w-full rounded-lg border px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-brand"
+                  className="mt-1 w-full rounded-lg border px-3 py-2 text-sm focus:outline-hidden focus:ring-2 focus:ring-brand"
                 >
                   <option value="splunk_hec">Splunk (HTTP Event Collector)</option>
                   <option value="http">Generic HTTP / webhook (Sentinel, Elastic, Datadog…)</option>
@@ -2056,7 +2275,7 @@ function SiemDestinationRow({ dest }: { dest: SiemDestination }) {
                 value={cfg.endpoint}
                 onChange={(e) => patch({ endpoint: e.target.value })}
                 placeholder={isSplunk ? "https://splunk.contoso.com:8088" : "https://siem.example.com/ingest"}
-                className="mt-1 w-full rounded-lg border px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-brand"
+                className="mt-1 w-full rounded-lg border px-3 py-2 text-sm focus:outline-hidden focus:ring-2 focus:ring-brand"
               />
             </label>
 
@@ -2078,7 +2297,7 @@ function SiemDestinationRow({ dest }: { dest: SiemDestination }) {
                 value={token}
                 onChange={(e) => setToken(e.target.value)}
                 placeholder={cfg.token_set ? "••••••••" : isSplunk ? "HEC token" : "Bearer token or API key"}
-                className="mt-1 w-full rounded-lg border px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-brand"
+                className="mt-1 w-full rounded-lg border px-3 py-2 text-sm focus:outline-hidden focus:ring-2 focus:ring-brand"
               />
             </label>
 
@@ -2090,7 +2309,7 @@ function SiemDestinationRow({ dest }: { dest: SiemDestination }) {
                     value={cfg.splunk_index}
                     onChange={(e) => patch({ splunk_index: e.target.value })}
                     placeholder="main"
-                    className="mt-1 w-full rounded-lg border px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-brand"
+                    className="mt-1 w-full rounded-lg border px-3 py-2 text-sm focus:outline-hidden focus:ring-2 focus:ring-brand"
                   />
                 </label>
                 <label className="block">
@@ -2099,7 +2318,7 @@ function SiemDestinationRow({ dest }: { dest: SiemDestination }) {
                     value={cfg.splunk_sourcetype}
                     onChange={(e) => patch({ splunk_sourcetype: e.target.value })}
                     placeholder="azsupagent:audit"
-                    className="mt-1 w-full rounded-lg border px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-brand"
+                    className="mt-1 w-full rounded-lg border px-3 py-2 text-sm focus:outline-hidden focus:ring-2 focus:ring-brand"
                   />
                 </label>
               </div>
@@ -2111,7 +2330,7 @@ function SiemDestinationRow({ dest }: { dest: SiemDestination }) {
                     value={cfg.auth_header}
                     onChange={(e) => patch({ auth_header: e.target.value })}
                     placeholder="Authorization"
-                    className="mt-1 w-full rounded-lg border px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-brand"
+                    className="mt-1 w-full rounded-lg border px-3 py-2 text-sm focus:outline-hidden focus:ring-2 focus:ring-brand"
                   />
                 </label>
                 <label className="block">
@@ -2120,7 +2339,7 @@ function SiemDestinationRow({ dest }: { dest: SiemDestination }) {
                     value={cfg.auth_scheme}
                     onChange={(e) => patch({ auth_scheme: e.target.value })}
                     placeholder="Bearer"
-                    className="mt-1 w-full rounded-lg border px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-brand"
+                    className="mt-1 w-full rounded-lg border px-3 py-2 text-sm focus:outline-hidden focus:ring-2 focus:ring-brand"
                   />
                 </label>
               </div>
@@ -2135,7 +2354,7 @@ function SiemDestinationRow({ dest }: { dest: SiemDestination }) {
                   max={1000}
                   value={cfg.batch_size}
                   onChange={(e) => patch({ batch_size: Number(e.target.value) || 1 })}
-                  className="mt-1 w-full rounded-lg border px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-brand"
+                  className="mt-1 w-full rounded-lg border px-3 py-2 text-sm focus:outline-hidden focus:ring-2 focus:ring-brand"
                 />
               </label>
               <div className="flex items-end">
@@ -2315,7 +2534,7 @@ function DemoDataCard() {
   );
 }
 
-function AuditCard() {
+function AuditCard({ canManageSiem }: { canManageSiem: boolean }) {
   const PAGE_SIZE = 25;
   const [page, setPage] = useState(0);
   const [exporting, setExporting] = useState<"csv" | "json" | null>(null);
@@ -2380,8 +2599,15 @@ function AuditCard() {
 
   return (
     <div className="space-y-4">
-      <SiemExportCard />
-      <section className="rounded-lg border bg-white p-4 shadow-sm">
+      {!canManageSiem && (
+        <div className="rounded-lg border border-sky-200 bg-sky-50 px-3 py-2 text-xs text-sky-800">
+          Audit entries and exports are available. SIEM destination configuration is read-only for this role.
+        </div>
+      )}
+      <fieldset disabled={!canManageSiem} className="contents">
+        <SiemExportCard />
+      </fieldset>
+      <section className="rounded-lg border bg-white p-4 shadow-xs">
       <div className="mb-3 flex items-center justify-between">
         <h2 className="font-medium">Audit Log</h2>
         <div className="flex items-center gap-2">
@@ -2460,14 +2686,14 @@ function AuditCard() {
           <button
             onClick={() => setPage(0)}
             disabled={page === 0}
-            className="rounded border px-2 py-1 hover:bg-gray-50 disabled:opacity-40"
+            className="rounded-sm border px-2 py-1 hover:bg-gray-50 disabled:opacity-40"
           >
             « First
           </button>
           <button
             onClick={() => setPage((p) => Math.max(0, p - 1))}
             disabled={page === 0}
-            className="rounded border px-2 py-1 hover:bg-gray-50 disabled:opacity-40"
+            className="rounded-sm border px-2 py-1 hover:bg-gray-50 disabled:opacity-40"
           >
             ‹ Prev
           </button>
@@ -2477,14 +2703,14 @@ function AuditCard() {
           <button
             onClick={() => setPage((p) => Math.min(pageCount - 1, p + 1))}
             disabled={page >= pageCount - 1}
-            className="rounded border px-2 py-1 hover:bg-gray-50 disabled:opacity-40"
+            className="rounded-sm border px-2 py-1 hover:bg-gray-50 disabled:opacity-40"
           >
             Next ›
           </button>
           <button
             onClick={() => setPage(pageCount - 1)}
             disabled={page >= pageCount - 1}
-            className="rounded border px-2 py-1 hover:bg-gray-50 disabled:opacity-40"
+            className="rounded-sm border px-2 py-1 hover:bg-gray-50 disabled:opacity-40"
           >
             Last »
           </button>
@@ -2621,7 +2847,7 @@ function SandboxVmsCard() {
     <Card title="Sandbox VMs">
       <p className="-mt-2 mb-4 text-sm text-gray-500">
         Onboard dedicated sandbox VMs (SSH) that sit inside a workload's network. The agent runs
-        diagnostic commands on them via <code className="rounded bg-gray-100 px-1">vm_exec</code> to reach
+        diagnostic commands on them via <code className="rounded-sm bg-gray-100 px-1">vm_exec</code> to reach
         private endpoints — in normal and deep chat. Link a VM to a workload to make it available
         when that workload is selected.
       </p>
@@ -2749,7 +2975,7 @@ function SandboxVmsCard() {
                 <span className="text-xs text-gray-400">{v.username}@{v.host}:{v.port}</span>
                 {v.strict_mode && <span className="rounded-full bg-amber-100 px-1.5 py-0.5 text-[10px] font-medium text-amber-700">strict</span>}
                 {v.disabled && <span className="rounded-full bg-gray-200 px-1.5 py-0.5 text-[10px] font-medium text-gray-500">disabled</span>}
-                {v.os_info && <span className="rounded bg-gray-100 px-1.5 py-0.5 text-[10px] text-gray-600">{v.os_info}</span>}
+                {v.os_info && <span className="rounded-sm bg-gray-100 px-1.5 py-0.5 text-[10px] text-gray-600">{v.os_info}</span>}
                 {v.last_tested && (
                   !v.allow_sudo
                     ? <span className="rounded-full bg-gray-100 px-1.5 py-0.5 text-[10px] font-medium text-gray-500" title="Sudo is disabled for this VM by an operator — the agent will not elevate or auto-install tools.">sudo off</span>
@@ -2757,7 +2983,7 @@ function SandboxVmsCard() {
                     ? <span className="rounded-full bg-green-100 px-1.5 py-0.5 text-[10px] font-medium text-green-700" title={v.sudo_mode === "password" ? "This VM/user can sudo using its SSH login password — the agent can auto-install missing tools." : "This VM/user has passwordless sudo — the agent can auto-install missing tools."}>🔑 sudo{v.sudo_mode === "password" ? " (pw)" : v.sudo_mode === "passwordless" ? " (nopasswd)" : ""}</span>
                     : <span className="rounded-full bg-gray-100 px-1.5 py-0.5 text-[10px] font-medium text-gray-500" title="No usable sudo for this VM/user — the agent cannot auto-install missing tools.">no sudo</span>
                 )}
-                {v.pkg_manager && <span className="rounded bg-blue-50 px-1.5 py-0.5 text-[10px] font-medium text-blue-700" title="Package manager detected on the VM.">pkg: {v.pkg_manager}</span>}
+                {v.pkg_manager && <span className="rounded-sm bg-blue-50 px-1.5 py-0.5 text-[10px] font-medium text-blue-700" title="Package manager detected on the VM.">pkg: {v.pkg_manager}</span>}
                 <span className="ml-auto flex gap-1">
                   <button onClick={() => void test(v.id)} disabled={busyId === v.id} className="rounded-lg border px-2.5 py-1 text-xs font-medium text-gray-700 hover:bg-gray-50 disabled:opacity-50">{busyId === v.id ? "Testing…" : "Test"}</button>
                   <button onClick={() => setRunFor(runFor === v.id ? null : v.id)} className="rounded-lg border px-2.5 py-1 text-xs text-gray-700 hover:bg-gray-50">Run</button>
@@ -2769,16 +2995,16 @@ function SandboxVmsCard() {
                 const linked = existingWorkloads(v.workload_ids);
                 return linked.length > 0 ? (
                   <div className="mt-1.5 flex flex-wrap gap-1 text-[11px] text-gray-500">
-                    {linked.map((wid) => <span key={wid} className="rounded bg-violet-50 px-1.5 py-0.5 text-violet-700">🧩 {wlName(wid)}</span>)}
+                    {linked.map((wid) => <span key={wid} className="rounded-sm bg-violet-50 px-1.5 py-0.5 text-violet-700">🧩 {wlName(wid)}</span>)}
                   </div>
                 ) : null;
               })()}
               {tm && (
                 <div className={`mt-1.5 text-xs ${tm.ok ? "text-green-600" : "text-red-600"}`}>
-                  {tm.text}{tm.pm ? <span className="ml-1 rounded bg-blue-50 px-1.5 py-0.5 text-[10px] text-blue-700">pkg: {tm.pm}</span> : null}
+                  {tm.text}{tm.pm ? <span className="ml-1 rounded-sm bg-blue-50 px-1.5 py-0.5 text-[10px] text-blue-700">pkg: {tm.pm}</span> : null}
                   {tm.caps && tm.caps.length > 0 && (
                     <div className="mt-1 flex flex-wrap gap-1">
-                      {tm.caps.map((c) => <span key={c} className="rounded bg-gray-100 px-1.5 py-0.5 text-[10px] text-gray-600">{c}</span>)}
+                      {tm.caps.map((c) => <span key={c} className="rounded-sm bg-gray-100 px-1.5 py-0.5 text-[10px] text-gray-600">{c}</span>)}
                     </div>
                   )}
                 </div>
@@ -2819,14 +3045,14 @@ function VmRunConsole({ vmId }: { vmId: string }) {
         <input value={cmd} onChange={(e) => setCmd(e.target.value)} onKeyDown={(e) => e.key === "Enter" && void run()} placeholder="e.g. dig +short example.com" className="flex-1 rounded-lg border px-2.5 py-1.5 font-mono text-xs" />
         <button onClick={() => void run()} disabled={busy} className="rounded-lg bg-brand px-3 py-1.5 text-xs font-medium text-white disabled:opacity-50">{busy ? "Running…" : "Run"}</button>
       </div>
-      {out && <pre className="mt-2 max-h-48 overflow-auto whitespace-pre-wrap rounded bg-gray-900 p-2 text-[11px] text-gray-100">{out}</pre>}
+      {out && <pre className="mt-2 max-h-48 overflow-auto whitespace-pre-wrap rounded-sm bg-gray-900 p-2 text-[11px] text-gray-100">{out}</pre>}
       {runs.length > 0 && (
         <div className="mt-2">
           <div className="mb-1 text-[10px] font-semibold uppercase tracking-wide text-gray-400">Recent runs</div>
           <div className="max-h-40 space-y-1 overflow-auto">
             {runs.slice(0, 10).map((r) => (
               <div key={r.id} className="flex items-center gap-2 text-[11px]">
-                <span className={`rounded px-1 py-0.5 ${r.status === "succeeded" ? "bg-green-100 text-green-700" : r.status === "blocked" ? "bg-amber-100 text-amber-700" : "bg-red-100 text-red-700"}`}>{r.status}</span>
+                <span className={`rounded-sm px-1 py-0.5 ${r.status === "succeeded" ? "bg-green-100 text-green-700" : r.status === "blocked" ? "bg-amber-100 text-amber-700" : "bg-red-100 text-red-700"}`}>{r.status}</span>
                 <code className="truncate text-gray-700">{r.command}</code>
                 <span className="ml-auto text-gray-400">{r.trigger}{r.duration_ms != null ? ` · ${r.duration_ms}ms` : ""}</span>
               </div>
@@ -2902,13 +3128,14 @@ function NumberField({
         <label className="text-sm font-medium text-gray-800">{label}</label>
         <div className="flex items-center gap-1.5">
           <input
+            aria-label={label}
             type="number"
             value={value}
             min={min}
             max={max}
             step={step}
             onChange={(e) => onChange(Number(e.target.value))}
-            className="w-28 rounded-lg border px-3 py-1.5 text-sm focus:outline-none focus:ring-2 focus:ring-brand"
+            className="w-28 rounded-lg border px-3 py-1.5 text-sm focus:outline-hidden focus:ring-2 focus:ring-brand"
           />
           {suffix && <span className="text-xs text-gray-400">{suffix}</span>}
         </div>
@@ -3053,7 +3280,7 @@ function AiPromptsCard() {
         const modifiedCount = groupPrompts.filter((p) => p.is_overridden).length;
         const open = !!openGroups[group];
         return (
-          <section key={group} className="overflow-hidden rounded-lg border bg-white shadow-sm">
+          <section key={group} className="overflow-hidden rounded-lg border bg-white shadow-xs">
             <button
               onClick={() => setOpenGroups((o) => ({ ...o, [group]: !o[group] }))}
               className="flex w-full items-start gap-3 px-4 py-3 text-left transition hover:bg-gray-50"
@@ -3090,18 +3317,18 @@ function AiPromptsCard() {
                 )}
                 <div className="space-y-5">
                   {groupPrompts.map((p) => (
-                    <div key={p.id} className="rounded-lg border bg-white p-3 shadow-sm">
+                    <div key={p.id} className="rounded-lg border bg-white p-3 shadow-xs">
                       <div className="flex items-center justify-between gap-2">
                         <div className="min-w-0">
                           <div className="flex items-center gap-2">
                             <span className="text-sm font-medium text-gray-800">{p.label}</span>
                             {p.is_overridden && (
-                              <span className="rounded bg-amber-100 px-1.5 py-0.5 text-[10px] font-medium text-amber-700">
+                              <span className="rounded-sm bg-amber-100 px-1.5 py-0.5 text-[10px] font-medium text-amber-700">
                                 modified
                               </span>
                             )}
                             {p.kind === "list" && (
-                              <span className="rounded bg-gray-100 px-1.5 py-0.5 text-[10px] text-gray-500">list</span>
+                              <span className="rounded-sm bg-gray-100 px-1.5 py-0.5 text-[10px] text-gray-500">list</span>
                             )}
                           </div>
                           <p className="mt-0.5 text-xs text-gray-500">{p.description}</p>
@@ -3109,7 +3336,7 @@ function AiPromptsCard() {
                         {savedId === p.id && <span className="shrink-0 text-xs text-green-600">Saved ✓</span>}
                       </div>
                       <textarea
-                        className="mt-2 w-full rounded-lg border px-3 py-2 text-[13px] leading-relaxed focus:outline-none focus:ring-2 focus:ring-brand"
+                        className="mt-2 w-full rounded-lg border px-3 py-2 text-[13px] leading-relaxed focus:outline-hidden focus:ring-2 focus:ring-brand"
                         rows={p.kind === "list" ? 3 : 7}
                         value={valueOf(p)}
                         onChange={(e) => setEdits((ed) => ({ ...ed, [p.id]: e.target.value }))}
@@ -3120,7 +3347,7 @@ function AiPromptsCard() {
                           <summary className="cursor-pointer hover:text-gray-600">
                             Locked output format (appended automatically)
                           </summary>
-                          <pre className="mt-1 whitespace-pre-wrap rounded bg-gray-50 p-2 font-mono text-[11px] text-gray-500">
+                          <pre className="mt-1 whitespace-pre-wrap rounded-sm bg-gray-50 p-2 font-mono text-[11px] text-gray-500">
                             {p.contract}
                           </pre>
                         </details>
@@ -3215,6 +3442,7 @@ function ScoringTaxonomyCard() {
         assessment_severity_weights: form.assessment_severity_weights,
         assessment_score_good: form.assessment_score_good,
         assessment_score_warn: form.assessment_score_warn,
+        assessments_include_recovery: form.assessments_include_recovery,
         architecture_category_colors: form.architecture_category_colors,
         workload_health_weights: form.workload_health_weights,
         workload_nightly_refresh: form.workload_nightly_refresh,
@@ -3226,6 +3454,11 @@ function ScoringTaxonomyCard() {
         arg_rate_limit_enabled: form.arg_rate_limit_enabled,
         arg_max_queries_per_window: form.arg_max_queries_per_window,
         arg_rate_window_seconds: form.arg_rate_window_seconds,
+        perfprofile_fleet_concurrency: form.perfprofile_fleet_concurrency,
+        perfprofile_fleet_start_delay_ms: form.perfprofile_fleet_start_delay_ms,
+        perfprofile_metric_concurrency: form.perfprofile_metric_concurrency,
+        perfprofile_metric_max_attempts: form.perfprofile_metric_max_attempts,
+        perfprofile_workload_timeout_s: form.perfprofile_workload_timeout_s,
       });
       setSaved(true);
       setTimeout(() => setSaved(false), 1800);
@@ -3268,7 +3501,7 @@ function ScoringTaxonomyCard() {
                 max={100}
                 value={weights[r.id] ?? 0}
                 onChange={(e) => setWeight(r.id, Number(e.target.value))}
-                className="w-20 rounded-lg border px-2 py-1.5 text-sm focus:outline-none focus:ring-2 focus:ring-brand"
+                className="w-20 rounded-lg border px-2 py-1.5 text-sm focus:outline-hidden focus:ring-2 focus:ring-brand"
               />
               <div className="hidden h-2 flex-1 overflow-hidden rounded-full bg-gray-100 sm:block">
                 <div
@@ -3282,12 +3515,38 @@ function ScoringTaxonomyCard() {
         </div>
       </Card>
 
+      <Card title="Recovery in the Reliability score">
+        <p className="mb-3 text-xs text-gray-500">
+          A tenant should not score well on Reliability while holding resources that cannot be
+          recovered at all. When this is on, an assessment that includes the Reliability pillar
+          picks up three aggregate controls from the latest Recovery Readiness analysis: no
+          recovery path, redundant but no point-in-time copy, and objectives breached.
+        </p>
+        <label className="flex items-start gap-2 text-sm text-gray-700">
+          <input
+            type="checkbox"
+            checked={!!form.assessments_include_recovery}
+            onChange={(e) => set({ assessments_include_recovery: e.target.checked })}
+            className="mt-0.5 h-4 w-4 rounded-sm border-gray-300 text-brand focus:ring-brand"
+          />
+          <span>
+            Count Recovery Readiness against the Reliability pillar
+            <span className="mt-1 block text-xs text-gray-500">
+              Off by default. Turning it on <strong>lowers existing Reliability scores</strong>,
+              which reads as a regression to anyone tracking a trend — announce it rather than
+              shipping it quietly. A workload that has never been analyzed contributes nothing:
+              its controls report <em>not applicable</em> rather than failing, because reporting
+              our own absence as your risk would be worse than staying quiet.
+            </span>
+          </span>
+        </label>
+      </Card>
+
       <Card title="Score color bands">
         <p className="mb-3 text-xs text-gray-500">
           Thresholds for the green/amber/red badges shown on scores across the Assessments
           dashboard.
-        </p>
-        <div className="flex flex-wrap items-end gap-6">
+        </p>        <div className="flex flex-wrap items-end gap-6">
           <label className="block">
             <span className="mb-1 block text-xs font-medium text-gray-600">Healthy at or above</span>
             <div className="flex items-center gap-1">
@@ -3297,7 +3556,7 @@ function ScoringTaxonomyCard() {
                 max={100}
                 value={good}
                 onChange={(e) => set({ assessment_score_good: Number(e.target.value) })}
-                className="w-24 rounded-lg border px-2 py-1.5 text-sm focus:outline-none focus:ring-2 focus:ring-brand"
+                className="w-24 rounded-lg border px-2 py-1.5 text-sm focus:outline-hidden focus:ring-2 focus:ring-brand"
               />
               <span className="text-sm text-gray-400">/ 100</span>
             </div>
@@ -3311,15 +3570,15 @@ function ScoringTaxonomyCard() {
                 max={99}
                 value={warn}
                 onChange={(e) => set({ assessment_score_warn: Number(e.target.value) })}
-                className="w-24 rounded-lg border px-2 py-1.5 text-sm focus:outline-none focus:ring-2 focus:ring-brand"
+                className="w-24 rounded-lg border px-2 py-1.5 text-sm focus:outline-hidden focus:ring-2 focus:ring-brand"
               />
               <span className="text-sm text-gray-400">/ 100</span>
             </div>
           </label>
           <div className="flex items-center gap-2 text-xs">
-            <span className="rounded px-2 py-0.5 font-semibold bg-green-100 text-green-700">≥ {good} healthy</span>
-            <span className="rounded px-2 py-0.5 font-semibold bg-amber-100 text-amber-700">≥ {warn} at risk</span>
-            <span className="rounded px-2 py-0.5 font-semibold bg-red-100 text-red-700">&lt; {warn} poor</span>
+            <span className="rounded-sm px-2 py-0.5 font-semibold bg-green-100 text-green-700">≥ {good} healthy</span>
+            <span className="rounded-sm px-2 py-0.5 font-semibold bg-amber-100 text-amber-700">≥ {warn} at risk</span>
+            <span className="rounded-sm px-2 py-0.5 font-semibold bg-red-100 text-red-700">&lt; {warn} poor</span>
           </div>
         </div>
         {warn >= good && (
@@ -3346,7 +3605,7 @@ function ScoringTaxonomyCard() {
                 step={0.5}
                 value={wlWeights[s.id] ?? 1}
                 onChange={(e) => setWlWeight(s.id, Number(e.target.value))}
-                className="w-20 rounded-lg border px-2 py-1.5 text-sm focus:outline-none focus:ring-2 focus:ring-brand"
+                className="w-20 rounded-lg border px-2 py-1.5 text-sm focus:outline-hidden focus:ring-2 focus:ring-brand"
               />
               <div className="hidden h-2 flex-1 overflow-hidden rounded-full bg-gray-100 sm:block">
                 <div className="h-full rounded-full bg-brand" style={{ width: `${(Number(wlWeights[s.id] ?? 1) / wlMax) * 100}%` }} />
@@ -3383,7 +3642,7 @@ function ScoringTaxonomyCard() {
                     type="color"
                     value={effective}
                     onChange={(e) => setColor(c.id, e.target.value)}
-                    className="h-7 w-7 shrink-0 cursor-pointer rounded border border-gray-200 bg-white p-0.5"
+                    className="h-7 w-7 shrink-0 cursor-pointer rounded-sm border border-gray-200 bg-white p-0.5"
                     aria-label={`${c.label} color`}
                   />
                   <span className="flex-1 truncate text-sm text-gray-700">{c.label}</span>
@@ -3465,7 +3724,7 @@ function AppSettingsCard() {
           onChange={(e) => set({ custom_instructions: e.target.value })}
           rows={5}
           placeholder="e.g. Always investigate the production subscription first. Prefer Azure CLI examples. Format findings as a table followed by next steps."
-          className="w-full resize-y rounded-lg border px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-brand"
+          className="w-full resize-y rounded-lg border px-3 py-2 text-sm focus:outline-hidden focus:ring-2 focus:ring-brand"
         />
         <div className="mt-4">
           <label className="mb-1 block text-xs font-medium text-gray-600">Response style</label>
@@ -3496,7 +3755,7 @@ function AppSettingsCard() {
             step={256}
             value={form.max_tokens}
             onChange={(e) => set({ max_tokens: Number(e.target.value) })}
-            className="w-40 rounded-lg border px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-brand"
+            className="w-40 rounded-lg border px-3 py-2 text-sm focus:outline-hidden focus:ring-2 focus:ring-brand"
           />
         </div>
       </Card>
@@ -3602,6 +3861,23 @@ function AppSettingsCard() {
             </div>
           )}
         </div>
+      </Card>
+
+      <Card title="Identity collection">
+        <p className="mb-3 text-xs text-gray-500">
+          Safety limits for explicit Microsoft Entra inventory refreshes. Changing this
+          setting does not start a scan and does not alter the last completed snapshot.
+        </p>
+        <NumberField
+          label="Application registration refresh limit"
+          hint="Normal refresh stops after this many app registrations. Use Full tenant on the Application Registrations page for an intentional complete enumeration. Higher values take longer and may encounter Graph throttling."
+          value={form.app_registrations_limit ?? 500}
+          min={50}
+          max={5000}
+          step={50}
+          suffix="apps"
+          onChange={(v) => set({ app_registrations_limit: v })}
+        />
       </Card>
 
       <Card title="Tool Safety">
@@ -3748,6 +4024,54 @@ function AppSettingsCard() {
             suffix="chars"
             onChange={(v) => set({ tool_discovery_limit: v })}
           />
+          <Toggle
+            label="Progressive tool routing"
+            hint="Expose a small relevant tool surface first, then load additional permitted tools through local catalog search. Keep enabled to avoid provider tool-count failures."
+            checked={form.tool_routing_enabled ?? true}
+            onChange={(v) => set({ tool_routing_enabled: v })}
+          />
+          <NumberField
+            label="Initial tool budget"
+            hint="Maximum schemas initially exposed after relevance routing. Four internal discovery tools are included in this count."
+            value={form.tool_initial_budget ?? 24}
+            min={4}
+            max={96}
+            step={1}
+            suffix="tools"
+            onChange={(v) => set({ tool_initial_budget: v })}
+          />
+          <NumberField
+            label="Per-turn tool ceiling"
+            hint="Maximum schemas after deferred searches and skill bundle expansion. It can never exceed 128."
+            value={form.tool_max_per_turn ?? 32}
+            min={4}
+            max={128}
+            step={1}
+            suffix="tools"
+            onChange={(v) => set({ tool_max_per_turn: v })}
+          />
+          <NumberField
+            label="Tools loaded per search"
+            hint="How many matching schemas a catalog search may add in one expansion round."
+            value={form.tool_search_page_size ?? 8}
+            min={1}
+            max={12}
+            step={1}
+            suffix="tools"
+            onChange={(v) => set({ tool_search_page_size: v })}
+          />
+          <Toggle
+            label="On-demand support skills"
+            hint="List compact workflow summaries and load the full investigation procedure only when selected. Skills guide work but never grant access."
+            checked={form.agent_skills_enabled ?? true}
+            onChange={(v) => set({ agent_skills_enabled: v })}
+          />
+          <Toggle
+            label="OpenAI native tool search (experimental)"
+            hint="For supported direct OpenAI Responses API models, defer schemas to client-executed native tool search. Other providers continue using the local router."
+            checked={form.openai_native_tool_search_enabled ?? false}
+            onChange={(v) => set({ openai_native_tool_search_enabled: v })}
+          />
           <NumberField
             label="LLM request timeout"
             hint="How long to wait for a single model streaming request before giving up. Raise it for slow, high-reasoning models on long turns; lower it to fail faster."
@@ -3812,6 +4136,66 @@ function AppSettingsCard() {
             step={500}
             suffix="changes"
             onChange={(v) => set({ changeexplorer_change_limit: v })}
+          />
+        </div>
+      </Card>
+
+      <Card title="Performance Profiler capacity">
+        <p className="mb-2 text-xs text-gray-500">
+          Fleet batches are durable and run on the server. These conservative defaults prevent
+          dozens of selected workloads from multiplying Azure Monitor calls and Azure CLI
+          processes. Increase them only after measuring both Azure throttling and host capacity.
+        </p>
+        <div className="grid gap-3 sm:grid-cols-2">
+          <NumberField
+            label="Fleet workloads in parallel"
+            hint="Default 1. This is the number of workload profiles the durable Fleet worker may run at once."
+            value={form.perfprofile_fleet_concurrency ?? 1}
+            min={1}
+            max={3}
+            step={1}
+            suffix="workloads"
+            onChange={(v) => set({ perfprofile_fleet_concurrency: v })}
+          />
+          <NumberField
+            label="Delay between Fleet starts"
+            hint="Spreads new workload starts so authentication and discovery do not burst simultaneously."
+            value={form.perfprofile_fleet_start_delay_ms ?? 1000}
+            min={0}
+            max={30000}
+            step={250}
+            suffix="ms"
+            onChange={(v) => set({ perfprofile_fleet_start_delay_ms: v })}
+          />
+          <NumberField
+            label="Azure Monitor calls in parallel"
+            hint="Process-wide across Fleet, single-scope runs, Mission Control, and agent tools. Default 2."
+            value={form.perfprofile_metric_concurrency ?? 2}
+            min={1}
+            max={12}
+            step={1}
+            suffix="calls"
+            onChange={(v) => set({ perfprofile_metric_concurrency: v })}
+          />
+          <NumberField
+            label="Metric request attempts"
+            hint="Total attempts for throttled or transient Azure Monitor requests, including the first call."
+            value={form.perfprofile_metric_max_attempts ?? 3}
+            min={1}
+            max={6}
+            step={1}
+            suffix="attempts"
+            onChange={(v) => set({ perfprofile_metric_max_attempts: v })}
+          />
+          <NumberField
+            label="Workload timeout"
+            hint="Hard ceiling for one workload profile. A timeout is recorded as a failed attempt and never replaces the latest successful result."
+            value={form.perfprofile_workload_timeout_s ?? 1200}
+            min={60}
+            max={7200}
+            step={60}
+            suffix="seconds"
+            onChange={(v) => set({ perfprofile_workload_timeout_s: v })}
           />
         </div>
       </Card>
@@ -4218,7 +4602,7 @@ function AIProviderCard() {
     }
   }
 
-  // Model lists are fetched only when the user clicks "Fetch model catalogue" / Refresh —
+  // Model lists are fetched only when the user clicks "Fetch model catalog" / Refresh —
   // never automatically on page load or provider switch (the catalog call can be slow and
   // hits the provider API). The dropdown falls back to the configured/free-text model id.
 
@@ -4306,9 +4690,9 @@ function AIProviderCard() {
       });
       qc.invalidateQueries({ queryKey: ["llmConfig"] });
       qc.invalidateQueries({ queryKey: ["activeLlm"] });
-      // Auto-refresh the model catalogue on the FIRST successful save of a connection — i.e.
+      // Auto-refresh the model catalog on the FIRST successful save of a connection — i.e.
       // when the viewed provider has no models loaded yet — so the admin doesn't have to click
-      // "↻ Refresh models" separately. Once a catalogue exists this won't re-fire on later saves.
+      // "↻ Refresh models" separately. Once a catalog exists this won't re-fire on later saves.
       if ((models[active]?.length ?? 0) === 0 && loadingModels !== active) {
         void refreshModels(active, active === "openrouter" ? forms[active]?.freeOnly : undefined);
       }
@@ -4368,7 +4752,7 @@ function AIProviderCard() {
   const activeProvider = cfg.data?.active_provider;
 
   return (
-    <section className="rounded-lg border bg-white shadow-sm">
+    <section className="rounded-lg border bg-white shadow-xs">
       <div className="border-b px-5 py-4">
         <h2 className="font-medium">AI Provider</h2>
         <p className="mt-0.5 text-xs text-gray-500">
@@ -4566,7 +4950,7 @@ function AIProviderCard() {
                         : "A key is set but looks unusually short — paste a new key to replace it"
                       : "Paste key to enable this provider"
                   }
-                  className="w-full rounded-lg border px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-brand"
+                  className="w-full rounded-lg border px-3 py-2 text-sm focus:outline-hidden focus:ring-2 focus:ring-brand"
                 />
                 <p className="mt-1 text-[11px] text-gray-400">{p.keyHint}</p>
               </div>
@@ -4589,7 +4973,7 @@ function AIProviderCard() {
                         ? "https://<resource>.services.ai.azure.com"
                         : "https://<resource>.openai.azure.com"
                     }
-                    className="w-full rounded-lg border px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-brand"
+                    className="w-full rounded-lg border px-3 py-2 text-sm focus:outline-hidden focus:ring-2 focus:ring-brand"
                   />
                   <p className="mt-1 text-[11px] text-gray-400">
                     {p.id === "azure_foundry"
@@ -4608,7 +4992,7 @@ function AIProviderCard() {
                       setForms((m) => ({ ...m, [p.id]: { ...form, apiVersion: e.target.value } }))
                     }
                     placeholder={p.id === "azure_foundry" ? "2024-05-01-preview" : "2024-10-21"}
-                    className="w-full rounded-lg border px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-brand"
+                    className="w-full rounded-lg border px-3 py-2 text-sm focus:outline-hidden focus:ring-2 focus:ring-brand"
                   />
                   <p className="mt-1 text-[11px] text-gray-400">
                     {p.id === "azure_foundry"
@@ -4631,7 +5015,7 @@ function AIProviderCard() {
                     setForms((m) => ({ ...m, [p.id]: { ...form, newKey: e.target.value } }))
                   }
                   placeholder={serverProv?.base_url || "http://localhost:11434/v1"}
-                  className="w-full rounded-lg border px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-brand"
+                  className="w-full rounded-lg border px-3 py-2 text-sm focus:outline-hidden focus:ring-2 focus:ring-brand"
                 />
                 <p className="mt-1 text-[11px] text-gray-400">{p.keyHint}</p>
               </div>
@@ -4678,12 +5062,12 @@ function AIProviderCard() {
                     </div>
                     <div className="flex items-center gap-2 text-gray-700">
                       <span>2. Enter code:</span>
-                      <code className="rounded bg-white px-2 py-1 text-base font-bold tracking-widest text-gray-900 border">
+                      <code className="rounded-sm bg-white px-2 py-1 text-base font-bold tracking-widest text-gray-900 border">
                         {ghDevice.user_code}
                       </code>
                       <button
                         onClick={() => void navigator.clipboard?.writeText(ghDevice.user_code)}
-                        className="rounded border border-gray-300 bg-white px-2 py-1 text-[11px] text-gray-600 hover:bg-gray-50"
+                        className="rounded-sm border border-gray-300 bg-white px-2 py-1 text-[11px] text-gray-600 hover:bg-gray-50"
                       >
                         Copy
                       </button>
@@ -4785,7 +5169,7 @@ function AIProviderCard() {
                 <div className="mt-3 space-y-2 text-xs text-gray-600">
                     <p className="text-[11px] text-gray-500">
                       Open the link, sign in, then paste the URL you land on
-                      (it ends in <code className="rounded bg-white px-1">…/auth/callback?code=…</code>,
+                      (it ends in <code className="rounded-sm bg-white px-1">…/auth/callback?code=…</code>,
                       and won't load — that's expected).
                     </p>
                     {chatgptAuthUrl && (
@@ -4793,7 +5177,7 @@ function AIProviderCard() {
                         readOnly
                         value={chatgptAuthUrl}
                         onFocus={(e) => e.currentTarget.select()}
-                        className="w-full rounded border bg-white px-2 py-1 text-[11px] text-gray-600"
+                        className="w-full rounded-sm border bg-white px-2 py-1 text-[11px] text-gray-600"
                       />
                     )}
                     <div className="flex gap-2">
@@ -4802,7 +5186,7 @@ function AIProviderCard() {
                         value={chatgptCallback}
                         onChange={(e) => setChatgptCallback(e.target.value)}
                         placeholder="Paste the redirected URL (…/auth/callback?code=…)"
-                        className="flex-1 rounded border bg-white px-2 py-1 text-xs focus:outline-none focus:ring-2 focus:ring-brand"
+                        className="flex-1 rounded-sm border bg-white px-2 py-1 text-xs focus:outline-hidden focus:ring-2 focus:ring-brand"
                       />
                       <button
                         onClick={() => void chatgptComplete()}
@@ -4878,14 +5262,14 @@ function AIProviderCard() {
                     <p className="text-[11px] text-gray-500">
                       Open the link, sign in, then paste the code shown on the
                       Claude callback page (it looks like{" "}
-                      <code className="rounded bg-white px-1">code#state</code>).
+                      <code className="rounded-sm bg-white px-1">code#state</code>).
                     </p>
                     {claudeAuthUrl && (
                       <input
                         readOnly
                         value={claudeAuthUrl}
                         onFocus={(e) => e.currentTarget.select()}
-                        className="w-full rounded border bg-white px-2 py-1 text-[11px] text-gray-600"
+                        className="w-full rounded-sm border bg-white px-2 py-1 text-[11px] text-gray-600"
                       />
                     )}
                     <div className="flex gap-2">
@@ -4894,7 +5278,7 @@ function AIProviderCard() {
                         value={claudeCallback}
                         onChange={(e) => setClaudeCallback(e.target.value)}
                         placeholder="Paste the code shown (code#state)"
-                        className="flex-1 rounded border bg-white px-2 py-1 text-xs focus:outline-none focus:ring-2 focus:ring-brand"
+                        className="flex-1 rounded-sm border bg-white px-2 py-1 text-xs focus:outline-hidden focus:ring-2 focus:ring-brand"
                       />
                       <button
                         onClick={() => void claudeComplete()}
@@ -4954,7 +5338,7 @@ function AIProviderCard() {
                   onChange={(e) =>
                     setForms((m) => ({ ...m, [p.id]: { ...form, model: e.target.value } }))
                   }
-                  className="min-w-0 flex-1 truncate rounded-lg border px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-brand"
+                  className="min-w-0 flex-1 truncate rounded-lg border px-3 py-2 text-sm focus:outline-hidden focus:ring-2 focus:ring-brand"
                 >
                   {form.model && !modelList.includes(form.model) && (
                     <option value={form.model}>{form.model}</option>
@@ -4974,7 +5358,7 @@ function AIProviderCard() {
                     setForms((m) => ({ ...m, [p.id]: { ...form, model: e.target.value } }))
                   }
                   placeholder="or type a model id"
-                  className="w-48 rounded-lg border px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-brand"
+                  className="w-48 rounded-lg border px-3 py-2 text-sm focus:outline-hidden focus:ring-2 focus:ring-brand"
                 />
               </div>
 
@@ -5031,7 +5415,7 @@ function AIProviderCard() {
 
             {(loadingModels === p.id || (refreshSteps[p.id]?.length ?? 0) > 0 || refreshResult[p.id]) && (
               <DiagnosticsPanel
-                title="Model catalogue refresh"
+                title="Model catalog refresh"
                 running={loadingModels === p.id}
                 steps={refreshSteps[p.id] ?? []}
                 result={refreshResult[p.id]}
@@ -5108,7 +5492,7 @@ function ModelVisibilityPanel({
           value={filter}
           onChange={(e) => setFilter(e.target.value)}
           placeholder="Filter models…"
-          className="min-w-0 flex-1 rounded border bg-white px-2 py-1 text-xs focus:outline-none focus:ring-2 focus:ring-brand"
+          className="min-w-0 flex-1 rounded-sm border bg-white px-2 py-1 text-xs focus:outline-hidden focus:ring-2 focus:ring-brand"
         />
         <button
           onClick={onRefresh}
@@ -5139,7 +5523,7 @@ function ModelVisibilityPanel({
       ) : filtered.length === 0 ? (
         <p className="text-xs italic text-gray-500">No models match "{filter}".</p>
       ) : (
-        <ul className="max-h-64 space-y-0.5 overflow-y-auto rounded border border-gray-200 bg-white p-1">
+        <ul className="max-h-64 space-y-0.5 overflow-y-auto rounded-sm border border-gray-200 bg-white p-1">
           {filtered.map((m) => {
             const isHidden = hiddenSet.has(m);
             return (
@@ -5278,7 +5662,7 @@ function DiagnosticsPanel({
                 </div>
                 {s?.detail && (
                   <div
-                    className={`mt-0.5 break-words text-[12px] ${
+                    className={`mt-0.5 wrap-break-word text-[12px] ${
                       s.status === "error" ? "text-red-600" : "text-gray-500"
                     }`}
                   >
@@ -5359,22 +5743,22 @@ function AmbaChangeRequestsCard() {
           {requests.map((r) => (
             <div key={r.id} className="rounded-lg border bg-white">
               <div className="flex flex-wrap items-center gap-2 px-3 py-2">
-                <span className={`rounded px-1.5 py-0.5 text-[11px] font-medium ${STATUS_CLS[r.status] ?? "bg-gray-100"}`}>{r.status}</span>
+                <span className={`rounded-sm px-1.5 py-0.5 text-[11px] font-medium ${STATUS_CLS[r.status] ?? "bg-gray-100"}`}>{r.status}</span>
                 <span className="text-sm font-medium text-gray-800">{r.scope_name || r.scope_id}</span>
                 <span className="text-xs text-gray-500">{r.gap_count} gap(s) · {r.iac_format}</span>
                 <span className="text-[11px] text-gray-400">by {r.requested_by}</span>
                 <div className="ml-auto flex items-center gap-1.5">
-                  <button onClick={() => setOpen(open === r.id ? null : r.id)} className="rounded border px-2 py-0.5 text-[11px] hover:bg-gray-50">{open === r.id ? "Hide IaC" : "View IaC"}</button>
+                  <button onClick={() => setOpen(open === r.id ? null : r.id)} className="rounded-sm border px-2 py-0.5 text-[11px] hover:bg-gray-50">{open === r.id ? "Hide IaC" : "View IaC"}</button>
                   {r.status === "pending" && (
                     <>
-                      <button onClick={() => void decide(r.id, "approved")} disabled={busy === r.id} className="rounded border border-green-300 px-2 py-0.5 text-[11px] text-green-700 hover:bg-green-50 disabled:opacity-50">Approve</button>
-                      <button onClick={() => void decide(r.id, "rejected")} disabled={busy === r.id} className="rounded border border-red-300 px-2 py-0.5 text-[11px] text-red-700 hover:bg-red-50 disabled:opacity-50">Reject</button>
+                      <button onClick={() => void decide(r.id, "approved")} disabled={busy === r.id} className="rounded-sm border border-green-300 px-2 py-0.5 text-[11px] text-green-700 hover:bg-green-50 disabled:opacity-50">Approve</button>
+                      <button onClick={() => void decide(r.id, "rejected")} disabled={busy === r.id} className="rounded-sm border border-red-300 px-2 py-0.5 text-[11px] text-red-700 hover:bg-red-50 disabled:opacity-50">Reject</button>
                     </>
                   )}
                   {r.status === "approved" && (
-                    <button onClick={() => void decide(r.id, "applied")} disabled={busy === r.id} className="rounded border px-2 py-0.5 text-[11px] hover:bg-gray-50 disabled:opacity-50">Mark applied</button>
+                    <button onClick={() => void decide(r.id, "applied")} disabled={busy === r.id} className="rounded-sm border px-2 py-0.5 text-[11px] hover:bg-gray-50 disabled:opacity-50">Mark applied</button>
                   )}
-                  <button onClick={() => void remove(r.id)} disabled={busy === r.id} className="rounded border px-2 py-0.5 text-[11px] text-gray-400 hover:bg-gray-50 disabled:opacity-50">Delete</button>
+                  <button onClick={() => void remove(r.id)} disabled={busy === r.id} className="rounded-sm border px-2 py-0.5 text-[11px] text-gray-400 hover:bg-gray-50 disabled:opacity-50">Delete</button>
                 </div>
               </div>
               {open === r.id && (
@@ -5439,22 +5823,22 @@ function TelemetryChangeRequestsCard() {
           {requests.map((r) => (
             <div key={r.id} className="rounded-lg border bg-white">
               <div className="flex flex-wrap items-center gap-2 px-3 py-2">
-                <span className={`rounded px-1.5 py-0.5 text-[11px] font-medium ${STATUS_CLS[r.status] ?? "bg-gray-100"}`}>{r.status}</span>
+                <span className={`rounded-sm px-1.5 py-0.5 text-[11px] font-medium ${STATUS_CLS[r.status] ?? "bg-gray-100"}`}>{r.status}</span>
                 <span className="text-sm font-medium text-gray-800">{r.scope_name || r.scope_id}</span>
                 <span className="text-xs text-gray-500">{r.gap_count} gap(s) · {r.iac_format}</span>
                 <span className="text-[11px] text-gray-400">by {r.requested_by}</span>
                 <div className="ml-auto flex items-center gap-1.5">
-                  <button onClick={() => setOpen(open === r.id ? null : r.id)} className="rounded border px-2 py-0.5 text-[11px] hover:bg-gray-50">{open === r.id ? "Hide" : "View"}</button>
+                  <button onClick={() => setOpen(open === r.id ? null : r.id)} className="rounded-sm border px-2 py-0.5 text-[11px] hover:bg-gray-50">{open === r.id ? "Hide" : "View"}</button>
                   {r.status === "pending" && (
                     <>
-                      <button onClick={() => void decide(r.id, "approved")} disabled={busy === r.id} className="rounded border border-green-300 px-2 py-0.5 text-[11px] text-green-700 hover:bg-green-50 disabled:opacity-50">Approve</button>
-                      <button onClick={() => void decide(r.id, "rejected")} disabled={busy === r.id} className="rounded border border-red-300 px-2 py-0.5 text-[11px] text-red-700 hover:bg-red-50 disabled:opacity-50">Reject</button>
+                      <button onClick={() => void decide(r.id, "approved")} disabled={busy === r.id} className="rounded-sm border border-green-300 px-2 py-0.5 text-[11px] text-green-700 hover:bg-green-50 disabled:opacity-50">Approve</button>
+                      <button onClick={() => void decide(r.id, "rejected")} disabled={busy === r.id} className="rounded-sm border border-red-300 px-2 py-0.5 text-[11px] text-red-700 hover:bg-red-50 disabled:opacity-50">Reject</button>
                     </>
                   )}
                   {r.status === "approved" && (
-                    <button onClick={() => void decide(r.id, "applied")} disabled={busy === r.id} className="rounded border px-2 py-0.5 text-[11px] hover:bg-gray-50 disabled:opacity-50">Mark applied</button>
+                    <button onClick={() => void decide(r.id, "applied")} disabled={busy === r.id} className="rounded-sm border px-2 py-0.5 text-[11px] hover:bg-gray-50 disabled:opacity-50">Mark applied</button>
                   )}
-                  <button onClick={() => void remove(r.id)} disabled={busy === r.id} className="rounded border px-2 py-0.5 text-[11px] text-gray-400 hover:bg-gray-50 disabled:opacity-50">Delete</button>
+                  <button onClick={() => void remove(r.id)} disabled={busy === r.id} className="rounded-sm border px-2 py-0.5 text-[11px] text-gray-400 hover:bg-gray-50 disabled:opacity-50">Delete</button>
                 </div>
               </div>
               {open === r.id && (
@@ -5517,22 +5901,22 @@ function BackupDrChangeRequestsCard() {
           {requests.map((r) => (
             <div key={r.id} className="rounded-lg border bg-white">
               <div className="flex flex-wrap items-center gap-2 px-3 py-2">
-                <span className={`rounded px-1.5 py-0.5 text-[11px] font-medium ${STATUS_CLS[r.status] ?? "bg-gray-100"}`}>{r.status}</span>
+                <span className={`rounded-sm px-1.5 py-0.5 text-[11px] font-medium ${STATUS_CLS[r.status] ?? "bg-gray-100"}`}>{r.status}</span>
                 <span className="text-sm font-medium text-gray-800">{r.scope_name || r.scope_id}</span>
                 <span className="text-xs text-gray-500">{r.gap_count} gap(s) · {r.iac_format}</span>
                 <span className="text-[11px] text-gray-400">by {r.requested_by}</span>
                 <div className="ml-auto flex items-center gap-1.5">
-                  <button onClick={() => setOpen(open === r.id ? null : r.id)} className="rounded border px-2 py-0.5 text-[11px] hover:bg-gray-50">{open === r.id ? "Hide" : "View"}</button>
+                  <button onClick={() => setOpen(open === r.id ? null : r.id)} className="rounded-sm border px-2 py-0.5 text-[11px] hover:bg-gray-50">{open === r.id ? "Hide" : "View"}</button>
                   {r.status === "pending" && (
                     <>
-                      <button onClick={() => void decide(r.id, "approved")} disabled={busy === r.id} className="rounded border border-green-300 px-2 py-0.5 text-[11px] text-green-700 hover:bg-green-50 disabled:opacity-50">Approve</button>
-                      <button onClick={() => void decide(r.id, "rejected")} disabled={busy === r.id} className="rounded border border-red-300 px-2 py-0.5 text-[11px] text-red-700 hover:bg-red-50 disabled:opacity-50">Reject</button>
+                      <button onClick={() => void decide(r.id, "approved")} disabled={busy === r.id} className="rounded-sm border border-green-300 px-2 py-0.5 text-[11px] text-green-700 hover:bg-green-50 disabled:opacity-50">Approve</button>
+                      <button onClick={() => void decide(r.id, "rejected")} disabled={busy === r.id} className="rounded-sm border border-red-300 px-2 py-0.5 text-[11px] text-red-700 hover:bg-red-50 disabled:opacity-50">Reject</button>
                     </>
                   )}
                   {r.status === "approved" && (
-                    <button onClick={() => void decide(r.id, "applied")} disabled={busy === r.id} className="rounded border px-2 py-0.5 text-[11px] hover:bg-gray-50 disabled:opacity-50">Mark applied</button>
+                    <button onClick={() => void decide(r.id, "applied")} disabled={busy === r.id} className="rounded-sm border px-2 py-0.5 text-[11px] hover:bg-gray-50 disabled:opacity-50">Mark applied</button>
                   )}
-                  <button onClick={() => void remove(r.id)} disabled={busy === r.id} className="rounded border px-2 py-0.5 text-[11px] text-gray-400 hover:bg-gray-50 disabled:opacity-50">Delete</button>
+                  <button onClick={() => void remove(r.id)} disabled={busy === r.id} className="rounded-sm border px-2 py-0.5 text-[11px] text-gray-400 hover:bg-gray-50 disabled:opacity-50">Delete</button>
                 </div>
               </div>
               {open === r.id && (
@@ -5658,13 +6042,13 @@ function RadarReferenceCard() {
         </div>
         {editing ? (
           <textarea value={draft} onChange={(e) => setDraft(e.target.value)} spellCheck={false}
-            className="h-96 w-full rounded-lg border bg-gray-900 p-3 font-mono text-[11px] text-gray-100 focus:outline-none" />
+            className="h-96 w-full rounded-lg border bg-gray-900 p-3 font-mono text-[11px] text-gray-100 focus:outline-hidden" />
         ) : (
           <div className="max-h-72 space-y-2 overflow-auto">
             {(ref?.model_lifecycle ?? []).map((m) => (
               <div key={`${m.model}-${m.version}`} className="flex items-center gap-2 rounded-lg border bg-white p-2 text-xs">
                 <span className="font-medium text-gray-800">{m.model} {m.version}</span>
-                <span className="rounded bg-gray-100 px-1.5 py-0.5 text-[10px] text-gray-600">{m.stage}</span>
+                <span className="rounded-sm bg-gray-100 px-1.5 py-0.5 text-[10px] text-gray-600">{m.stage}</span>
                 <span className="ml-auto text-gray-400">retires {m.retirement_date || "—"}</span>
               </div>
             ))}
@@ -5712,12 +6096,12 @@ function RadarReferenceCard() {
         <div className="space-y-1 text-xs">
           {(revsQ.data?.revisions ?? []).length === 0 && <p className="text-gray-400">No revisions yet.</p>}
           {(revsQ.data?.revisions ?? []).map((r) => (
-            <div key={r.id} className="flex items-center gap-2 rounded border bg-white px-2 py-1.5">
+            <div key={r.id} className="flex items-center gap-2 rounded-sm border bg-white px-2 py-1.5">
               <span className="font-medium">v{r.version}</span>
               <span className="text-gray-500">{r.reason}</span>
               <span className="text-gray-400">{r.rule_count} rules · {r.model_count} models</span>
               <span className="ml-auto text-gray-400">{r.by}</span>
-              <button onClick={() => void restore(r.id)} disabled={busy} className="rounded border px-2 py-0.5 hover:bg-gray-50 disabled:opacity-50">Restore</button>
+              <button onClick={() => void restore(r.id)} disabled={busy} className="rounded-sm border px-2 py-0.5 hover:bg-gray-50 disabled:opacity-50">Restore</button>
             </div>
           ))}
         </div>

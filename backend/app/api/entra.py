@@ -3,7 +3,7 @@
 Contract (see docs/improvement-plans/entra-support-agent/20-api-contract.md):
 
 * **Every GET reads the cache only.** A cold cache returns HTTP 200 with ``meta.loaded=false``
-  and a prompt to refresh — never a 500, never a silent live tenant scan.
+  and a prompt to refresh — never a 500, never a silent live scan.
 * **Every response carries ``meta``** with freshness, coverage, per-domain status, licences
   and the permission summary. The frontend renders ``meta`` before it renders data, which is
   what makes blindness impossible to hide.
@@ -15,7 +15,6 @@ Read-only: no endpoint here writes to the directory, and no Graph write scope is
 """
 from __future__ import annotations
 
-import asyncio
 import csv
 import datetime as _dt
 import io
@@ -29,7 +28,7 @@ from sse_starlette.sse import EventSourceResponse
 
 from app.core.db import get_db
 from app.core.security import Principal, require_permission
-from app.entra import DOMAINS, blastradius, ca_engine, ca_simulator, cache, demo as demo_mod, job, model, permissions_probe
+from app.entra import DOMAINS, blastradius, ca_simulator, cache, demo as demo_mod, job, model, permissions_probe
 from app.entra import investigate
 from app.entra import guests as guests_mod
 from app.entra import investigate_activity as inv_activity
@@ -70,7 +69,7 @@ def _target(principal: Principal, connection_id: str | None) -> tuple[dict[str, 
 
 def _snapshot(principal: Principal, connection_id: str | None) -> tuple[dict[str, Any], str, str]:
     _conn, tenant_id, cid = _target(principal, connection_id)
-    return snapshot_mod.analyse(tenant_id), tenant_id, cid
+    return snapshot_mod.analyze(tenant_id), tenant_id, cid
 
 
 def _envelope(snapshot: dict[str, Any], cid: str, **body: Any) -> dict[str, Any]:
@@ -118,14 +117,15 @@ async def status(
     connection_id: str | None = None,
     principal: Principal = Depends(require_read),
 ) -> dict[str, Any]:
-    """Snapshot freshness, per-domain state, licences and granted permissions."""
+    """Snapshot freshness, per-domain state, licenses and granted permissions."""
     snapshot, tenant_id, cid = _snapshot(principal, connection_id)
-    running = job.is_running(job.job_key(tenant_id))
+    running = await job.is_running(job.job_key(tenant_id))
+    current_job = await job.get_job(job.job_key(tenant_id))
     return _envelope(
         snapshot, cid,
         domains=[{**meta, "name": name} for name, meta in (snapshot.get("domains") or {}).items()],
         collectable=list(DOMAINS),
-        job=job.public_job(job.get_job(job.job_key(tenant_id))),
+        job=job.public_job(current_job),
         refreshing=running,
     )
 
@@ -147,7 +147,9 @@ async def refresh(
     if connection is None:
         raise HTTPException(status_code=400, detail="No Azure connection is configured.")
     wanted = [d for d in (body.domains if body else []) if d in DOMAINS] or None
-    running = job.start_job(tenant_id=tenant_id, connection=connection, domains=wanted, connection_id=cid)
+    running = await job.start_job(
+        tenant_id=tenant_id, connection=connection, domains=wanted, connection_id=cid
+    )
     db.add(AuditLog(
         tenant_id=principal.tenant_id, actor_id=principal.subject,
         action="entra.refresh", target=tenant_id,
@@ -193,7 +195,7 @@ async def setup_checklist(
 ) -> dict[str, Any]:
     """Which consent tier is granted, what each adds, and what is currently blind."""
     connection, tenant_id, cid = _target(principal, connection_id)
-    snapshot = snapshot_mod.analyse(tenant_id)
+    snapshot = snapshot_mod.analyze(tenant_id)
     permissions = snapshot.get("permissions") or {}
     granted = set(permissions.get("granted") or [])
     tiers = []
@@ -350,7 +352,7 @@ async def permissions_recheck(
     after = set(permissions.get("granted") or [])
     domains = permissions.get("domains") or {}
     return _envelope(
-        snapshot_mod.analyse(tenant_id), cid,
+        snapshot_mod.analyze(tenant_id), cid,
         granted=sorted(after),
         gained=sorted(after - before),
         revoked=sorted(before - after),
@@ -586,17 +588,18 @@ async def set_finding_state(
     if body.state == "suppressed" and not body.reason.strip():
         raise HTTPException(status_code=400, detail="A suppression requires a reason.")
 
-    state = snapshot_mod.read_state(tenant_id)
-    per = state.setdefault("findings", {})
-    entry = per.setdefault(fingerprint, {"first_seen": model.now_iso()})
-    entry.update({"state": body.state, "reason": body.reason, "assignee": body.assignee,
-                  "note": body.note, "updated_at": model.now_iso()})
-    suppressed = set(state.get("suppressed") or [])
-    suppressed.discard(fingerprint)
-    if body.state == "suppressed":
-        suppressed.add(fingerprint)
-    state["suppressed"] = sorted(suppressed)
-    snapshot_mod.write_state(tenant_id, state)
+    def _mutate(state: dict[str, Any]) -> None:
+        per = state.setdefault("findings", {})
+        entry = per.setdefault(fingerprint, {"first_seen": model.now_iso()})
+        entry.update({"state": body.state, "reason": body.reason, "assignee": body.assignee,
+                      "note": body.note, "updated_at": model.now_iso()})
+        suppressed = set(state.get("suppressed") or [])
+        suppressed.discard(fingerprint)
+        if body.state == "suppressed":
+            suppressed.add(fingerprint)
+        state["suppressed"] = sorted(suppressed)
+
+    snapshot_mod.mutate_state(tenant_id, _mutate)
 
     db.add(AuditLog(
         tenant_id=principal.tenant_id, actor_id=principal.subject,
@@ -751,7 +754,7 @@ def _exposure_findings(snapshot: dict[str, Any]) -> list[dict[str, Any]]:
     """Only the application-class exposure detectors.
 
     Filtering on ``object_kind in ("app_class", "app")`` looks equivalent and is not: every
-    app-hygiene signal in the product emits ``object_kind="app"``, so a real tenant dragged in
+    app-hygiene signal in the product emits ``object_kind="app"``, so a production-sized directory dragged in
     277 expired-certificate and multi-tenant-consent findings. They key off an application GUID
     rather than a class id, so they landed in no row while still inflating every count on the
     page.
@@ -849,12 +852,13 @@ async def ca_breakglass_confirm(
     then excluding it from findings would be dangerous, so the decision is always the
     operator's and it persists in ``findings_state``."""
     _conn, tenant_id, cid = _target(principal, connection_id)
-    state = snapshot_mod.read_state(tenant_id)
-    state.setdefault("breakglass", {})[body.user_id] = {
-        "confirmed": bool(body.confirmed), "note": body.note,
-        "by": principal.subject, "at": model.now_iso(),
-    }
-    snapshot_mod.write_state(tenant_id, state)
+    def _mutate(state: dict[str, Any]) -> None:
+        state.setdefault("breakglass", {})[body.user_id] = {
+            "confirmed": bool(body.confirmed), "note": body.note,
+            "by": principal.subject, "at": model.now_iso(),
+        }
+
+    snapshot_mod.mutate_state(tenant_id, _mutate)
     db.add(AuditLog(
         tenant_id=principal.tenant_id, actor_id=principal.subject,
         action="entra.breakglass_confirm", target=body.user_id,
@@ -1243,7 +1247,7 @@ async def privileged_activation_actions(
     from app.entra import activation_actions
 
     connection, tenant_id, cid = _target(principal, connection_id)
-    snapshot = snapshot_mod.analyse(tenant_id)
+    snapshot = snapshot_mod.analyze(tenant_id)
     rows, _domain = _activation_sessions(snapshot, tenant_id)
     match = next((r for r in rows if str(r.get("id") or "") == session_id), None)
     if match is None:
@@ -1304,26 +1308,9 @@ async def privileged_cross_plane(
     data = snapshot.get("data") or {}
     link = data.get("_azure_link") or {}
 
-    from app.entra.signal_defs.priv_pim import entra_power
+    from app.entra import crossplane
 
-    users = {str(u["id"]): u for u in (data.get("people") or {}).get("users") or []}
-    rows = []
-    for pid, entra in entra_power(data).items():
-        azure = (link.get("principals") or {}).get(pid) or {}
-        u = users.get(pid) or {}
-        rows.append({
-            "principal_id": pid,
-            "name": entra.get("name") or u.get("upn") or u.get("display_name") or azure.get("name") or pid,
-            "kind": entra.get("kind", "user"),
-            "entra_roles": entra.get("roles") or [],
-            "entra_permissions": entra.get("permissions") or [],
-            "azure_roles": azure.get("powerful_roles") or [],
-            "azure_all_roles": azure.get("role_count", 0),
-            "azure_broad_scopes": azure.get("broad_scopes") or [],
-            "azure_subscriptions": azure.get("subscriptions") or [],
-            "both_planes": bool(azure.get("powerful_roles")),
-        })
-    rows.sort(key=lambda r: (not r["both_planes"], -len(r["azure_roles"]), r["name"]))
+    rows = crossplane.rows(data)
     return _envelope(
         snapshot, cid, rows=rows[:1000], total=len(rows),
         azure_link={"available": link.get("available", False), "reason": link.get("reason", ""),
@@ -1502,7 +1489,7 @@ async def investigate_dossier(
 ) -> dict[str, Any]:
     """Everything already collected about one principal, converged.
 
-    Reads caches only — this endpoint makes no Graph or ARM call. Behavioural history
+    Reads caches only — this endpoint makes no Graph or ARM call. Behavioral history
     lives behind ``POST /investigate/{id}/activity`` and its own permission."""
     snapshot, tenant_id, cid = _snapshot(principal, connection_id)
     env, sections = await investigate.build_dossier(snapshot, tenant_id, principal_id.strip())
@@ -1600,6 +1587,19 @@ async def investigate_export(
                       + (" Membership is rule-derived (dynamic group)." if m.get("dynamic") else "")
                       + (" Membership is authored in on-premises AD." if m.get("on_prem_synced") else "")),
             )
+        if "memberships" in sections:
+            gm = sections["memberships"]["data"]
+            wb.sheet(
+                "Group memberships",
+                ["Group", "Why it matters", "Role-assignable", "Dynamic", "On-prem synced",
+                 "Object id"],
+                [[coerce(g.get("display_name")),
+                  coerce("; ".join(gm["source_labels"].get(s, s) for s in g.get("sources") or [])),
+                  coerce(g.get("role_assignable")), coerce(g.get("dynamic")),
+                  coerce(g.get("on_prem_synced")), coerce(g.get("id"))]
+                 for g in gm["groups"]],
+                note=sections["memberships"]["provenance"]["reason"],
+            )
         # Provenance is a SHEET, not a footnote: an auditor reading "no findings" needs to
         # know whether that means none were raised or the domain could not be read.
         wb.sheet(
@@ -1638,6 +1638,9 @@ class InvestigateMembersBody(BaseModel):
 
     expand: list[str] = Field(default_factory=list, max_length=100)
     direction: str = Field(default="down", pattern="^(down|up)$")
+    # Upward only. "Every group whose access reaches me" and "where was I actually added"
+    # are different questions, and collapsing them would answer neither reliably.
+    transitive: bool = False
 
 
 @router.post("/investigate/{principal_id}/members")
@@ -1648,7 +1651,7 @@ async def investigate_members(
     principal: Principal = Depends(require_investigate),
     db: AsyncSession = Depends(get_db),
 ) -> dict[str, Any]:
-    """One level of the group's membership tree, per branch asked for.
+    """One level of the membership tree, per branch asked for, in either direction.
 
     POST because it is a live directory read and a recorded act, and because the set of
     opened branches is a body, not a URL.
@@ -1660,34 +1663,47 @@ async def investigate_members(
     asked for rather than made on everyone's behalf.
 
     Gated on ``investigate.read`` rather than ``investigate.activity``: group membership is
-    a structural fact about access, not behavioural data about a person.
+    a structural fact about access, not behavioral data about a person.
     """
     from app.entra import investigate_members as inv_members
 
     connection, tenant_id, cid = _target(principal, connection_id)
-    snapshot = snapshot_mod.analyse(tenant_id)
+    snapshot = snapshot_mod.analyze(tenant_id)
     data = snapshot.get("data") or {}
 
     subject = await _resolve_principal(data, tenant_id, principal_id.strip())
     subject_id = str(subject.get("id") or principal_id)
+    kind = str(subject.get("kind") or "")
 
-    if subject.get("kind") != investigate.KIND_GROUP:
-        # Answered, not 400'd: asking a user for its members is a reasonable mistake to make
-        # from a deep link, and the answer is a sentence.
+    # Downward is groups-only; upward is for anything that can be IN a group, which is the
+    # whole point of lifting this — a user's group memberships are read the same way.
+    # Answered, not 400'd: asking a user for its members is a reasonable mistake to make
+    # from a deep link, and the answer is a sentence.
+    if body.direction == "down" and kind != investigate.KIND_GROUP:
         return _envelope(
             snapshot, cid, root=subject_id, direction=body.direction, nodes={}, truncated=False,
             notes=[f"{subject.get('display_name') or subject_id} is a "
-                   f"{subject.get('kind')}, not a group — only groups have members."],
+                   f"{kind or 'principal'}, not a group — only groups have members."],
+        )
+    if body.direction == "up" and subject.get("resolution") != investigate.RESOLVED:
+        return _envelope(
+            snapshot, cid, root=subject_id, direction=body.direction, nodes={}, truncated=False,
+            notes=["This principal could not be resolved in this directory, so the groups "
+                   "it belongs to cannot be read. That is not a claim that it belongs to "
+                   "none."],
         )
 
     result = await inv_members.expand(
         connection, subject_id, expand_ids=list(body.expand), direction=body.direction,
+        root_kind=kind or inv_members.TYPE_GROUP,
+        transitive=bool(body.transitive) and body.direction == "up",
     )
 
     db.add(AuditLog(
         tenant_id=principal.tenant_id, actor_id=principal.subject,
         action="investigate.members", target=subject_id,
         metadata_json={"direction": body.direction, "branches": len(body.expand) + 1,
+                       "kind": kind, "transitive": bool(body.transitive),
                        "connection_id": cid},
     ))
     await db.commit()
@@ -1707,7 +1723,7 @@ async def investigate_activity(
 
     POST rather than GET for three reasons: it is expensive, it carries a justification,
     and it is a recorded act. Reading a named person's sign-in and audit history is
-    behavioural data, which is why it sits behind its own permission and why every call
+    behavioral data, which is why it sits behind its own permission and why every call
     lands in the audit log with who asked, about whom, and why.
 
     The Azure Activity Log is never included unless explicitly asked for: it is
@@ -1715,7 +1731,7 @@ async def investigate_activity(
     from app.entra import activation_actions
 
     connection, tenant_id, cid = _target(principal, connection_id)
-    snapshot = snapshot_mod.analyse(tenant_id)
+    snapshot = snapshot_mod.analyze(tenant_id)
     data = snapshot.get("data") or {}
 
     subject = await _resolve_principal(data, tenant_id, principal_id.strip())
@@ -1747,6 +1763,16 @@ async def investigate_activity(
             "Microsoft Graph /auditLogs/signIns", collected_at=end_iso,
             unreadable=bool(err), reason=(f"Sign-in log {err}" if err else ""),
             truncated=len(rows) >= inv_activity.MAX_SIGNIN_ROWS))
+
+    if inv_activity.TYPE_SIGNINS_NONINTERACTIVE in wanted:
+        rows, err = await inv_activity.noninteractive_signins(
+            connection, subject, start_iso, end_iso)
+        sections[inv_activity.TYPE_SIGNINS_NONINTERACTIVE] = investigate.section(
+            rows, investigate.provenance(
+                "Microsoft Graph /auditLogs/signIns (beta, signInEventTypes=nonInteractiveUser)",
+                collected_at=end_iso,
+                unreadable=bool(err), reason=(f"Non-interactive sign-in log {err}" if err else ""),
+                truncated=len(rows) >= inv_activity.MAX_NONINTERACTIVE_SIGNIN_ROWS))
 
     if inv_activity.TYPE_RISK in wanted:
         rows, err = await inv_activity.risk_detections(connection, subject, start_iso, end_iso)
@@ -1835,7 +1861,7 @@ async def apps_inventory(
     tier: str | None = None,
     ownerless: bool = False,
     risk_min: int = Query(default=0, ge=0, le=100),
-    sort: str | None = Query(default=None, pattern="^(risk|name|permissions|credentials|owners|assigned|tier)$"),
+    sort: str | None = Query(default=None, pattern="^(risk|name|permissions|credentials|owners|assigned|tier|failed|signin)$"),
     dir: str = Query(default="desc", pattern="^(asc|desc)$"),
     offset: int = 0,
     limit: int = Query(default=200, ge=1, le=2000),
@@ -1847,17 +1873,20 @@ async def apps_inventory(
     data = snapshot.get("data") or {}
     apps = data.get("apps") or {}
     sps = {str(s["object_id"]): s for s in apps.get("service_principals") or []}
+    signin = apps.get("signin_activity") or {}
+    failed_by_app = signin.get("last_failed") or {}
+    seen_by_app = signin.get("last_seen") or {}
 
     rows = []
     for app in apps.get("applications") or []:
         sp = sps.get(app.get("sp_object_id")) or {}
-        rows.append(_app_row(app, sp))
+        rows.append(_app_row(app, sp, failed_by_app, seen_by_app))
     # Enterprise applications with no local registration (third-party consented apps).
     local = {a.get("sp_object_id") for a in apps.get("applications") or []}
     for oid, sp in sps.items():
         if oid in local or sp.get("is_first_party"):
             continue
-        rows.append(_app_row({}, sp))
+        rows.append(_app_row({}, sp, failed_by_app, seen_by_app))
 
     if search:
         needle = search.lower()
@@ -1879,6 +1908,10 @@ async def apps_inventory(
         "assigned": lambda r: r.get("assigned_principals"),
         "tier": lambda r: (_TIER_ORDER.index(r["max_permission_tier"])
                            if r.get("max_permission_tier") in _TIER_ORDER else None),
+        # "" means no failure was observed, which must not sort as an old date.
+        "failed": lambda r: r.get("last_failed_signin") or None,
+        # Same rule for a sign-in that was never seen.
+        "signin": lambda r: r.get("last_signin") or None,
     }, sort, dir)
 
     return _envelope(
@@ -1887,7 +1920,49 @@ async def apps_inventory(
         sort=sort or "", dir=dir,
         counts=apps.get("counts") or {}, capabilities=apps.get("capabilities") or {},
         risk_components=_risk_component_meta(),
+        # Lets the grid say "not measured" instead of rendering an empty cell as "no failure".
+        signin=_signin_meta(signin, tenant_id),
     )
+
+
+def _signin_meta(signin: dict[str, Any], tenant_id: str) -> dict[str, Any]:
+    """What the grid needs to caption the two sign-in columns honestly."""
+    from app.entra import signin_outcomes
+
+    outcomes = (signin.get("outcomes") or {}) if isinstance(signin, dict) else {}
+    state = signin_outcomes.job_state(tenant_id)
+    return {
+        "measured": bool(signin.get("measured")),
+        "outcomes_measured": bool(outcomes.get("measured")),
+        "reason": str(signin.get("reason") or outcomes.get("reason") or ""),
+        "window_days": int(signin.get("window_days") or 30),
+        "scope": str(outcomes.get("scope") or state.get("scope") or ""),
+        # True while the background pass still has applications left to read, so an empty
+        # failure cell can say "measuring" rather than implying "nothing failed".
+        "pending": bool(outcomes.get("pending")) or int(state.get("pending") or 0) > 0,
+        "pending_count": int(state.get("pending") or 0),
+        "checked_total": int(outcomes.get("cached") or 0),
+        "in_scope_total": int(state.get("total") or 0),
+    }
+
+
+@router.post("/apps/signin-outcomes/refresh")
+async def refresh_signin_outcomes(
+    connection_id: str | None = None,
+    principal: Principal = Depends(require_admin),
+) -> dict[str, Any]:
+    """Read the next slice of per-application sign-in outcomes without a full refresh.
+
+    The pass is capped per run, so a large tenant is filled in over several calls rather than
+    one that never returns.
+    """
+    from app.entra import signin_outcomes
+
+    connection, tenant_id, cid = _target(principal, connection_id)
+    if connection is None:
+        raise HTTPException(status_code=400, detail="No Azure connection is configured.")
+    result = await signin_outcomes.run_backfill(tenant_id, connection)
+    return {"connection_id": cid, **result, "state": signin_outcomes.job_state(tenant_id)}
 
 
 def _risk_component_meta() -> list[dict[str, Any]]:
@@ -1899,11 +1974,14 @@ def _risk_component_meta() -> list[dict[str, Any]]:
 _TIER_ORDER = ["low", "medium", "high", "critical"]
 
 
-def _app_row(app: dict[str, Any], sp: dict[str, Any]) -> dict[str, Any]:
+def _app_row(app: dict[str, Any], sp: dict[str, Any],
+             failed_by_app: dict[str, str] | None = None,
+             seen_by_app: dict[str, str] | None = None) -> dict[str, Any]:
     perms = sp.get("granted_app_permissions") or []
     creds = (app.get("credentials") or []) + (sp.get("credentials") or [])
     expiring = [c for c in creds if c.get("days_left") is not None and 0 <= c["days_left"] <= 90]
     risk = app.get("risk") or sp.get("risk") or {}
+    app_id = app.get("app_id") or sp.get("app_id", "")
     return {
         "object_id": app.get("object_id") or sp.get("object_id", ""),
         "sp_object_id": sp.get("object_id", ""),
@@ -1930,6 +2008,11 @@ def _app_row(app: dict[str, Any], sp: dict[str, Any]) -> dict[str, Any]:
         "orphaned": sp.get("orphaned", False),
         "risk_score": int(risk.get("score") or 0),
         "platform_managed": bool(risk.get("platform_managed")),
+        # An attempt Graph stamped after the last success — i.e. a rejected sign-in. "" means
+        # no evidence of one, which is NOT the same as the report being unreadable.
+        "last_failed_signin": str((failed_by_app or {}).get(str(app_id).lower(), "")),
+        # Newest sign-in observed inside the reporting window. "" means none was seen.
+        "last_signin": str((seen_by_app or {}).get(str(app_id).lower(), "")),
     }
 
 
@@ -1977,7 +2060,10 @@ async def app_360(
     granted_names = {p["permission"] for p in sp.get("granted_app_permissions") or []}
     return _envelope(
         snapshot, cid,
-        app={**_app_row(app, sp), "created_at": app.get("created_at", ""),
+        app={**_app_row(app, sp,
+                        (apps.get("signin_activity") or {}).get("last_failed") or {},
+                        (apps.get("signin_activity") or {}).get("last_seen") or {}),
+             "created_at": app.get("created_at", ""),
              "sign_in_audience": app.get("sign_in_audience", ""),
              "notes": app.get("notes", ""), "sso_mode": sp.get("sso_mode", ""),
              "assignment_required": sp.get("assignment_required", False),
@@ -2092,11 +2178,8 @@ async def ca_simulate(
 def _save_simulation(tenant_id: str, body: SimulateBody, result: dict[str, Any], actor: str) -> str:
     import uuid as _uuid
 
-    saved = cache.read_state(tenant_id, "simulations", [])
-    if not isinstance(saved, list):
-        saved = []
     sim_id = _uuid.uuid4().hex[:12]
-    saved.append({
+    simulation = {
         "id": sim_id,
         "label": body.label or ", ".join(result.get("changes") or []) or "Simulation",
         "at": model.now_iso(),
@@ -2104,8 +2187,14 @@ def _save_simulation(tenant_id: str, body: SimulateBody, result: dict[str, Any],
         "input": {"changes": body.changes, "contexts": body.contexts, "cohorts": body.cohorts,
                   "sample_size": body.sample_size},
         "result": result,
-    })
-    cache.write_state(tenant_id, "simulations", saved[-50:])
+    }
+
+    def _mutate(stored: Any) -> list[dict[str, Any]]:
+        saved = stored if isinstance(stored, list) else []
+        saved.append(simulation)
+        return saved[-50:]
+
+    cache.mutate_state(tenant_id, "simulations", [], _mutate)
     return sim_id
 
 
@@ -2173,9 +2262,22 @@ async def ca_simulation_rerun(
             status_code=409,
             detail=f"This simulation no longer applies to the current snapshot: {exc}",
         ) from exc
-    found["result"] = result
-    found["at"] = model.now_iso()
-    cache.write_state(tenant_id, "simulations", rows)
+    updated = False
+
+    def _mutate(stored: Any) -> list[dict[str, Any]]:
+        nonlocal updated
+        simulations = stored if isinstance(stored, list) else []
+        for simulation in simulations:
+            if simulation.get("id") == simulation_id:
+                simulation["result"] = result
+                simulation["at"] = model.now_iso()
+                updated = True
+                break
+        return simulations
+
+    cache.mutate_state(tenant_id, "simulations", [], _mutate)
+    if not updated:
+        raise HTTPException(status_code=404, detail="Simulation not found.")
     return _envelope(snapshot, cid, result=result, simulation_id=simulation_id)
 
 
@@ -2464,7 +2566,7 @@ async def governance_guests(
     people = data.get("people") or {}
     tenant = data.get("tenant") or {}
     s = snapshot_mod.settings()
-    summary = guests_mod.summarise(people, stale_days=s["guest_stale_days"])
+    summary = guests_mod.summarize(people, stale_days=s["guest_stale_days"])
     summary["domains"] = guests_mod.annotate_partners(
         summary["domains"], tenant.get("cross_tenant_partners") or {})
     analysis = _analysis(snapshot)
@@ -2588,7 +2690,7 @@ async def governance_coverage(
     """The synthesis: for each object class that should be governed, is it?
 
     Computed from the INVENTORY domains, so it renders on a tenant with no governance
-    licence at all — where every row honestly reads "never reviewed"."""
+    license at all — where every row honestly reads "never reviewed"."""
     from app.entra.collectors.governance import COVERAGE_CLASSES, coverage
 
     snapshot, _tenant_id, cid = _snapshot(principal, connection_id)
@@ -2672,41 +2774,63 @@ async def export_workbook(
 
     Carries the raw directory too (users, groups, service principals, registrations), which the
     tabs only ever show counts of. **The Users sheet contains personal data.**"""
-    connection, tenant_id, _cid = _target(principal, connection_id)
-    snapshot = snapshot_mod.analyse(tenant_id)
+    from app.iam import cpu as iam_cpu
 
-    # The few things the screens compute rather than store. Passed in so the formatter stays
-    # pure and can be unit-tested without a tenant.
-    escalations = [{
-        "source": e["source"], "target": e["target"], "primitive": e["data"]["primitive"],
-        "name": e["label"], "reason": e["data"]["reason"],
-        "confidence": e["data"]["confidence"], "rule": e["data"]["rule"],
-    } for e in blastradius.escalation_edges(snapshot.get("data") or {})]
+    _connection, tenant_id, _cid = _target(principal, connection_id)
 
-    granted = set((snapshot.get("permissions") or {}).get("granted") or [])
-    setup_tiers = [{
-        **tier,
-        "granted": [s for s in tier["scopes"] if s in granted],
-        "missing": [s for s in tier["scopes"] if s not in granted],
-        "complete": bool(granted) and all(s in granted for s in tier["scopes"]),
-    } for tier in permissions_probe.TIERS]
+    # EVERYTHING below runs in the worker thread, under the shared CPU cap. Only `_target`
+    # stays on the loop. Analysing the snapshot, merging the activation ledger and serialising
+    # fifty sheets is tens of seconds of pure-Python work; inline it froze every other request
+    # in the process, which is what turned a slow download into an application-wide outage.
+    def _build() -> bytes:
+        snapshot = snapshot_mod.analyze(tenant_id)
 
-    scanner_cards = [s.public() for s in scanners_mod.registry()]
+        # The few things the screens compute rather than store. Passed in so the formatter
+        # stays pure and can be unit-tested without a tenant.
+        escalations = [{
+            "source": e["source"], "target": e["target"], "primitive": e["data"]["primitive"],
+            "name": e["label"], "reason": e["data"]["reason"],
+            "confidence": e["data"]["confidence"], "rule": e["data"]["rule"],
+        } for e in blastradius.escalation_edges(snapshot.get("data") or {})]
 
-    # The screen merges the snapshot's sessions with the durable ledger so history reaches past
-    # Graph's 30-day retention. Reading the snapshot alone loses those older sessions.
-    merged_sessions, _domain = _activation_sessions(snapshot, tenant_id, history=True)
-    merged_sessions = _decorate(merged_sessions, snapshot, 0.0, (8, 18))
+        granted = set((snapshot.get("permissions") or {}).get("granted") or [])
+        setup_tiers = [{
+            **tier,
+            "granted": [s for s in tier["scopes"] if s in granted],
+            "missing": [s for s in tier["scopes"] if s not in granted],
+            "complete": bool(granted) and all(s in granted for s in tier["scopes"]),
+        } for tier in permissions_probe.TIERS]
 
-    content = await asyncio.to_thread(
-        entra_export.to_workbook,
-        snapshot=snapshot,
-        escalations=escalations,
-        history=score_mod.history(tenant_id) if hasattr(score_mod, "history") else None,
-        setup_tiers=setup_tiers,
-        scanners=scanner_cards,
-        activations=merged_sessions,
-    )
+        # Exactly what GET /entra/scanners builds. `public()` alone carries no run history and
+        # no blocked reason, so the workbook's Blocked column read "no" for every scanner
+        # including the ones that could not run at all.
+        scanner_runs = scanners_mod.read_runs(tenant_id)
+        domain_meta = snapshot.get("domains") or {}
+        scanner_cards = []
+        for scanner in scanners_mod.registry():
+            last = scanner_runs.get(scanner.id) or {}
+            scanner_cards.append({
+                **scanner.public(),
+                "last_run": last.get("at", ""),
+                "last_counts": last.get("counts") or {},
+                "blocked": scanners_mod.unavailable_reason(scanner, domain_meta),
+            })
+
+        # The screen merges the snapshot's sessions with the durable ledger so history reaches
+        # past Graph's 30-day retention. Reading the snapshot alone loses those older sessions.
+        merged_sessions, _domain = _activation_sessions(snapshot, tenant_id, history=True)
+        merged_sessions = _decorate(merged_sessions, snapshot, 0.0, (8, 18))
+
+        return entra_export.to_workbook(
+            snapshot=snapshot,
+            escalations=escalations,
+            history=score_mod.history(tenant_id) if hasattr(score_mod, "history") else None,
+            setup_tiers=setup_tiers,
+            scanners=scanner_cards,
+            activations=merged_sessions,
+        )
+
+    content = await iam_cpu.run(_build, label="entra workbook export")
     return Response(
         content=content,
         media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
@@ -2724,7 +2848,7 @@ async def graph_targets(
 
     ``q`` narrows the list server-side. Without it the picker is a plain list capped at
     ``_PICK_LIMIT``, which on a 20,000-seat tenant put 95% of the directory out of reach:
-    the blast-radius screen could not be pointed at most of the people it exists to analyse.
+    the blast-radius screen could not be pointed at most of the people it exists to analyze.
     """
     snapshot, _tenant_id, cid = _snapshot(principal, connection_id)
     data = snapshot.get("data") or {}
@@ -2919,7 +3043,7 @@ async def _notify_scanner_results(tenant_id: str, results: list[dict[str, Any]])
                 source="entra",
                 severity=scanners_mod.notification_severity(result),
                 title=f"{result['name']}: {result['counts']['new']} new finding(s)",
-                body=scanners_mod.summarise(result),
+                body=scanners_mod.summarize(result),
                 facts={"scanner_id": result["scanner_id"], **result["counts"],
                        "immediate": len(result["immediate"])},
                 links={"Open the findings inbox": "/entra/findings"},
@@ -3064,24 +3188,24 @@ async def inbox_bulk(
 
     from datetime import datetime, timedelta, timezone
 
-    state = snapshot_mod.read_state(tenant_id)
-    per = state.setdefault("findings", {})
-    suppressed = set(state.get("suppressed") or [])
     until = ""
     if body.state == "snoozed":
         until = (datetime.now(timezone.utc) + timedelta(days=body.snooze_days)).isoformat()
 
-    for fingerprint in body.fingerprints[:2000]:
-        entry = per.setdefault(fingerprint, {"first_seen": model.now_iso()})
-        entry.update({"state": body.state, "reason": body.reason, "assignee": body.assignee,
-                      "note": body.note, "snoozed_until": until,
-                      "updated_at": model.now_iso()})
-        suppressed.discard(fingerprint)
-        if body.state == "suppressed":
-            suppressed.add(fingerprint)
-    state["suppressed"] = sorted(suppressed)
-    snapshot_mod.write_state(tenant_id, state)
-    snapshot_mod.invalidate(tenant_id)
+    def _mutate(state: dict[str, Any]) -> None:
+        per = state.setdefault("findings", {})
+        suppressed = set(state.get("suppressed") or [])
+        for fingerprint in body.fingerprints[:2000]:
+            entry = per.setdefault(fingerprint, {"first_seen": model.now_iso()})
+            entry.update({"state": body.state, "reason": body.reason, "assignee": body.assignee,
+                          "note": body.note, "snoozed_until": until,
+                          "updated_at": model.now_iso()})
+            suppressed.discard(fingerprint)
+            if body.state == "suppressed":
+                suppressed.add(fingerprint)
+        state["suppressed"] = sorted(suppressed)
+
+    snapshot_mod.mutate_state(tenant_id, _mutate)
 
     db.add(AuditLog(
         tenant_id=principal.tenant_id, actor_id=principal.subject,

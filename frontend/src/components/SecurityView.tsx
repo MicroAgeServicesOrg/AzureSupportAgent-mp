@@ -1,17 +1,26 @@
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Link } from "react-router-dom";
 import {
   api,
+  downloadBlob,
   HttpError,
   type AcGroup,
   type AcIdp,
   type AcRole,
   type AcUser,
   type AuthPolicies,
+  type FirewallMode,
+  type FirewallImportContext,
+  type FirewallImportFormat,
+  type FirewallImportPreview,
+  type FirewallImportStrategy,
+  type FirewallResolution,
+  type FirewallRule,
   type IdpTestResult,
 } from "../api";
 import { apiBase } from "../api";
+import { useAuth } from "./AuthContext";
 import { roleLabel } from "../utils/roleLabel";
 import {
   ACCESS_NAV,
@@ -26,7 +35,7 @@ export { SECURITY_NAV, ACCESS_NAV, ACCESS_SUB_IDS };
 // ------------------------------------------------------------------ shared bits
 function Card({ title, children, actions }: { title: string; children: React.ReactNode; actions?: React.ReactNode }) {
   return (
-    <section className="rounded-lg border bg-white p-4 shadow-sm">
+    <section className="rounded-lg border bg-white p-4 shadow-xs">
       <div className="mb-3 flex items-center justify-between">
         <h2 className="font-medium">{title}</h2>
         {actions}
@@ -79,7 +88,7 @@ function Field({ label, children }: { label: string; children: React.ReactNode }
 }
 
 const inputCls =
-  "w-full rounded-md border border-slate-300 px-3 py-2 text-sm focus:border-brand-dark focus:outline-none";
+  "w-full rounded-md border border-slate-300 px-3 py-2 text-sm focus:border-brand-dark focus:outline-hidden";
 
 function errMsg(e: unknown): string {
   return e instanceof HttpError ? e.detail : "Something went wrong.";
@@ -109,7 +118,7 @@ function UsersCard() {
         </Btn>
       }
     >
-      {err && <div className="mb-3 rounded border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-700">{err}</div>}
+      {err && <div className="mb-3 rounded-sm border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-700">{err}</div>}
       {creating && (
         <UserForm
           roles={roles.data ?? []}
@@ -159,7 +168,7 @@ function UsersCard() {
                   <div className="flex flex-wrap gap-1">
                     {u.role_names.length === 0 && <span className="text-xs text-slate-400">—</span>}
                     {u.role_names.map((n) => (
-                      <span key={n} className="rounded bg-slate-100 px-1.5 py-0.5 text-xs">{roleLabel(n)}</span>
+                      <span key={n} className="rounded-sm bg-slate-100 px-1.5 py-0.5 text-xs">{roleLabel(n)}</span>
                     ))}
                   </div>
                 </td>
@@ -175,7 +184,7 @@ function UsersCard() {
                     {u.status}
                   </span>
                   {u.locked && (
-                    <span className="ml-1 rounded bg-amber-100 px-1.5 py-0.5 text-xs text-amber-700">locked</span>
+                    <span className="ml-1 rounded-sm bg-amber-100 px-1.5 py-0.5 text-xs text-amber-700">locked</span>
                   )}
                 </td>
                 <td className="py-2 pr-3 text-xs text-slate-500">
@@ -464,7 +473,7 @@ function RolesCard() {
       title="Roles"
       actions={<Btn variant="primary" onClick={() => { setCreating(true); setEditing(null); setErr(null); }}>+ New role</Btn>}
     >
-      {err && <div className="mb-3 rounded border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-700">{err}</div>}
+      {err && <div className="mb-3 rounded-sm border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-700">{err}</div>}
       {(creating || editing) && (
         <RoleForm
           role={editing}
@@ -476,12 +485,12 @@ function RolesCard() {
       )}
       <div className="space-y-2">
         {roles.data?.map((r) => (
-          <div key={r.id} className="rounded border p-3">
+          <div key={r.id} className="rounded-sm border p-3">
             <div className="flex items-start justify-between">
               <div>
                 <div className="flex items-center gap-2">
                   <span className="font-medium text-slate-800">{roleLabel(r.name)}</span>
-                  {r.is_system && <span className="rounded bg-slate-100 px-1.5 py-0.5 text-xs text-slate-500">system</span>}
+                  {r.is_system && <span className="rounded-sm bg-slate-100 px-1.5 py-0.5 text-xs text-slate-500">system</span>}
                 </div>
                 <div className="text-xs text-slate-500">{r.description}</div>
               </div>
@@ -503,7 +512,7 @@ function RolesCard() {
             </div>
             <div className="mt-2 flex flex-wrap gap-1">
               {r.permissions.map((p) => (
-                <span key={p} className="rounded bg-slate-100 px-1.5 py-0.5 text-xs text-slate-600">{p}</span>
+                <span key={p} className="rounded-sm bg-slate-100 px-1.5 py-0.5 text-xs text-slate-600">{p}</span>
               ))}
             </div>
           </div>
@@ -570,7 +579,7 @@ function RoleForm({
             const allOn = keys.every((k) => selected.includes(k));
             const someOn = keys.some((k) => selected.includes(k));
             return (
-              <div key={group} className="rounded border bg-white">
+              <div key={group} className="rounded-sm border bg-white">
                 <div className="flex items-center justify-between border-b bg-slate-50 px-3 py-1.5">
                   <span className="text-xs font-semibold uppercase tracking-wide text-slate-500">{group}</span>
                   <button
@@ -583,7 +592,7 @@ function RoleForm({
                 </div>
                 <div className="grid grid-cols-1 gap-1.5 p-2 sm:grid-cols-2">
                   {items.map((p) => (
-                    <label key={p.key} className="flex items-start gap-2 rounded border bg-white px-2 py-1.5 text-sm">
+                    <label key={p.key} className="flex items-start gap-2 rounded-sm border bg-white px-2 py-1.5 text-sm">
                       <input type="checkbox" checked={selected.includes(p.key)} onChange={() => toggle(p.key)} className="mt-0.5" />
                       <span>
                         <span className="font-medium text-slate-700">{p.label}</span>
@@ -622,7 +631,7 @@ function GroupsCard() {
       title="Groups"
       actions={<Btn variant="primary" onClick={() => { setCreating(true); setEditing(null); setErr(null); }}>+ New group</Btn>}
     >
-      {err && <div className="mb-3 rounded border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-700">{err}</div>}
+      {err && <div className="mb-3 rounded-sm border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-700">{err}</div>}
       {(creating || editing) && (
         <GroupForm
           group={editing}
@@ -635,13 +644,13 @@ function GroupsCard() {
       <div className="space-y-2">
         {groups.data?.length === 0 && <p className="text-sm text-slate-500">No groups yet.</p>}
         {groups.data?.map((g) => (
-          <div key={g.id} className="flex items-start justify-between rounded border p-3">
+          <div key={g.id} className="flex items-start justify-between rounded-sm border p-3">
             <div>
               <div className="font-medium text-slate-800">{g.name}</div>
               <div className="text-xs text-slate-500">{g.description}</div>
               <div className="mt-1 flex flex-wrap gap-1">
                 {g.role_ids.map((rid) => (
-                  <span key={rid} className="rounded bg-slate-100 px-1.5 py-0.5 text-xs">
+                  <span key={rid} className="rounded-sm bg-slate-100 px-1.5 py-0.5 text-xs">
                     {roles.data?.find((r) => r.id === rid)?.name ?? rid}
                   </span>
                 ))}
@@ -763,7 +772,7 @@ function IdentityProvidersCard() {
         </div>
       }
     >
-      {err && <div className="mb-3 rounded border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-700">{err}</div>}
+      {err && <div className="mb-3 rounded-sm border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-700">{err}</div>}
       <p className="mb-3 text-sm text-slate-500">
         Connect Microsoft Entra ID, Okta, Auth0, Google, ADFS, PingFederate, or any
         OIDC/SAML 2.0 provider. Local password sign-in is configured under{" "}
@@ -784,12 +793,12 @@ function IdentityProvidersCard() {
       <div className="space-y-2">
         {idps.data?.length === 0 && <p className="text-sm text-slate-500">No identity providers configured.</p>}
         {idps.data?.map((p) => (
-          <div key={p.id} className="flex items-center justify-between rounded border p-3">
+          <div key={p.id} className="flex items-center justify-between rounded-sm border p-3">
             <div>
               <div className="flex items-center gap-2">
                 <span className="font-medium text-slate-800">{p.name}</span>
-                <span className="rounded bg-slate-100 px-1.5 py-0.5 text-xs uppercase text-slate-500">{p.type}</span>
-                <span className={`rounded px-1.5 py-0.5 text-xs ${p.enabled ? "bg-emerald-100 text-emerald-700" : "bg-slate-200 text-slate-600"}`}>
+                <span className="rounded-sm bg-slate-100 px-1.5 py-0.5 text-xs uppercase text-slate-500">{p.type}</span>
+                <span className={`rounded-sm px-1.5 py-0.5 text-xs ${p.enabled ? "bg-emerald-100 text-emerald-700" : "bg-slate-200 text-slate-600"}`}>
                   {p.enabled ? "enabled" : "disabled"}
                 </span>
               </div>
@@ -865,7 +874,7 @@ function CopyBtn({ value }: { value: string }) {
           setTimeout(() => setCopied(false), 1500);
         } catch { /* clipboard blocked */ }
       }}
-      className="shrink-0 rounded border border-slate-300 px-1.5 py-0.5 text-[11px] font-medium text-slate-600 hover:bg-slate-100"
+      className="shrink-0 rounded-sm border border-slate-300 px-1.5 py-0.5 text-[11px] font-medium text-slate-600 hover:bg-slate-100"
       title="Copy"
     >
       {copied ? "✓ Copied" : "Copy"}
@@ -894,7 +903,7 @@ function SsoSetupGuide({ type, redirectUri, metadataUrl, hasId }: { type: string
       {open && (
         <div className="space-y-3 border-t border-indigo-100 px-4 py-3 text-xs text-slate-600">
           {!hasId && (
-            <div className="rounded border border-amber-200 bg-amber-50 px-2 py-1.5 text-amber-700">
+            <div className="rounded-sm border border-amber-200 bg-amber-50 px-2 py-1.5 text-amber-700">
               Tip: <b>Create the provider first</b> (button below), then re-open this guide — the
               Redirect URI will then contain the real provider ID to paste into Entra.
             </div>
@@ -975,7 +984,7 @@ function Step({ n, title, children }: { n: number; title: string; children: Reac
 
 function CopyRow({ label, value }: { label: string; value: string }) {
   return (
-    <div className="mt-1.5 flex items-center gap-2 rounded border border-slate-200 bg-white px-2 py-1">
+    <div className="mt-1.5 flex items-center gap-2 rounded-sm border border-slate-200 bg-white px-2 py-1">
       <span className="shrink-0 text-[11px] font-medium text-slate-400">{label}</span>
       <span className="min-w-0 flex-1 truncate font-mono text-[11px] text-slate-700" title={value}>{value}</span>
       <CopyBtn value={value} />
@@ -1102,7 +1111,7 @@ function IdpForm({
           </span>
         </label>
       )}
-      <div className="mt-3 rounded border border-slate-200 bg-white p-3 text-xs text-slate-500">
+      <div className="mt-3 rounded-sm border border-slate-200 bg-white p-3 text-xs text-slate-500">
         <div className="font-medium text-slate-600">Configure at your IdP:</div>
         {type === "saml" ? (
           <>
@@ -1201,7 +1210,7 @@ function SessionsCard() {
         </div>
       }
     >
-      {err && <div className="mb-3 rounded border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-700">{err}</div>}
+      {err && <div className="mb-3 rounded-sm border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-700">{err}</div>}
       <label className="mb-3 flex items-center gap-2 text-xs text-slate-500">
         <input type="checkbox" checked={showExpired} onChange={(e) => setShowExpired(e.target.checked)} />
         Show expired sessions{expiredCount > 0 ? ` (${expiredCount})` : ""}
@@ -1296,7 +1305,7 @@ function PoliciesCard() {
     </Field>
   );
   const boolRow = (k: keyof AuthPolicies, label: string, hint?: string) => (
-    <label className="flex items-start gap-2 rounded border bg-white px-3 py-2 text-sm">
+    <label className="flex items-start gap-2 rounded-sm border bg-white px-3 py-2 text-sm">
       <input type="checkbox" checked={values[k] as boolean} onChange={(e) => set(k, e.target.checked as never)} className="mt-0.5" />
       <span>
         <span className="font-medium text-slate-700">{label}</span>
@@ -1314,8 +1323,8 @@ function PoliciesCard() {
         </Btn>
       }
     >
-      {err && <div className="mb-3 rounded border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-700">{err}</div>}
-      {saved && <div className="mb-3 rounded border border-emerald-200 bg-emerald-50 px-3 py-2 text-sm text-emerald-700">Policy saved.</div>}
+      {err && <div className="mb-3 rounded-sm border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-700">{err}</div>}
+      {saved && <div className="mb-3 rounded-sm border border-emerald-200 bg-emerald-50 px-3 py-2 text-sm text-emerald-700">Policy saved.</div>}
 
       <h3 className="mb-2 text-sm font-semibold text-slate-700">Sign-in methods</h3>
       <div className="grid grid-cols-1 gap-2 sm:grid-cols-2">
@@ -1330,6 +1339,14 @@ function PoliciesCard() {
       </div>
 
       <h3 className="mb-2 mt-5 text-sm font-semibold text-slate-700">Brute-force protection</h3>
+      <p className="mb-2 text-xs text-slate-400">
+        These react <em>after</em> failed sign-ins. To stop unknown addresses reaching the sign-in
+        page at all, see{" "}
+        <Link to="/admin/firewall" className="font-semibold text-brand-dark hover:underline">
+          Network Access
+        </Link>
+        .
+      </p>
       <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
         {numField("max_failed_attempts", "Max failed attempts (per account)", "After this many wrong passwords for the same user, the account is auto-locked.")}
         {numField("lockout_minutes", "Account lockout duration (minutes)", "Account auto-unlocks after this many minutes.")}
@@ -1378,8 +1395,1092 @@ function PoliciesCard() {
   );
 }
 
+// ================================================================= Network Access (firewall)
+//
+// Restricts which source addresses may reach the application AT ALL. The Security Policy screen
+// above handles the reactive control (per-IP lockout after failed sign-ins); this one stops the
+// attempt from ever arriving.
+//
+// The screen is designed around one hazard: it is possible to lock yourself out of the very UI
+// you would use to undo the mistake. Hence monitor mode, the self-IP guard, the typed
+// confirmation, and the commit-confirm countdown.
+
+const MODE_HELP: Record<FirewallMode, { label: string; hint: string }> = {
+  off: { label: "Off", hint: "Anyone on the internet can reach this application." },
+  monitor: {
+    label: "Monitor",
+    hint: "Record what would be blocked, but block nothing. Start here.",
+  },
+  enforce: { label: "Enforce", hint: "Only the listed sources can reach this application." },
+};
+
+function useCountdown(deadline: string | null): string | null {
+  const [, force] = useState(0);
+  useEffect(() => {
+    if (!deadline) return;
+    const t = setInterval(() => force((n) => n + 1), 1000);
+    return () => clearInterval(t);
+  }, [deadline]);
+  if (!deadline) return null;
+  const ms = new Date(deadline).getTime() - Date.now();
+  if (ms <= 0) return null;
+  const total = Math.floor(ms / 1000);
+  return `${Math.floor(total / 60)}:${String(total % 60).padStart(2, "0")}`;
+}
+
+const FIREWALL_IMPORT_MAX_BYTES = 1024 * 1024;
+const FIREWALL_IMPORT_PAGE_SIZE = 50;
+const FIREWALL_RULE_PAGE_SIZE = 100;
+
+function FirewallExportMenu({ dirty, onError }: { dirty: boolean; onError: (message: string) => void }) {
+  const [busy, setBusy] = useState<"txt" | "csv" | "">("");
+
+  async function download(format: "txt" | "csv") {
+    setBusy(format);
+    onError("");
+    try {
+      const blob = await api.firewallExport(format);
+      const stamp = new Date().toISOString().slice(0, 10).replaceAll("-", "");
+      downloadBlob(
+        blob,
+        format === "txt"
+          ? `firewall-active-ranges-${stamp}.txt`
+          : `firewall-all-rules-${stamp}.csv`,
+      );
+    } catch (error) {
+      onError(errMsg(error));
+    } finally {
+      setBusy("");
+    }
+  }
+
+  return (
+    <details className="relative">
+      <summary className="cursor-pointer list-none rounded-md border border-slate-300 px-3 py-1.5 text-sm font-medium text-slate-700 hover:bg-slate-50">
+        {busy ? "Exporting…" : "Export ▾"}
+      </summary>
+      <div className="absolute right-0 z-20 mt-1 w-72 rounded-lg border bg-white p-2 shadow-lg">
+        <button
+          type="button"
+          disabled={!!busy}
+          onClick={() => void download("txt")}
+          className="block w-full rounded-sm px-2 py-2 text-left text-sm hover:bg-slate-50 disabled:opacity-50"
+        >
+          <span className="block font-medium text-slate-700">Active ranges — TXT</span>
+          <span className="block text-xs text-slate-500">One active CIDR per line.</span>
+        </button>
+        <button
+          type="button"
+          disabled={!!busy}
+          onClick={() => void download("csv")}
+          className="block w-full rounded-sm px-2 py-2 text-left text-sm hover:bg-slate-50 disabled:opacity-50"
+        >
+          <span className="block font-medium text-slate-700">All rules — CSV</span>
+          <span className="block text-xs text-slate-500">Includes labels and disabled rules.</span>
+        </button>
+        {dirty && (
+          <p className="mt-1 border-t px-2 pt-2 text-[11px] text-amber-700">
+            Export uses the saved policy. Save draft changes first to include them.
+          </p>
+        )}
+      </div>
+    </details>
+  );
+}
+
+function FirewallImportPanel({
+  mode,
+  rules,
+  onApply,
+  onClose,
+}: {
+  mode: FirewallMode;
+  rules: FirewallRule[];
+  onApply: (rules: FirewallRule[], context: FirewallImportContext) => void;
+  onClose: () => void;
+}) {
+  const [sourceKind, setSourceKind] = useState<"paste" | "file">("paste");
+  const [text, setText] = useState("");
+  const [sourceName, setSourceName] = useState("pasted-ranges.txt");
+  const [format, setFormat] = useState<FirewallImportFormat>("auto");
+  const [defaultLabel, setDefaultLabel] = useState("Imported range");
+  const [strategy, setStrategy] = useState<FirewallImportStrategy>("merge");
+  const [preview, setPreview] = useState<FirewallImportPreview | null>(null);
+  const [previewPage, setPreviewPage] = useState(0);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState("");
+
+  async function chooseFile(file: File | undefined) {
+    if (!file) return;
+    setError("");
+    setPreview(null);
+    if (!/\.(txt|csv)$/i.test(file.name)) {
+      setError("Choose a UTF-8 .txt or .csv file.");
+      return;
+    }
+    if (file.size > FIREWALL_IMPORT_MAX_BYTES) {
+      setError("The file is larger than 1 MiB.");
+      return;
+    }
+    try {
+      const decoded = new TextDecoder("utf-8", { fatal: true }).decode(await file.arrayBuffer());
+      setText(decoded);
+      setSourceName(file.name);
+      setFormat(file.name.toLowerCase().endsWith(".csv") ? "csv" : "txt");
+    } catch {
+      setError("The file is not valid UTF-8 text.");
+    }
+  }
+
+  async function runPreview() {
+    setBusy(true);
+    setError("");
+    setPreview(null);
+    try {
+      const result = await api.firewallImportPreview({
+        text,
+        source_name: sourceKind === "paste" ? "pasted-ranges.txt" : sourceName,
+        format: sourceKind === "paste" ? "auto" : format,
+        default_label: defaultLabel,
+        strategy,
+        mode,
+        existing_rules: rules.map((rule) => ({
+          cidr: rule.cidr,
+          label: rule.label,
+          enabled: rule.enabled,
+        })),
+      });
+      setPreview(result);
+      setPreviewPage(0);
+    } catch (cause) {
+      setError(errMsg(cause));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  const diagnostics = preview?.diagnostics ?? [];
+  const pageCount = Math.max(1, Math.ceil(diagnostics.length / FIREWALL_IMPORT_PAGE_SIZE));
+  const safePage = Math.min(previewPage, pageCount - 1);
+  const visibleDiagnostics = diagnostics.slice(
+    safePage * FIREWALL_IMPORT_PAGE_SIZE,
+    (safePage + 1) * FIREWALL_IMPORT_PAGE_SIZE,
+  );
+
+  const statusStyle: Record<string, string> = {
+    invalid: "bg-rose-100 text-rose-800",
+    existing: "bg-slate-100 text-slate-700",
+    retained: "bg-sky-100 text-sky-800",
+    add: "bg-emerald-100 text-emerald-800",
+    valid: "bg-emerald-100 text-emerald-800",
+  };
+
+  return (
+    <div data-testid="firewall-import-panel" className="mb-4 rounded-lg border border-brand-dark/30 bg-slate-50 p-4">
+      <div className="flex flex-wrap items-start justify-between gap-2">
+        <div>
+          <h3 className="text-sm font-semibold text-slate-800">Import allowed sources</h3>
+          <p className="mt-0.5 text-xs text-slate-500">
+            Preview first. Applying changes only updates the draft; Save activates it.
+          </p>
+        </div>
+        <Btn variant="ghost" onClick={onClose}>Close</Btn>
+      </div>
+
+      <div className="mt-3 inline-flex rounded-lg border bg-white p-0.5 text-xs">
+        {(["paste", "file"] as const).map((kind) => (
+          <button
+            key={kind}
+            type="button"
+            onClick={() => {
+              setSourceKind(kind);
+              setText("");
+              setSourceName(kind === "paste" ? "pasted-ranges.txt" : "");
+              setFormat("auto");
+              setPreview(null);
+              setError("");
+            }}
+            className={`rounded-md px-3 py-1.5 ${sourceKind === kind ? "bg-brand-dark text-white" : "text-slate-600 hover:bg-slate-50"}`}
+          >
+            {kind === "paste" ? "Paste list" : "Upload file"}
+          </button>
+        ))}
+      </div>
+
+      {sourceKind === "paste" ? (
+        <Field label="IP addresses or CIDR ranges">
+          <textarea
+            value={text}
+            onChange={(event) => {
+              setText(event.target.value);
+              setPreview(null);
+            }}
+            rows={9}
+            spellCheck={false}
+            placeholder={"20.118.190.135/32\n156.20.174.0/24\n2001:db8:100::/48"}
+            className={`${inputCls} mt-3 font-mono text-xs`}
+          />
+          <span className="mt-1 block text-xs text-slate-500">
+            One address or CIDR per line. Blank lines and lines beginning with # are ignored.
+          </span>
+        </Field>
+      ) : (
+        <div className="mt-3 rounded-lg border-2 border-dashed bg-white p-4">
+          <input
+            type="file"
+            accept=".txt,.csv,text/plain,text/csv"
+            aria-label="Choose firewall import file"
+            onChange={(event) => void chooseFile(event.target.files?.[0])}
+            className="block w-full text-sm text-slate-600 file:mr-3 file:rounded-md file:border file:border-slate-300 file:bg-white file:px-3 file:py-1.5 file:text-sm file:font-medium file:text-slate-700"
+          />
+          {!!sourceName && sourceName !== "pasted-ranges.txt" && (
+            <div className="mt-3">
+              <p className="text-xs font-medium text-slate-700">{sourceName}</p>
+              <pre className="mt-1 max-h-32 overflow-auto rounded-sm bg-slate-950 p-2 text-[10px] text-slate-100">
+                {text.slice(0, 8_000)}{text.length > 8_000 ? "\n…" : ""}
+              </pre>
+            </div>
+          )}
+        </div>
+      )}
+
+      <div className="mt-3 grid grid-cols-1 gap-3 md:grid-cols-2">
+        <Field label="Default label">
+          <input
+            className={inputCls}
+            maxLength={128}
+            value={defaultLabel}
+            onChange={(event) => {
+              setDefaultLabel(event.target.value);
+              setPreview(null);
+            }}
+            placeholder="Corporate egress"
+          />
+          <span className="mt-1 block text-xs text-slate-500">Used for TXT rows and blank CSV labels.</span>
+        </Field>
+        <fieldset>
+          <legend className="mb-1 text-sm font-medium text-slate-700">Import strategy</legend>
+          <label className="flex items-start gap-2 text-sm text-slate-700">
+            <input type="radio" checked={strategy === "merge"} onChange={() => { setStrategy("merge"); setPreview(null); }} />
+            <span><strong>Merge</strong> — keep existing rules and add new ranges.</span>
+          </label>
+          <label className="mt-1 flex items-start gap-2 text-sm text-rose-700">
+            <input type="radio" checked={strategy === "replace"} onChange={() => { setStrategy("replace"); setPreview(null); }} />
+            <span><strong>Replace</strong> — remove saved/draft ranges not in this list.</span>
+          </label>
+        </fieldset>
+      </div>
+
+      {error && <div className="mt-3 rounded-sm border border-rose-200 bg-rose-50 px-3 py-2 text-sm text-rose-800">{error}</div>}
+
+      <div className="mt-3 flex flex-wrap gap-2">
+        <Btn variant="primary" disabled={busy || !text.trim()} onClick={() => void runPreview()}>
+          {busy ? "Previewing…" : "Preview import"}
+        </Btn>
+        <Btn variant="ghost" onClick={() => {
+          setText("");
+          setSourceName(sourceKind === "paste" ? "pasted-ranges.txt" : "");
+          setFormat("auto");
+          setPreview(null);
+          setError("");
+        }}>
+          Clear
+        </Btn>
+      </div>
+
+      {preview && (
+        <div className="mt-4 space-y-3 border-t pt-4">
+          <div className="grid grid-cols-2 gap-2 text-xs sm:grid-cols-4 lg:grid-cols-8">
+            {([
+              ["Input", preview.summary.input_rows],
+              ["Add", preview.summary.added],
+              ["Retain", preview.summary.retained],
+              ["Remove", preview.summary.removed],
+              ["Skipped", preview.summary.skipped_existing],
+              ["Invalid", preview.summary.invalid_rows],
+              ["Result", preview.summary.result_total],
+              ["Active", preview.summary.enabled_total],
+            ] as const).map(([labelText, value]) => (
+              <div key={labelText} className="rounded-sm border bg-white px-2 py-1.5">
+                <div className="text-slate-400">{labelText}</div>
+                <div className="font-semibold tabular-nums text-slate-800">{value.toLocaleString()}</div>
+              </div>
+            ))}
+          </div>
+
+          {preview.errors.length > 0 && (
+            <ul className="list-disc space-y-0.5 rounded-sm border border-rose-200 bg-rose-50 p-3 pl-7 text-xs text-rose-800">
+              {preview.errors.map((message) => <li key={message}>{message}</li>)}
+            </ul>
+          )}
+
+          <div className={`rounded-sm border px-3 py-2 text-xs ${preview.your_ip_covered ? "border-emerald-200 bg-emerald-50 text-emerald-800" : "border-amber-300 bg-amber-50 text-amber-900"}`}>
+            {preview.your_ip_covered
+              ? `The resulting list covers your current address (${preview.your_ip ?? "unknown"}).`
+              : `The resulting list does not cover your current address (${preview.your_ip ?? "unknown"}). Enforce-mode Save remains blocked until you add it.`}
+          </div>
+
+          {preview.overlap_count > 0 && (
+            <div className="rounded-sm border border-amber-200 bg-amber-50 p-3 text-xs text-amber-800">
+              <div className="font-medium">{preview.overlap_count.toLocaleString()} overlapping range pair(s) — retained as entered.</div>
+              <ul className="mt-1 list-disc pl-5">
+                {preview.overlaps.slice(0, 10).map((item) => <li key={`${item.cidr}-${item.overlaps}`}>{item.message}</li>)}
+              </ul>
+              {preview.overlap_count > 10 && <p className="mt-1">Showing the first 10 overlap warnings.</p>}
+            </div>
+          )}
+
+          {visibleDiagnostics.length > 0 && (
+            <div className="overflow-x-auto rounded-sm border bg-white">
+              <table className="w-full text-xs">
+                <thead className="bg-slate-50 text-left text-slate-500">
+                  <tr><th className="px-2 py-1.5">Line</th><th className="px-2 py-1.5">Input</th><th className="px-2 py-1.5">Normalized</th><th className="px-2 py-1.5">Status</th><th className="px-2 py-1.5">Detail</th></tr>
+                </thead>
+                <tbody>
+                  {visibleDiagnostics.map((item) => (
+                    <tr key={`${item.line}-${item.input}`} className="border-t align-top">
+                      <td className="px-2 py-1.5 tabular-nums text-slate-500">{item.line}</td>
+                      <td className="max-w-56 break-all px-2 py-1.5 font-mono text-slate-700">{item.input || "—"}</td>
+                      <td className="px-2 py-1.5 font-mono text-slate-700">{item.cidr ?? "—"}</td>
+                      <td className="px-2 py-1.5"><span className={`rounded-sm px-1.5 py-0.5 ${statusStyle[item.status] ?? statusStyle.valid}`}>{item.status}</span></td>
+                      <td className="max-w-80 px-2 py-1.5 text-slate-600">{item.message || item.label}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          )}
+
+          {pageCount > 1 && (
+            <div className="flex items-center justify-between text-xs text-slate-500">
+              <span>Rows {safePage * FIREWALL_IMPORT_PAGE_SIZE + 1}–{Math.min((safePage + 1) * FIREWALL_IMPORT_PAGE_SIZE, diagnostics.length)} of {diagnostics.length}</span>
+              <div className="flex gap-1"><Btn variant="ghost" disabled={safePage === 0} onClick={() => setPreviewPage(safePage - 1)}>Previous</Btn><Btn variant="ghost" disabled={safePage >= pageCount - 1} onClick={() => setPreviewPage(safePage + 1)}>Next</Btn></div>
+            </div>
+          )}
+
+          <div className="flex flex-wrap items-center gap-2">
+            <Btn
+              variant="primary"
+              disabled={!preview.can_apply}
+              onClick={() => onApply(preview.result_rules, {
+                source_name: preview.source_name,
+                strategy: preview.strategy,
+                skipped_existing: preview.summary.skipped_existing,
+              })}
+            >
+              Apply to draft
+            </Btn>
+            {!preview.can_apply && <span className="text-xs text-rose-700">Resolve preview errors before applying.</span>}
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+function FirewallCard() {
+  const qc = useQueryClient();
+  const { has, isAdmin } = useAuth();
+  // Read is enough to LOAD this screen (an auditor must be able to evidence the network
+  // policy). Changing it needs firewall.manage. Render read-only rather than hiding the
+  // screen, and disable rather than silently 403 on save.
+  const canManage = isAdmin || has("firewall.manage");
+  const cfg = useQuery({ queryKey: ["firewall"], queryFn: api.firewallConfig });
+  const [draft, setDraft] = useState<{ mode: FirewallMode; rules: FirewallRule[] } | null>(null);
+  const [err, setErr] = useState("");
+  const [saved, setSaved] = useState(false);
+  const [adding, setAdding] = useState(false);
+  const [newCidr, setNewCidr] = useState("");
+  const [newLabel, setNewLabel] = useState("");
+  const [confirmText, setConfirmText] = useState("");
+  const [importing, setImporting] = useState(false);
+  const [importContext, setImportContext] = useState<FirewallImportContext | null>(null);
+  const [importApplied, setImportApplied] = useState(false);
+  const [ruleSearch, setRuleSearch] = useState("");
+  const [rulePage, setRulePage] = useState(0);
+
+  const server = cfg.data;
+  const mode = draft?.mode ?? server?.mode ?? "off";
+  const rules = draft?.rules ?? server?.rules ?? [];
+  const dirty = draft !== null;
+  const countdown = useCountdown(server?.confirm_by ?? null);
+
+  const mutate = (next: Partial<{ mode: FirewallMode; rules: FirewallRule[] }>) => {
+    setDraft({ mode, rules, ...next });
+    setSaved(false);
+  };
+
+  // The server is the authority on whether the caller is covered (it sees the real address),
+  // but while editing an unsaved draft only the client knows the pending rules — so the guard
+  // is recomputed locally against the draft to keep the warning honest before saving.
+  const coveredByDraft = useMemo(() => {
+    if (!dirty) return server?.your_ip_covered ?? false;
+    const ip = server?.your_ip;
+    if (!ip) return false;
+    return rules.some((r) => r.enabled && cidrCovers(r.cidr, ip));
+  }, [dirty, rules, server]);
+
+  const save = useMutation({
+    mutationFn: () =>
+      api.updateFirewall({
+        mode,
+        rules: rules.map((r) => ({ cidr: r.cidr, label: r.label, enabled: r.enabled })),
+        ...(importContext ? { import_context: importContext } : {}),
+      }),
+    onSuccess: (fresh) => {
+      setDraft(null);
+      setImportContext(null);
+      setImportApplied(false);
+      setConfirmText("");
+      setSaved(true);
+      setTimeout(() => setSaved(false), 1800);
+      // Seed the cache from the mutation's own response BEFORE invalidating. Without this the
+      // card renders the previous server state for the duration of the refetch — which on this
+      // screen means briefly announcing "Off / no ranges", i.e. telling the operator they are
+      // unprotected at the exact moment they just protected themselves.
+      qc.setQueryData(["firewall"], fresh);
+      void qc.invalidateQueries({ queryKey: ["firewall"] });
+      void qc.invalidateQueries({ queryKey: ["firewall-blocks"] });
+    },
+    onError: (e) => setErr(errMsg(e)),
+  });
+
+  const confirmEnforcement = useMutation({
+    mutationFn: api.confirmFirewall,
+    onSuccess: (fresh) => {
+      qc.setQueryData(["firewall"], fresh);
+      void qc.invalidateQueries({ queryKey: ["firewall"] });
+    },
+    onError: (e) => setErr(errMsg(e)),
+  });
+
+  const addRule = (cidr: string, label: string) => {
+    const trimmed = cidr.trim();
+    if (!trimmed || !label.trim()) return;
+    mutate({
+      rules: [
+        ...rules,
+        { cidr: trimmed, label: label.trim(), enabled: true, scope: describeCidr(trimmed), valid: true },
+      ],
+    });
+    setNewCidr("");
+    setNewLabel("");
+    setAdding(false);
+  };
+
+  const filteredRules = useMemo(() => {
+    const needle = ruleSearch.trim().toLowerCase();
+    return rules
+      .map((rule, index) => ({ rule, index }))
+      .filter(({ rule }) =>
+        !needle || [rule.cidr, rule.label, rule.scope, rule.enabled ? "active" : "disabled"]
+          .some((value) => String(value ?? "").toLowerCase().includes(needle)),
+      );
+  }, [ruleSearch, rules]);
+
+  if (cfg.isLoading) {
+    return <Card title="Network access"><p className="text-sm text-slate-500">Loading…</p></Card>;
+  }
+
+  const enforceBlocked = mode === "enforce" && !coveredByDraft;
+  const needsTypedConfirm = mode === "enforce" && server?.mode !== "enforce";
+  const preview = newCidr.trim() ? describeCidr(newCidr) : "";
+  const previewCoversMe =
+    !!server?.your_ip && !!newCidr.trim() && cidrCovers(newCidr.trim(), server.your_ip);
+  const rulePageCount = Math.max(1, Math.ceil(filteredRules.length / FIREWALL_RULE_PAGE_SIZE));
+  const safeRulePage = Math.min(rulePage, rulePageCount - 1);
+  const visibleRules = filteredRules.slice(
+    safeRulePage * FIREWALL_RULE_PAGE_SIZE,
+    (safeRulePage + 1) * FIREWALL_RULE_PAGE_SIZE,
+  );
+
+  return (
+    <div className="space-y-6">
+      <Card
+        title="Network access"
+        actions={
+          canManage ? (
+            <Btn
+              variant="primary"
+              disabled={!dirty || save.isPending || enforceBlocked || (needsTypedConfirm && confirmText !== "ENFORCE")}
+              onClick={() => save.mutate()}
+            >
+              {save.isPending ? "Saving…" : "Save"}
+            </Btn>
+          ) : (
+            <span className="rounded-sm bg-slate-100 px-2 py-0.5 text-xs text-slate-500">Read-only</span>
+          )
+        }
+      >
+        {err && <div className="mb-3 rounded-sm border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-700">{err}</div>}
+        {saved && <div className="mb-3 rounded-sm border border-emerald-200 bg-emerald-50 px-3 py-2 text-sm text-emerald-700">Network access saved.</div>}
+        {!canManage && (
+          <div className="mb-3 rounded-sm border border-slate-200 bg-slate-50 px-3 py-2 text-sm text-slate-600">
+            You can view the network access policy but not change it. Changing it requires the
+            <strong> Change network access control</strong> permission.
+          </div>
+        )}
+
+        {server?.break_glass_active && (
+          <div className="mb-3 rounded-sm border border-amber-300 bg-amber-50 px-3 py-2 text-sm text-amber-800">
+            <strong>Break-glass is active.</strong> <code>IP_ALLOWLIST_DISABLED</code> is set on the
+            container, so no address is being blocked regardless of the settings below. Remove that
+            environment variable to resume enforcement.
+          </div>
+        )}
+
+        {countdown && (
+          <div className="mb-3 flex items-center justify-between gap-3 rounded-sm border border-amber-300 bg-amber-50 px-3 py-2 text-sm text-amber-800">
+            <span>
+              <strong>Enforcing provisionally</strong> — reverts to Monitor in {countdown} unless you
+              confirm you still have access.
+            </span>
+            <Btn variant="primary" disabled={confirmEnforcement.isPending || !canManage} onClick={() => confirmEnforcement.mutate()}>
+              Keep enforcing
+            </Btn>
+          </div>
+        )}
+
+        <div className="grid grid-cols-1 gap-2 sm:grid-cols-3">
+          {(Object.keys(MODE_HELP) as FirewallMode[]).map((m) => (
+            <label
+              key={m}
+              className={`flex cursor-pointer items-start gap-2 rounded border px-3 py-2 text-sm ${
+                mode === m ? "border-brand-dark bg-slate-50" : "bg-white"
+              }`}
+            >
+              <input
+                type="radio"
+                className="mt-0.5"
+                checked={mode === m}
+                disabled={!canManage}
+                onChange={() => mutate({ mode: m })}
+              />
+              <span>
+                <span className="font-medium text-slate-700">{MODE_HELP[m].label}</span>
+                <span className="block text-xs text-slate-400">{MODE_HELP[m].hint}</span>
+              </span>
+            </label>
+          ))}
+        </div>
+
+        <div
+          className={`mt-4 rounded border px-3 py-2 text-sm ${
+            coveredByDraft
+              ? "border-emerald-200 bg-emerald-50 text-emerald-700"
+              : "border-amber-300 bg-amber-50 text-amber-800"
+          }`}
+        >
+          {coveredByDraft ? (
+            <>
+              You are connecting from <code>{server?.your_ip}</code>
+              {server?.your_ip_rule && !dirty ? <> — covered by “{server.your_ip_rule}”.</> : " — covered by a rule below."}
+            </>
+          ) : (
+            <>
+              You are connecting from <code>{server?.your_ip ?? "an unknown address"}</code>.{" "}
+              <strong>No enabled rule covers this address.</strong> Enforcing now would lock you out.
+            </>
+          )}
+        </div>
+
+        {needsTypedConfirm && !enforceBlocked && (
+          <div className="mt-4 rounded-sm border border-red-300 bg-red-50 p-3 text-sm text-red-800">
+            <p className="font-semibold">Restrict access to this application?</p>
+            <p className="mt-1">
+              Everyone outside the {rules.filter((r) => r.enabled).length} enabled range(s) will get a
+              403 — <strong>including the sign-in page</strong>. Enforcement reverts to Monitor after{" "}
+              {server?.confirm_window_minutes ?? 15} minutes unless you confirm it is working.
+            </p>
+            <p className="mt-1">
+              If you lose access, run:{" "}
+              <code className="break-all">
+                az containerapp update -n &lt;app&gt; -g &lt;rg&gt; --set-env-vars IP_ALLOWLIST_DISABLED=true
+              </code>
+            </p>
+            <label className="mt-2 block">
+              <span className="mb-1 block font-medium">Type ENFORCE to confirm</span>
+              <input
+                className={inputCls}
+                value={confirmText}
+                onChange={(e) => setConfirmText(e.target.value)}
+                placeholder="ENFORCE"
+              />
+            </label>
+          </div>
+        )}
+
+        {enforceBlocked && (
+          <p className="mt-3 text-xs text-amber-700">
+            Add a range covering your address before enforcing.
+          </p>
+        )}
+
+        <p className="mt-4 text-xs text-slate-400">
+          This controls the application. Your Azure Container App may also restrict access at the
+          ingress, which this screen cannot see or change.
+        </p>
+
+        <FirewallResolutionDetail resolution={server?.resolution ?? null} />
+      </Card>
+
+      <Card
+        title="Allowed sources"
+        actions={
+          <div className="flex flex-wrap justify-end gap-2">
+            {canManage && (
+              <>
+              {server?.your_ip && (
+                <Btn onClick={() => addRule(`${server.your_ip}/32`, "My current address")}>
+                  + Add my IP
+                </Btn>
+              )}
+              <Btn onClick={() => { setImporting((value) => !value); setAdding(false); }}>
+                ⇩ Import list
+              </Btn>
+              <Btn variant="primary" onClick={() => { setAdding((value) => !value); setImporting(false); }}>+ Add range</Btn>
+              </>
+            )}
+            <FirewallExportMenu dirty={dirty} onError={setErr} />
+          </div>
+        }
+      >
+        {importApplied && (
+          <div className="mb-4 rounded-sm border border-emerald-200 bg-emerald-50 px-3 py-2 text-sm text-emerald-800">
+            Imported into the draft — review the resulting list and press <strong>Save</strong> to activate it.
+          </div>
+        )}
+
+        {importing && (
+          <FirewallImportPanel
+            mode={mode}
+            rules={rules}
+            onClose={() => setImporting(false)}
+            onApply={(importedRules, context) => {
+              mutate({ rules: importedRules });
+              setImportContext(context);
+              setImportApplied(true);
+              setImporting(false);
+              setRulePage(0);
+              setRuleSearch("");
+            }}
+          />
+        )}
+
+        {adding && (
+          <div className="mb-4 rounded-lg border border-brand-dark/30 bg-slate-50 p-4">
+            <h3 className="mb-3 text-sm font-semibold">New allowed source</h3>
+            <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
+              <Field label="IP address or CIDR range">
+                <input
+                  className={inputCls}
+                  value={newCidr}
+                  placeholder="203.0.113.0/24"
+                  onChange={(e) => setNewCidr(e.target.value)}
+                />
+                {preview && (
+                  <span className="mt-1 block text-xs text-slate-500">
+                    {preview}
+                    {previewCoversMe && (
+                      <span className="text-emerald-600"> · includes your current address</span>
+                    )}
+                  </span>
+                )}
+              </Field>
+              <Field label="Label">
+                <input
+                  className={inputCls}
+                  value={newLabel}
+                  placeholder="Office VPN"
+                  onChange={(e) => setNewLabel(e.target.value)}
+                />
+              </Field>
+            </div>
+            <div className="mt-4 flex gap-2">
+              <Btn
+                variant="primary"
+                disabled={!newCidr.trim() || !newLabel.trim() || preview === "Not a valid range"}
+                onClick={() => addRule(newCidr, newLabel)}
+              >
+                Add
+              </Btn>
+              <Btn variant="ghost" onClick={() => setAdding(false)}>Cancel</Btn>
+            </div>
+          </div>
+        )}
+
+        {rules.length === 0 ? (
+          <p className="py-4 text-sm text-slate-500">
+            No ranges yet. In Enforce mode with no ranges, nobody can reach this application — add
+            your own address first.
+          </p>
+        ) : (
+          <div className="space-y-2">
+            <div className="flex flex-wrap items-center justify-between gap-2">
+              <input
+                value={ruleSearch}
+                onChange={(event) => { setRuleSearch(event.target.value); setRulePage(0); }}
+                aria-label="Search allowed sources"
+                placeholder="Search range, label, scope, or status…"
+                className="w-full max-w-md rounded-md border border-slate-300 px-3 py-1.5 text-sm focus:border-brand-dark focus:outline-hidden"
+              />
+              <span className="text-xs text-slate-500">
+                {filteredRules.length.toLocaleString()} of {rules.length.toLocaleString()} rule(s)
+              </span>
+            </div>
+
+            {visibleRules.length === 0 ? (
+              <p className="rounded-sm border bg-slate-50 px-3 py-4 text-sm text-slate-500">No rules match this search.</p>
+            ) : (
+              <div className="overflow-x-auto">
+                <table className="w-full text-sm">
+                  <thead className="text-left text-slate-500">
+                    <tr className="border-b">
+                      <th className="py-1.5 pr-3 font-medium">Range</th>
+                      <th className="py-1.5 pr-3 font-medium">Label</th>
+                      <th className="py-1.5 pr-3 font-medium">Scope</th>
+                      <th className="py-1.5 pr-3 font-medium">Status</th>
+                      <th className="py-1.5 font-medium" />
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {visibleRules.map(({ rule: r, index: i }) => (
+                      <tr key={`${r.cidr}-${i}`} className="border-b last:border-0 hover:bg-gray-50">
+                        <td className="py-1.5 pr-3 font-mono text-slate-700">{r.cidr}</td>
+                        <td className="py-1.5 pr-3 text-slate-600">{r.label}</td>
+                        <td className="py-1.5 pr-3 text-slate-500">{r.scope}</td>
+                        <td className="py-1.5 pr-3">
+                          <span
+                            className={`rounded px-1.5 py-0.5 text-xs ${
+                              r.enabled ? "bg-emerald-100 text-emerald-700" : "bg-slate-200 text-slate-600"
+                            }`}
+                          >
+                            {r.enabled ? "Active" : "Disabled"}
+                          </span>
+                        </td>
+                        <td className="py-1.5 text-right">
+                          {canManage && (
+                            <div className="flex justify-end gap-1">
+                              <Btn
+                                variant="ghost"
+                                onClick={() =>
+                                  mutate({
+                                    rules: rules.map((item, index) => (index === i ? { ...item, enabled: !item.enabled } : item)),
+                                  })
+                                }
+                              >
+                                {r.enabled ? "Disable" : "Enable"}
+                              </Btn>
+                              <Btn
+                                variant="danger"
+                                onClick={() => {
+                                  if (!confirm(`Remove ${r.cidr} (${r.label})?`)) return;
+                                  mutate({ rules: rules.filter((_, index) => index !== i) });
+                                }}
+                              >
+                                Delete
+                              </Btn>
+                            </div>
+                          )}
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            )}
+
+            {rulePageCount > 1 && (
+              <div className="flex items-center justify-between text-xs text-slate-500">
+                <span>
+                  Rules {safeRulePage * FIREWALL_RULE_PAGE_SIZE + 1}–{Math.min((safeRulePage + 1) * FIREWALL_RULE_PAGE_SIZE, filteredRules.length)}
+                </span>
+                <div className="flex gap-1">
+                  <Btn variant="ghost" disabled={safeRulePage === 0} onClick={() => setRulePage(safeRulePage - 1)}>Previous</Btn>
+                  <Btn variant="ghost" disabled={safeRulePage >= rulePageCount - 1} onClick={() => setRulePage(safeRulePage + 1)}>Next</Btn>
+                </div>
+              </div>
+            )}
+          </div>
+        )}
+        {dirty && (
+          <p className="mt-3 text-xs text-amber-700">Unsaved changes — press Save above to apply.</p>
+        )}
+      </Card>
+
+      <FirewallBlocksCard
+        effectiveMode={server?.effective_mode ?? "off"}
+        canManage={canManage}
+        onAllowRange={(ip) => {
+          // Closes the loop from observation to action: the operator reads an address off the
+          // blocks table and allows it without retyping a CIDR (the retyping is where the /24
+          // vs /32 slips happen).
+          setAdding(true);
+          setNewCidr(`${ip}/32`);
+          setNewLabel(`Allowed from blocks list`);
+        }}
+      />
+    </div>
+  );
+}
+
+/** Shows how the server arrived at your address.
+ *
+ * "Which address does the server think I am, and how did it decide?" is the first question
+ * anyone debugging an allowlist asks. Without this, a mis-attributed address is only
+ * discoverable by noticing the number looks wrong — which is exactly how a CGNAT/tailnet
+ * address went unexplained until someone screenshotted it. */
+function FirewallResolutionDetail({ resolution }: { resolution: FirewallResolution | null }) {
+  const [open, setOpen] = useState(false);
+  if (!resolution) return null;
+  return (
+    <div className="mt-3">
+      <button
+        type="button"
+        className="text-xs text-slate-500 underline hover:text-slate-700"
+        onClick={() => setOpen((v) => !v)}
+      >
+        {open ? "Hide" : "How was my address determined?"}
+      </button>
+      {open && (
+        <div className="mt-2 rounded-sm border bg-slate-50 p-3 text-xs text-slate-600">
+          <p className="mb-2">{resolution.reason}</p>
+          <dl className="grid grid-cols-[auto_1fr] gap-x-3 gap-y-1">
+            <dt className="text-slate-500">Resolved as</dt>
+            <dd className="font-mono">{resolution.resolved_ip ?? "— (caller not identifiable)"}</dd>
+            <dt className="text-slate-500">Connection peer</dt>
+            <dd className="font-mono">{resolution.socket_peer ?? "—"}</dd>
+            <dt className="text-slate-500">X-Forwarded-For</dt>
+            <dd className="break-all font-mono">
+              {resolution.forwarded_header ?? "(not sent)"}
+              {resolution.forwarded_header && !resolution.forwarded_honoured && (
+                <span className="ml-1 text-amber-700">(not trusted here, ignored)</span>
+              )}
+            </dd>
+          </dl>
+          {resolution.entries.length > 0 && (
+            <table className="mt-2 w-full">
+              <thead className="text-left text-slate-500">
+                <tr className="border-b">
+                  <th className="py-1 pr-3 font-medium">Entry</th>
+                  <th className="py-1 pr-3 font-medium">Classified as</th>
+                  <th className="py-1 font-medium">Used</th>
+                </tr>
+              </thead>
+              <tbody>
+                {resolution.entries.map((e, i) => (
+                  <tr key={`${e.value}-${i}`} className="border-b last:border-0">
+                    <td className="py-1 pr-3 font-mono">{e.value}</td>
+                    <td className="py-1 pr-3">{e.classification}</td>
+                    <td className="py-1">{e.selected ? "✓" : ""}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          )}
+          <p className="mt-2 text-slate-400">
+            The header is read right-to-left because a caller can only prepend to it. Addresses in
+            carrier-grade NAT space (100.64.0.0/10), such as a Tailscale address, are treated as a
+            real client, not as infrastructure. “Connection peer” is what the server reports and
+            may itself be derived from the header when the app runs behind a managed ingress.
+          </p>
+        </div>
+      )}
+    </div>
+  );
+}
+
+/** Parse a CIDR/IP the same way the backend does, for live feedback before saving. */
+function parseCidr(value: string): { base: bigint; bits: number; version: 4 | 6 } | null {
+  const [addr, prefixRaw] = value.trim().split("/");
+  const v6 = addr.includes(":");
+  const max = v6 ? 128 : 32;
+  const prefix = prefixRaw === undefined ? max : Number(prefixRaw);
+  if (!Number.isInteger(prefix) || prefix < 0 || prefix > max) return null;
+  let base: bigint;
+  if (v6) {
+    // Expand "::" and pad each hextet.
+    const [head, tail] = addr.split("::");
+    const h = head ? head.split(":") : [];
+    const t = tail ? tail.split(":") : [];
+    if (addr.split("::").length > 2) return null;
+    const missing = 8 - h.length - t.length;
+    if (missing < 0 || (missing > 0 && !addr.includes("::"))) return null;
+    const parts = [...h, ...Array(Math.max(0, missing)).fill("0"), ...t];
+    if (parts.length !== 8) return null;
+    base = 0n;
+    for (const p of parts) {
+      const n = parseInt(p || "0", 16);
+      if (Number.isNaN(n) || n < 0 || n > 0xffff) return null;
+      base = (base << 16n) | BigInt(n);
+    }
+  } else {
+    const octets = addr.split(".");
+    if (octets.length !== 4) return null;
+    base = 0n;
+    for (const o of octets) {
+      const n = Number(o);
+      if (!Number.isInteger(n) || n < 0 || n > 255 || o === "") return null;
+      base = (base << 8n) | BigInt(n);
+    }
+  }
+  const mask = ((1n << BigInt(prefix)) - 1n) << BigInt(max - prefix);
+  return { base: base & mask, bits: prefix, version: v6 ? 6 : 4 };
+}
+
+function describeCidr(value: string): string {
+  const parsed = parseCidr(value);
+  if (!parsed) return "Not a valid range";
+  if (parsed.version === 6) {
+    return parsed.bits === 128 ? "Single IPv6 address" : `IPv6 /${parsed.bits}`;
+  }
+  if (parsed.bits === 32) return "Single IP address";
+  const count = 2 ** (32 - parsed.bits);
+  return `${count.toLocaleString()} addresses`;
+}
+
+function cidrCovers(cidr: string, ip: string): boolean {
+  const net = parseCidr(cidr);
+  const addr = parseCidr(ip);
+  if (!net || !addr || net.version !== addr.version) return false;
+  const max = net.version === 6 ? 128 : 32;
+  const mask = ((1n << BigInt(net.bits)) - 1n) << BigInt(max - net.bits);
+  return (addr.base & mask) === net.base;
+}
+
+function FirewallBlocksCard({
+  effectiveMode,
+  canManage,
+  onAllowRange,
+}: {
+  effectiveMode: FirewallMode;
+  canManage: boolean;
+  onAllowRange: (ip: string) => void;
+}) {
+  const qc = useQueryClient();
+  const [page, setPage] = useState(0);
+  const pageSize = 25;
+  const q = useQuery({
+    queryKey: ["firewall-blocks", page],
+    queryFn: () => api.firewallBlocks(pageSize, page * pageSize),
+    refetchInterval: 15000,
+  });
+  const items = q.data?.items ?? [];
+  const total = q.data?.total ?? 0;
+  const pageCount = Math.max(1, Math.ceil(total / pageSize));
+
+  return (
+    <Card
+      title="Recent blocks"
+      actions={
+        <div className="flex items-center gap-2">
+          {effectiveMode === "monitor" && (
+            <span className="rounded-sm bg-amber-100 px-2 py-0.5 text-xs font-medium text-amber-700">
+              MONITOR — WOULD HAVE BEEN BLOCKED
+            </span>
+          )}
+          {effectiveMode === "enforce" && (
+            <span className="rounded-sm bg-red-100 px-2 py-0.5 text-xs font-medium text-red-700">
+              BLOCKED
+            </span>
+          )}
+          {total > 0 && canManage && (
+            <Btn
+              variant="ghost"
+              onClick={() => {
+                if (!confirm("Clear the recorded block history?")) return;
+                void api.clearFirewallBlocks().then(() => {
+                  void qc.invalidateQueries({ queryKey: ["firewall-blocks"] });
+                });
+              }}
+            >
+              Clear
+            </Btn>
+          )}
+        </div>
+      }
+    >
+      {items.length === 0 ? (
+        <p className="py-4 text-sm text-slate-500">
+          {effectiveMode === "off"
+            ? "Nothing recorded — network access is Off, so no requests are being evaluated."
+            : "Nothing recorded yet."}
+        </p>
+      ) : (
+        <>
+          {effectiveMode === "enforce" && items.some((b) => b.mode === "monitor") && (
+            // Rows keep the mode they were recorded under, so a "Would block" row can legitimately
+            // appear while enforcing. Saying so is cheaper than letting someone conclude the
+            // policy is not being applied.
+            <p className="mb-2 text-xs text-slate-500">
+              Rows keep the mode they were recorded under. “Would block” entries are historical,
+              from a period when this was in Monitor — they are not requests being allowed now.
+            </p>
+          )}
+          <table className="w-full text-xs">
+            <thead className="text-left text-gray-500">
+              <tr className="border-b">
+                <th className="py-1.5 pr-3 font-medium">Last seen</th>
+                <th className="py-1.5 pr-3 font-medium">Source IP</th>
+                <th className="py-1.5 pr-3 font-medium">Hits</th>
+                <th className="py-1.5 pr-3 font-medium">Last path</th>
+                <th className="py-1.5 pr-3 font-medium">Result</th>
+                <th className="py-1.5 font-medium" />
+              </tr>
+            </thead>
+            <tbody>
+              {items.map((b) => (
+                <tr key={b.id} className="border-b last:border-0 hover:bg-gray-50">
+                  <td className="whitespace-nowrap py-1.5 pr-3 text-gray-400">
+                    {b.last_seen ? new Date(b.last_seen).toLocaleString() : "—"}
+                  </td>
+                  <td className="py-1.5 pr-3 font-mono text-gray-700">{b.ip}</td>
+                  <td className="py-1.5 pr-3 text-gray-600">{b.hits.toLocaleString()}</td>
+                  <td className="max-w-[240px] truncate py-1.5 pr-3 text-gray-600" title={b.last_path}>
+                    {b.last_path || "—"}
+                  </td>
+                  <td className="py-1.5 pr-3">
+                    <span
+                      className={`rounded px-1.5 py-0.5 ${
+                        b.mode === "enforce"
+                          ? "bg-red-100 text-red-700"
+                          : "bg-amber-100 text-amber-700"
+                      }`}
+                    >
+                      {b.mode === "enforce" ? "Blocked" : "Would block"}
+                    </span>
+                  </td>
+                  <td className="py-1.5 text-right">
+                    {canManage && (
+                      <Btn variant="ghost" onClick={() => onAllowRange(b.ip)}>
+                        + Allow
+                      </Btn>
+                    )}
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+          <div className="mt-3 flex items-center justify-between text-xs text-gray-500">
+            <span>
+              {page * pageSize + 1}–{Math.min((page + 1) * pageSize, total)} of {total.toLocaleString()}
+            </span>
+            <div className="flex items-center gap-1">
+              <Btn variant="ghost" disabled={page === 0} onClick={() => setPage(0)}>« First</Btn>
+              <Btn variant="ghost" disabled={page === 0} onClick={() => setPage((p) => Math.max(0, p - 1))}>‹ Prev</Btn>
+              <span>Page {page + 1} / {pageCount}</span>
+              <Btn variant="ghost" disabled={page >= pageCount - 1} onClick={() => setPage((p) => p + 1)}>Next ›</Btn>
+              <Btn variant="ghost" disabled={page >= pageCount - 1} onClick={() => setPage(pageCount - 1)}>Last »</Btn>
+            </div>
+          </div>
+        </>
+      )}
+    </Card>
+  );
+}
+
 // ================================================================= Panel
-export function SecurityPanel({ section }: { section: SecuritySection }) {
+export function SecurityPanel({ section, fullWidth = false }: { section: SecuritySection; fullWidth?: boolean }) {
   const body = useMemo(() => {
     switch (section) {
       case "users": return <UsersCard />;
@@ -1388,12 +2489,13 @@ export function SecurityPanel({ section }: { section: SecuritySection }) {
       case "identity": return <IdentityProvidersCard />;
       case "sessions": return <SessionsCard />;
       case "policies": return <PoliciesCard />;
+      case "firewall": return <FirewallCard />;
       default: return <UsersCard />;
     }
   }, [section]);
   return (
     <div className="h-full overflow-y-auto bg-gray-50">
-      <div className="mx-auto max-w-6xl 2xl:max-w-screen-2xl space-y-6 p-6">{body}</div>
+      <div className={`mx-auto w-full space-y-6 p-6 ${fullWidth ? "max-w-none" : "max-w-6xl 2xl:max-w-(--breakpoint-2xl)"}`}>{body}</div>
     </div>
   );
 }
@@ -1433,7 +2535,7 @@ export function AccessControlPanel({ section }: { section: string }) {
         </div>
       </div>
       <div className="min-h-0 flex-1">
-        <SecurityPanel section={active} />
+        <SecurityPanel section={active} fullWidth />
       </div>
     </div>
   );

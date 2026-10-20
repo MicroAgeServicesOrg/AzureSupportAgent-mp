@@ -30,7 +30,7 @@ const PRINCIPAL_KINDS = new Set([
  * policy id in the same field. A deep link that resolves to nothing is worse than no link,
  * so anything that fails either test gets no affordance at all.
  *
- * One function rather than six, because six copies of this judgement is six chances for one
+ * One function rather than six, because six copies of this judgment is six chances for one
  * of them to be wrong in a way nobody notices — the link just quietly goes nowhere.
  */
 export function investigatableId(
@@ -82,8 +82,8 @@ export function InvestigateLink({
       data-testid="investigate-link"
       className={
         compact
-          ? "shrink-0 rounded px-1 text-gray-400 hover:bg-brand/10 hover:text-brand"
-          : "inline-flex items-center gap-1 rounded border px-2 py-1 text-xs font-medium text-brand hover:bg-brand/10"
+          ? "shrink-0 rounded-sm px-1 text-gray-400 hover:bg-brand/10 hover:text-brand"
+          : "inline-flex items-center gap-1 rounded-sm border px-2 py-1 text-xs font-medium text-brand hover:bg-brand/10"
       }
     >
       🔍{compact ? "" : <span>{label ?? "Investigate"}</span>}

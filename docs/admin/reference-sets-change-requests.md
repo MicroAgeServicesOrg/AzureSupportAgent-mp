@@ -2,14 +2,15 @@
 layout: default
 title: Reference Sets & Change Requests
 parent: Administration
-nav_order: 7
+nav_order: 8
 description: Curate AMBA, telemetry, Backup/DR, and retirement references and decide proposed changes.
 permalink: /admin/reference-sets-change-requests/
+feature_ids: [ADMIN_NAV:amba, ADMIN_NAV:ambachanges, ADMIN_NAV:telemetry, ADMIN_NAV:telemetrychanges, ADMIN_NAV:backupdr, ADMIN_NAV:backupdrchanges, ADMIN_NAV:radar]
 ---
 
 # Reference sets and change requests
 
-**Permissions:** `coverage.manage` and/or `settings.write` as enforced by the screen
+**Permissions:** `coverage.manage` for AMBA, telemetry, and Backup/DR reference/change-request routes; `radar.read` to inspect the Retirement Radar reference and `radar.manage` to change, restore, or reset it
 
 ## Purpose
 
@@ -32,7 +33,7 @@ Reference sets define what coverage and lifecycle features expect. Changes can a
 
 ### AMBA
 
-Curate recommended Azure Monitor alerts per resource type. The baseline is seeded from the published [Azure Monitor Baseline Alerts](https://azure.github.io/azure-monitor-baseline-alerts/) catalogue, imported at a pinned upstream release and vendored with the app, then layered with local additions.
+Curate recommended Azure Monitor alerts per resource type. The baseline is seeded from the published [Azure Monitor Baseline Alerts](https://azure.github.io/azure-monitor-baseline-alerts/) catalog, imported at a pinned upstream release and vendored with the app, then layered with local additions.
 
 Each entry covers the alert class (**metric**, **log search**, or **activity log**), metric/counter, operator, static or **dynamic** threshold (with sensitivity and failing periods), unit, aggregation window and evaluation frequency, dimensions, severity (0–4), classification, and its **tier**:
 
@@ -44,15 +45,21 @@ Entries also carry the AMBA **workload pattern** they belong to (Azure Landing Z
 
 Use the revision/history/reset controls shown; **+ Add from catalog** offers the published upstream entries for the selected resource type. **AMBA Change Requests** presents proposed before/after changes for approve or reject with rationale.
 
-To refresh the vendored catalogue to a newer AMBA release, run `python scripts/import_amba_catalog.py --tag <release>` from `backend/`, review the diff, and commit it.
+{% include screenshot.html file="admin-reference-amba-vm-baseline.png" title="AMBA virtual-machine alert baseline" caption="Inspect VM alert categories, severities, and thresholds as reference expectations. The local baseline was not edited or saved, and this view does not show deployed alerts or verified monitoring coverage." %}
+
+To refresh the vendored catalog to a newer AMBA release, run `python scripts/import_amba_catalog.py --tag <release>` from `backend/`, review the diff, and commit it.
 
 ### Telemetry
 
-Curate recommended diagnostic log/metric categories and destination expectations per resource type. Approved Log Analytics workspaces are maintained in General settings. **Telemetry Change Requests** governs proposed additions/removals before they affect coverage.
+Curate recommended diagnostic log/metric categories and destination expectations per resource type. Approved Log Analytics workspaces and the telemetry reference are maintained with `coverage.manage`. Opening the editor or approved-workspace dialog reads only local configuration; choose an Azure connection and select **Load workspaces** when live Resource Graph discovery is needed. Discovery is explicit, cancellable, cached for five minutes, and shows its freshness or error state. **Telemetry Change Requests** governs proposed additions/removals before they affect coverage.
+
+{% include screenshot.html file="admin-reference-telemetry-key-vault-audit.png" title="Key Vault audit category in the Telemetry Reference Set" caption="The existing AuditEvent category is open for inspection, showing its log kind, audit group, and recommended coverage flag. No fields were edited, no version was saved, and no workspace discovery or Azure connectivity check was performed." %}
 
 ### Backup/DR
 
 Curate protection checks by resource type, including backup, replication, recent job/test, and severity semantics. **Backup/DR Change Requests** governs proposals. The reference is an expectation; it does not configure vaults or replication.
+
+{% include screenshot.html file="admin-reference-backupdr-vm-checks.png" title="Virtual-machine checks in the Backup/DR Reference Set" caption="The VM entries describe applicable protection expectations, not successful backups or recovery tests. No check was edited or saved and no vault, replication, or restore operation was performed." %}
 
 ### Retirement Radar
 
@@ -85,6 +92,7 @@ Use the checks below when results differ from expectations.
 
 ## Related pages
 
+- [Maintain reference sets and change requests (how-to)]({{ site.baseurl }}/how-to/administration/reference-sets/)
 - [Monitoring Coverage]({{ site.baseurl }}/user-guide/coverage/monitoring-coverage/)
 - [Telemetry Coverage]({{ site.baseurl }}/user-guide/coverage/telemetry-coverage/)
 - [Backup & DR Coverage]({{ site.baseurl }}/user-guide/coverage/backup-dr-coverage/)

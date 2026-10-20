@@ -8,7 +8,6 @@ from openpyxl import load_workbook
 from app.alert_analysis import collector
 from app.api import alert_analysis as alert_analysis_api
 from app.alert_analysis.collector import compute_analysis
-from app.core.genjob import JobRegistry
 from app.core.security import Principal
 from app.alert_analysis.decisions import apply_decisions
 from app.alert_analysis.demo import build_demo_snapshot
@@ -183,6 +182,26 @@ def test_parent_scope_alert_targets_workload_resource() -> None:
     assert snapshot["rules"][0]["effective_target_count"] == 1
 
 
+def test_repeated_overlap_targets_are_aggregated_by_rule_combination() -> None:
+    resources = [_resource("vm1"), _resource("vm2")]
+    left = _rule("cpu-a")
+    right = _rule("cpu-b")
+    subscription_scope = "/subscriptions/sub1"
+    left["properties"]["scopes"] = [subscription_scope]
+    right["properties"]["scopes"] = [subscription_scope]
+
+    snapshot = compute_analysis(
+        resources, [left, right], [_group("ag1")],
+        scope_kind="subscription", scope_id="sub1", scope_name="Subscription One",
+    )
+
+    assert len(snapshot["overlaps"]) == 1
+    overlap = snapshot["overlaps"][0]
+    assert overlap["target_count"] == 2
+    assert len(overlap["target_ids"]) == 2
+    assert overlap["targets_truncated"] is False
+
+
 def test_csv_contains_finding_columns_and_neutralizes_formulas() -> None:
     snapshot = _analyze([_rule("=malicious", group="")])
     text = to_csv(snapshot)
@@ -313,8 +332,10 @@ async def test_collector_emits_truthful_detailed_progress(monkeypatch: pytest.Mo
 
 
 @pytest.mark.asyncio
-async def test_refresh_job_is_idempotent_reconnectable_and_request_detached(monkeypatch: pytest.MonkeyPatch) -> None:
-    registry = JobRegistry("alert-analysis-test")
+async def test_refresh_job_is_idempotent_reconnectable_and_request_detached(
+    monkeypatch: pytest.MonkeyPatch, durable_job_registry_factory
+) -> None:
+    registry = durable_job_registry_factory("alert-analysis-test")
     monkeypatch.setattr(alert_analysis_api, "_refresh_jobs", registry)
     monkeypatch.setattr(alert_analysis_api, "_effective_connection_id", lambda *_args: "conn1")
     release = __import__("asyncio").Event()
@@ -360,38 +381,43 @@ async def test_refresh_job_is_idempotent_reconnectable_and_request_detached(monk
 
     first = await alert_analysis_api.refresh_start(
         subscription_id="sub1", workload_id=None, management_group_id=None,
-        connection_id="conn1", principal=principal,
+        connection_id="conn1", compact=True, principal=principal,
     )
     second = await alert_analysis_api.refresh_start(
         subscription_id="sub1", workload_id=None, management_group_id=None,
-        connection_id="conn1", principal=principal,
+        connection_id="conn1", compact=True, principal=principal,
     )
     assert first["job"]["id"] == second["job"]["id"]
     assert first["job"]["status"] == "running"
 
     # A later GET is a reconnect: it replays progress without owning/cancelling the task.
-    await __import__("asyncio").sleep(0)
-    reconnected = await alert_analysis_api.refresh_job(
-        subscription_id="sub1", workload_id=None, management_group_id=None,
-        connection_id="conn1", principal=principal,
-    )
+    for _ in range(200):
+        await __import__("asyncio").sleep(0.01)
+        reconnected = await alert_analysis_api.refresh_job(
+            subscription_id="sub1", workload_id=None, management_group_id=None,
+                connection_id="conn1", compact=True, principal=principal,
+        )
+        if reconnected["progress"]:
+            break
     assert reconnected["job"]["status"] == "running"
     assert reconnected["progress"]
     assert persisted == []
 
     # Returning from both request handlers did not cancel the detached server task.
     release.set()
-    for _ in range(20):
-        await __import__("asyncio").sleep(0)
+    for _ in range(200):
+        await __import__("asyncio").sleep(0.01)
         completed = await alert_analysis_api.refresh_job(
             subscription_id="sub1", workload_id=None, management_group_id=None,
-            connection_id="conn1", principal=principal,
+                connection_id="conn1", compact=True, principal=principal,
         )
         if completed["job"]["status"] == "done":
             break
     assert completed["job"]["status"] == "done"
     assert completed["result"]["rationalization_score"] == 90
-    assert persisted == [completed["result"]]
+    assert len(persisted) == 1
+    assert persisted[0]["rationalization_score"] == completed["result"]["rationalization_score"]
+    assert completed["result"]["rules"] == []
     assert invalidated == [("subscription", "sub1", "conn1")]
     assert any(line["phase"] == "done" for line in completed["progress"])
 
@@ -438,6 +464,57 @@ def test_keep_and_exempt_decisions_reduce_actionable_findings() -> None:
     )
     assert decided["kpis"]["accepted_findings"] == 1
     assert decided["kpis"]["actionable_overlap_groups"] == 0
+    assert "active_overlaps" not in decided
+    assert "active_gaps" not in decided
+    assert decided["active_overlap_ids"] == []
+
+
+def test_compact_snapshot_keeps_overview_samples_and_section_totals() -> None:
+    snapshot = apply_decisions(_analyze([_rule("cpu-a"), _rule("cpu-b")]), [])
+    compact = alert_analysis_api._compact_snapshot(snapshot)
+    assert compact["section_totals"] == {
+        "rules": 2, "overlaps": 1, "gaps": len(snapshot["gaps"]),
+        "action_groups": 1, "recipients": 1,
+    }
+    assert compact["rules"] == []
+    assert len(compact["overlaps"]) == 1
+    assert "target_ids" not in compact["overlaps"][0]
+    assert "active_overlap_ids" not in compact
+    assert "active_gap_keys" not in compact
+    assert compact["overview"]["cost_confidence_counts"]
+
+
+def test_refresh_job_response_keeps_full_result_unless_compact_is_requested() -> None:
+    snapshot = apply_decisions(_analyze([_rule("cpu")]), [])
+    job = {
+        "id": "job", "key": "scope", "status": "done", "progress": [],
+        "result": snapshot, "started_at": "2026-01-01T00:00:00Z",
+        "finished_at": "2026-01-01T00:00:01Z", "error": "",
+    }
+    assert alert_analysis_api._job_response(job)["result"]["rules"]
+    assert alert_analysis_api._job_response(job, compact=True)["result"]["rules"] == []
+
+
+def test_analysis_sections_filter_sort_and_page_before_returning_rows() -> None:
+    snapshot = apply_decisions(_analyze([_rule("template")]), [])
+    template = snapshot["rules"][0]
+    snapshot["rules"] = [
+        {**template, "id": f"rule-{index:03d}", "name": f"cpu-{index:03d}"}
+        for index in range(205)
+    ]
+    page = alert_analysis_api._section_page(
+        snapshot, "rules", page=2, page_size=100, search="cpu-", sort="rule", direction="asc",
+    )
+    assert page["total"] == 205
+    assert len(page["items"]) == 100
+    assert page["items"][0]["name"] == "cpu-100"
+    assert page["items"][0]["effective_targets"] == []
+
+    gaps = alert_analysis_api._section_page(
+        snapshot, "gaps", page=1, page_size=100, risk="warning",
+    )
+    assert all(item["risk"] == "warning" for item in gaps["items"])
+    assert set(gaps["facets"]) == {"risks", "types", "signals"}
 
 
 def test_remediation_artifact_is_valid_noop_existing_only() -> None:

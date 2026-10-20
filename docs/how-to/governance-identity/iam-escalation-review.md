@@ -11,7 +11,7 @@ feature_ids: [PROACTIVE_NAV:iam, IAM_NAV:escalation, IAM_NAV:evaluate, IAM_NAV:b
 
 # Run an IAM escalation review
 
-An escalation review answers a question a role list cannot: *this principal is not an Owner — can they become one?* Almost always yes, and almost never through a role called Owner.
+An escalation review asks whether a principal can reach greater privilege through the capabilities in the collected snapshot. A detected route is a review hypothesis; neither a role name nor an empty graph settles the question.
 
 ## Prerequisites
 
@@ -49,13 +49,17 @@ An escalation review answers a question a role list cannot: *this principal is n
 
 **Verification:** Pick one path and confirm its first hop independently in step three below. A path you cannot reproduce in the evaluator is a reporting question, not a finding.
 
+**Screenshot notes:** This synthetic browser fixture supplies an illustrative graph, not live Azure reads or backend-computed escalation evidence. **Paths only** remains on, its default, and **All confidence** is selected for the walkthrough. The named path and counts are examples, not proof of exploitability or actual use.
+
+{% include screenshot.html file="fid2-iam-escalation-review.png" title="Escalation review: inspect limitations before following the path" caption="Read What this map cannot see, then the workload-identity and Owner-grant hops with their scope and confidence. Runtime conditions and previously issued credentials remain unmeasured. Confirm each hop and any non-RBAC access before proposing a change; missing evidence is not an all-clear." %}
+
 ## How to confirm a hop before acting on it
 
 1. Note the principal id and the action named by the first hop of the path.
 2. Open `/iam/evaluate` in **Can this principal…** mode. Enter the principal, select the scope, and pick or type the action.
 3. Read the verdict. `allowed` confirms the hop. `indeterminate` means an unevaluated ABAC condition or an uncollected role definition is in the path — resolve that before treating the hop as either real or absent. It is never a soft no.
 4. Switch to **Who can…** with the same action and scope to see the whole population holding it. Every candidate is re-evaluated, so a principal blocked by a deny assignment does not appear in the allowed list, and anything that could not be determined sits in its own box rather than being merged into the allowed names.
-5. Switch to **What can they reach** on the principal to see every role they hold at or above the scope, split by control plane and data plane, with deny assignments listed separately and any uncollected role definition named.
+5. Switch to **What can they reach** to inventory covering ancestor and descendant grants, split by plane. Despite the current UI caption, this includes grants below the scope and can include eligibility; use the action evaluator for current allow/deny questions.
 
 **Expected result:** A verdict with the assignment that decided it, for the specific hop you intend to break.
 
@@ -76,12 +80,12 @@ An escalation review answers a question a role list cannot: *this principal is n
 ## How to model the fix before proposing it
 
 1. Open `/iam/simulator` (permission `iam.simulate`).
-2. Add the change you intend — typically `remove_assignment`, `convert_to_eligible`, `rescope_assignment` or `replace_role` — and add every related change to the same basket so their interactions are modelled together.
+2. Add the change you intend — typically `remove_assignment`, `convert_to_eligible`, `rescope_assignment` or `replace_role` — and add every related change to the same basket so their interactions are modeled together.
 3. Simulate, then read **Retained anyway** first. Access that looks revoked and is not — held through a second group, a direct assignment or an owned service principal — is the usual answer, and revoking it achieves nothing while leaving a false record of remediation behind.
 4. Read the orphaned-scopes panel above the columns. A scope left with no owner-level access is the outcome that gets a revocation reverted in a panic a fortnight later.
 5. Check the footer's standing-privilege before-and-after, and the sampling line if the population exceeded the sampling threshold.
 
-**Expected result:** A modelled outcome that distinguishes access genuinely lost from access that merely looks revoked.
+**Expected result:** A modeled outcome that distinguishes access genuinely lost from access that merely looks revoked.
 
 **Verification:** After the change is executed externally and the scope re-collected, `/iam/escalation` → **↻ Rebuild** no longer shows the path, and `/iam/compare` shows the corresponding `removed` or `de_escalated` change.
 

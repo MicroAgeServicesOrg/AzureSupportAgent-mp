@@ -23,8 +23,6 @@ import { isRefreshing, startBackgroundRefresh, takeRefreshError, useBackgroundRe
 import { Skeleton, useDebounced } from "../utils/perf";
 import { CoverageHistory, coverageRunsKey } from "./CoverageHistory";
 import { PdfGeneratingOverlay } from "./PdfGeneratingOverlay";
-import { PageIntro } from "./PageIntro";
-import { PAGE_INTROS } from "../help/content";
 import { TelemetryCoverageFleet } from "./coverage/TelemetryCoverageFleet";
 import { RunCleanup } from "./cleanup/RunCleanup";
 
@@ -145,7 +143,7 @@ function TelemetryMatrixBody({ group, expandedRow, setExpandedRow, setDrawer }: 
         <td className="px-2 py-2 text-center">{hasStorage ? "✓" : <span className="text-gray-300">—</span>}</td>
         <td className="px-2 py-2 text-center">{hasEh ? "✓" : <span className="text-gray-300">—</span>}</td>
         <td className="px-2 py-2 text-right">
-          <button onClick={() => setDrawer({ group, row })} className="rounded border px-2 py-0.5 text-[11px] text-gray-600 hover:bg-gray-50">Details</button>
+          <button onClick={() => setDrawer({ group, row })} className="rounded-sm border px-2 py-0.5 text-[11px] text-gray-600 hover:bg-gray-50">Details</button>
         </td>
       </tr>
     );
@@ -189,7 +187,7 @@ function TelemetryMatrixBody({ group, expandedRow, setExpandedRow, setDrawer }: 
                             const isAudit = c.group === "audit" || c.group === "security";
                             return (
                               <span key={c.key} title={c.why}
-                                className={`rounded px-1.5 py-0.5 text-[10px] ${on ? "bg-green-50 text-green-700" : isAudit ? "bg-red-100 text-red-700" : "bg-amber-50 text-amber-700"}`}>
+                                className={`rounded-sm px-1.5 py-0.5 text-[10px] ${on ? "bg-green-50 text-green-700" : isAudit ? "bg-red-100 text-red-700" : "bg-amber-50 text-amber-700"}`}>
                                 {on ? "✓" : "✗"} {c.name}{isAudit && !on ? " ⚠" : ""}
                               </span>
                             );
@@ -259,7 +257,9 @@ export function TelemetryCoveragePanel() {
   const enabled = scopeReady && loadedScope === scopeKey;
 
   // Background refresh (per-scope) — survives scope switches + navigation.
-  const refreshKey = `telemetry:${scopeKey}`;
+  const refreshKey = scopeKind === "workload"
+    ? `telemetry:workload:${effectiveWorkloadId}`
+    : `telemetry:subscription:${subId}:${connId}`;
   const refreshVersion = useBackgroundRefresh();
   const refreshing = isRefreshing(refreshKey);
   // TP4 — live scan progress (scanned X of N) surfaced while a refresh streams.
@@ -514,13 +514,13 @@ export function TelemetryCoveragePanel() {
             <h1 className="text-lg font-semibold text-gray-900">Telemetry Coverage</h1>
             <p className="text-xs text-gray-500">
               Diagnostic-settings &amp; log coverage of your resources.
-              {data?.demo && <span className="ml-1 rounded bg-indigo-50 px-1.5 py-0.5 text-[10px] text-indigo-700">demo data</span>}
+              {data?.demo && <span className="ml-1 rounded-sm bg-indigo-50 px-1.5 py-0.5 text-[10px] text-indigo-700">demo data</span>}
             </p>
             <div className="mt-1 flex flex-wrap gap-3 text-xs text-gray-600">
               <span>{data?.kpis.pct_with_any_diag ?? 0}% with diag</span>
               <span>{data?.kpis.pct_with_all_categories ?? 0}% all categories</span>
               <span>{data?.kpis.pct_to_approved ?? 0}% to approved WS</span>
-              <span className="text-amber-600">{data?.kpis.unknown_destinations ?? 0} unknown dest</span>
+              <span className="text-amber-700">{data?.kpis.unknown_destinations ?? 0} unknown dest</span>
             </div>
           </div>
           {enabled && (
@@ -530,7 +530,12 @@ export function TelemetryCoveragePanel() {
             </div>
           )}
           <div className="ml-auto flex flex-wrap items-center gap-2">
-            <ConnectionScopePicker value={connId} onChange={(id) => { setConnId(id); if (scopeKind === "subscription") { setSubId(""); setSubName(""); } }} />
+            <ConnectionScopePicker
+              value={connId}
+              onChange={(id) => { setConnId(id); if (scopeKind === "subscription") { setSubId(""); setSubName(""); } }}
+              disabled={scopeKind === "workload"}
+              disabledTitle="The selected workload controls its Azure connection."
+            />
             <ScopePicker
               scopeKind={scopeKind}
               onScopeKindChange={setScopeKind}
@@ -540,13 +545,14 @@ export function TelemetryCoveragePanel() {
               subId={subId}
               subName={subName}
               connectionId={connId}
+              onConnectionChange={setConnId}
               onSubPick={(id, name) => {
                 setSubId(id);
                 setSubName(name);
               }}
             />
             <span className="text-xs text-gray-500">
-              {data ? (<>Updated {agoText(data.age_seconds)}{data.stale && <span className="ml-1 text-amber-600">· stale</span>}<span className="ml-1 rounded bg-gray-100 px-1.5 py-0.5 text-[10px]">cached</span></>) : "—"}
+              {data ? (<>Updated {agoText(data.age_seconds)}{data.stale && <span className="ml-1 text-amber-600">· stale</span>}<span className="ml-1 rounded-sm bg-gray-100 px-1.5 py-0.5 text-[10px]">cached</span></>) : "—"}
               {refreshing && <span className="ml-1 text-blue-600">· {scanProgress && scanProgress.total > 0 ? `scanned ${scanProgress.done} of ${scanProgress.total}` : "refreshing…"}</span>}
             </span>
             {/* TU6 — stale-cache rescan nudge. */}
@@ -569,16 +575,16 @@ export function TelemetryCoveragePanel() {
         <div className="mt-3 flex items-center gap-1 border-b text-sm">
           <button onClick={() => setTab("coverage")} className={`-mb-px border-b-2 px-3 py-1.5 ${tab === "coverage" ? "border-brand font-medium text-gray-900" : "border-transparent text-gray-500"}`}>Telemetry Coverage</button>
           <button onClick={() => setTab("all")} className={`-mb-px border-b-2 px-3 py-1.5 ${tab === "all" ? "border-brand font-medium text-gray-900" : "border-transparent text-gray-500"}`}>
-            All Resources {data?.all_resources?.length ? <span className="ml-1 rounded bg-gray-100 px-1.5 text-[10px] text-gray-600">{data.all_resources.length}</span> : null}
+            All Resources {data?.all_resources?.length ? <span className="ml-1 rounded-sm bg-gray-100 px-1.5 text-[10px] text-gray-600">{data.all_resources.length}</span> : null}
           </button>
         </div>
 
         {tab === "coverage" && (
         <div className="mt-2 flex flex-wrap items-center gap-2 text-xs">
-          <span className="text-gray-400">Source: {data?.source === "demo_dummy_data" ? "demo dummy data" : "Resource Graph + Monitor"}</span>
+          <span className="text-gray-500">Source: {data?.source === "demo_dummy_data" ? "demo dummy data" : "Resource Graph + Monitor"}</span>
           <span className="text-gray-300">·</span>
-          <input value={query} onChange={(e) => setQuery(e.target.value)} placeholder="Search resources…" className="w-44 rounded-lg border px-2.5 py-1.5 outline-none focus:border-gray-400" />
-          <select value={statusFilter} onChange={(e) => setStatusFilter(e.target.value)} className="rounded-lg border px-2 py-1.5">
+          <input value={query} onChange={(e) => setQuery(e.target.value)} placeholder="Search resources…" className="w-44 rounded-lg border px-2.5 py-1.5 outline-hidden focus:border-gray-400" />
+          <select aria-label="Telemetry coverage status" value={statusFilter} onChange={(e) => setStatusFilter(e.target.value)} className="rounded-lg border px-2 py-1.5">
             <option value="all">All statuses</option>
             <option value="none">🔴 No diagnostics</option>
             <option value="partial">🟠 Partial / drift</option>
@@ -619,7 +625,6 @@ export function TelemetryCoveragePanel() {
 
       {/* Body */}
       <div className="min-h-0 flex-1 overflow-auto px-6 py-4">
-        <PageIntro {...PAGE_INTROS["/telemetry"]} icon="🛰️" storageKey="telemetry" />
         {enabled && tab === "coverage" && (
           <CoverageHistory<TelemetryCoverage>
             feature="telemetry"
@@ -635,7 +640,7 @@ export function TelemetryCoveragePanel() {
           />
         )}
         {!enabled ? (
-          <div className="py-16 text-center text-sm text-gray-400">
+          <div className="py-16 text-center text-sm text-gray-500">
             {scopeReady
               ? <>Pick a workload, then click <b>Load coverage</b> to audit its diagnostic-settings / log coverage.</>
               : "Pick a workload or enter a subscription to begin."}
@@ -675,7 +680,7 @@ export function TelemetryCoveragePanel() {
                       {g.none > 0 && <span className="text-red-600">🔴 {g.none}</span>}
                       {g.partial > 0 && <span className="text-amber-600">🟠 {g.partial}</span>}
                       {g.compliant > 0 && <span className="text-green-600">🟢 {g.compliant}</span>}
-                      <span className={`rounded px-2 py-0.5 font-medium ${g.coverage_pct >= 80 ? "bg-green-100 text-green-700" : g.coverage_pct >= 50 ? "bg-amber-100 text-amber-700" : "bg-red-100 text-red-700"}`}>{g.coverage_pct}%</span>
+                      <span className={`rounded-sm px-2 py-0.5 font-medium ${g.coverage_pct >= 80 ? "bg-green-100 text-green-700" : g.coverage_pct >= 50 ? "bg-amber-100 text-amber-700" : "bg-red-100 text-red-700"}`}>{g.coverage_pct}%</span>
                     </span>
                   </button>
 
@@ -701,7 +706,7 @@ export function TelemetryCoveragePanel() {
                 <div className="truncate text-sm font-semibold text-gray-900">{row.resource_name}</div>
                 <div className="truncate text-[11px] text-gray-500">{group.display} · {row.resource_group}</div>
               </div>
-              <button onClick={() => setDrawer(null)} className="rounded p-1 text-gray-400 hover:bg-gray-100">✕</button>
+              <button onClick={() => setDrawer(null)} className="rounded-sm p-1 text-gray-400 hover:bg-gray-100">✕</button>
             </div>
             <div className="min-h-0 flex-1 space-y-3 overflow-auto p-4 text-xs">
               <StatusDot status={row.status} />
@@ -714,7 +719,7 @@ export function TelemetryCoveragePanel() {
                     return (
                       <div key={c.key} className="flex items-start gap-2">
                         <span className={on ? "text-green-600" : "text-red-500"}>{on ? "✓" : "✗"}</span>
-                        <span className={`rounded px-1 py-0.5 text-[10px] ${GROUP_CLS[c.group] ?? "bg-gray-100"}`}>{c.group}</span>
+                        <span className={`rounded-sm px-1 py-0.5 text-[10px] ${GROUP_CLS[c.group] ?? "bg-gray-100"}`}>{c.group}</span>
                         <span className="text-gray-700">{c.name}</span>
                         <span className="ml-auto text-[10px] text-gray-400">{c.kind}</span>
                       </div>
@@ -725,7 +730,7 @@ export function TelemetryCoveragePanel() {
               <div className="rounded-lg border bg-gray-50 p-2">
                 <div className="mb-1 font-medium text-gray-700">Destinations</div>
                 {row.destinations.length === 0 ? <span className="text-gray-400">No diagnostic settings.</span> : (
-                  <pre className="whitespace-pre-wrap break-words text-[10px] text-gray-600">{JSON.stringify(row.destinations, null, 2)}</pre>
+                  <pre className="whitespace-pre-wrap wrap-break-word text-[10px] text-gray-600">{JSON.stringify(row.destinations, null, 2)}</pre>
                 )}
                 {row.has_drift && <div className="mt-1 text-amber-700">⚠ Drift: {row.drift_workspaces.map(shortWs).join(", ")} not on approved list.</div>}
               </div>
@@ -767,7 +772,7 @@ export function TelemetryCoveragePanel() {
               <div className="text-sm font-semibold text-gray-900">{iacView.title}</div>
               <div className="flex items-center gap-2">
                 <button onClick={() => download(iacView.text, iacView.format === "policy" ? "telemetry-policy.json" : "telemetry-diag.bicep")} className="rounded-md border px-2 py-1 text-xs hover:bg-gray-50">⬇ Download</button>
-                <button onClick={() => setIacView(null)} className="rounded p-1 text-gray-400 hover:bg-gray-100">✕</button>
+                <button onClick={() => setIacView(null)} className="rounded-sm p-1 text-gray-400 hover:bg-gray-100">✕</button>
               </div>
             </div>
             <pre className="min-h-0 flex-1 overflow-auto bg-gray-900 p-4 text-[11px] leading-relaxed text-gray-100">{iacView.text}</pre>

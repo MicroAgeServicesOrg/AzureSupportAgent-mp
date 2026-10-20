@@ -27,7 +27,7 @@ import time
 import urllib.error
 import urllib.request
 
-BASE = "http://127.0.0.1:8000/api"
+BASE = "http://127.0.0.1:35001/api"
 JAR = http.cookiejar.CookieJar()
 OPENER = urllib.request.build_opener(urllib.request.HTTPCookieProcessor(JAR))
 
@@ -65,7 +65,7 @@ def get_json(path: str):
 
 
 def openapi_paths(prefix: str) -> list[str]:
-    spec = json.load(urllib.request.urlopen("http://127.0.0.1:8000/openapi.json", timeout=60))
+    spec = json.load(urllib.request.urlopen("http://127.0.0.1:35001/openapi.json", timeout=60))
     return sorted(
         p for p in spec["paths"]
         if p.startswith(prefix) and "get" in spec["paths"][p] and p not in SKIP
@@ -162,7 +162,7 @@ def main() -> int:
 
     conns = (get_json("/azure/connections") or {}).get("connections", [])
     by_name = {c["display_name"]: c["id"] for c in conns}
-    iam_cid = args.iam_connection or by_name.get("lu") or (conns[0]["id"] if conns else "")
+    iam_cid = args.iam_connection or (conns[0]["id"] if conns else "")
     entra_cid = args.entra_connection or iam_cid
 
     print(f"connections: {', '.join(f'{c['display_name']}={c['status']}' for c in conns)}")

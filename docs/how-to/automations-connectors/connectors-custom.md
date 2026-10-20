@@ -6,6 +6,7 @@ grand_parent: How-to guides
 nav_order: 71
 description: Configure, sign, test, verify, and troubleshoot generic HTTPS webhooks.
 permalink: /how-to/automations-connectors/connectors-custom/
+feature_ids: [CONNECTOR:webhook]
 ---
 
 # Configure custom connectors
@@ -21,6 +22,8 @@ permalink: /how-to/automations-connectors/connectors-custom/
 - Open `/automations/connectors`.
 
 ## How to configure a generic webhook
+
+{% include screenshot.html file="fconn-webhook-http.png" title="Custom webhook — unsaved routing and signing setup" caption="Native UNSAVED form with Enabled off, a non-resolving example URL, and fictional non-secret routing headers. The HMAC secret is empty; the signature-header name alone does not enable or verify signing. No connector was saved or tested and no receiver request was sent. The image illustrates fields, not an accepted endpoint or successful delivery." %}
 
 1. Add **Webhook** and enter the HTTPS endpoint URL.
 2. Optionally enter custom headers, one `Key: Value` per line, for routing or authentication.
@@ -44,7 +47,7 @@ Only public HTTPS endpoints are accepted; private/internal destinations are bloc
 
 | Symptom | Resolution |
 | --- | --- |
-| Unexpected result | Re-check route, permissions, and latest refresh state before retrying. |
+| Receiver executes an unintended action from **Send test** | Disable the connector, inspect the receiver's idempotency and test-route controls, reverse the downstream action, and rotate any exposed secret. |
 | Test succeeds but no request arrives | Test checks only URL presence; inspect DNS, firewall, certificate, and receiver logs. |
 | URL rejected | use HTTPS and a publicly resolvable non-private destination. |
 | Authentication fails | verify header formatting and rotate/re-enter the credential. |

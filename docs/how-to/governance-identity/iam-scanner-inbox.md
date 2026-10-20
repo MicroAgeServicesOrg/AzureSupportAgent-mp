@@ -21,6 +21,8 @@ feature_ids: [PROACTIVE_NAV:iam, IAM_NAV:findings, IAM_NAV:scanners]
 
 `/iam/scanners` and `/iam/findings`.
 
+**Screenshot notes:** These synthetic browser fixtures show saved scanner and finding states, not live collection or backend check results. Names and counts are examples, not the shipped scanner catalog or default configuration. No run control or finding-state change was invoked for the captures.
+
 ## How to read a scanner card without mistaking a quiet day for a clean tenant
 
 1. Open `/iam/scanners`. Check the header freshness first — a scanner run against a stale snapshot produces a delta about stale data.
@@ -34,13 +36,15 @@ feature_ids: [PROACTIVE_NAV:iam, IAM_NAV:findings, IAM_NAV:scanners]
 
 **Verification:** Cross-check one card's `total` against `/iam/findings` filtered to that scanner's pillar and severity floor. The numbers should agree for the same snapshot.
 
+{% include screenshot.html file="fid2-iam-scanner-measurement.png" title="Read scanner deltas alongside measurement gaps" caption="The first example has a saved delta and an unmeasured usage check; the second is blocked by unreadable policy evidence and withholds its counts. Unknown is not zero, and not measured is not unused. Viewing these cards does not record a baseline." %}
+
 ## How to run a scanner and record a baseline
 
 1. Refresh the access snapshot first if the header freshness is amber or red. Use **↻ Rescan** in the page header.
 2. On `/iam/scanners`, use **Run now** on a single card, or **Run all now** to run every scanner.
 3. Read the confirmation. It states that the baseline was recorded and that the counts now describe changes since that run.
 4. On a card that has never run, expect the first-run notice: the first run records a baseline and deliberately notifies nothing, because everything would be new.
-5. Check the notification centre for what was delivered — new findings as one digest per scanner, resolutions as a single informational line, and anything on the always-immediate list published on its own.
+5. Check the notification center for what was delivered — new findings as one digest per scanner, resolutions as a single informational line, and anything on the always-immediate list published on its own.
 
 **Expected result:** A recorded baseline, and a delivered delta for anything that changed.
 
@@ -56,18 +60,20 @@ Reading the tab never records a run — the cards are computed without persistin
 4. Open the critical section and work it. A section header count is a server tally over the whole filtered set; a `showing N` marker beside it means the page could not carry the whole group.
 5. Expand a finding for why it matters, what to do, its framework references and its raw evidence. Follow the investigate affordance where the affected object is a resolvable principal.
 6. Verify the claim against Azure or Entra before acting on it.
-7. Record a state on anything you have decided about: `in_progress` while work is under way, `accepted` for a risk somebody owns, `suppressed` for a finding that is wrong or irrelevant. Both of the last two need a reason.
+7. Record a state: `in_progress` while work is underway, `accepted` for owned risk, or `suppressed` for an irrelevant finding. The current UI has no reason field and submits an empty reason. Preserve the rationale externally or through the API's optional `reason` field; neither acceptance nor suppression changes the raw scanner result or IAM score.
 
 **Expected result:** A triaged list where every finding you have looked at carries a state, and where the unmeasured checks are known rather than assumed to be passes.
 
-**Verification:** Re-run the relevant scanner. Findings you remediated appear in `resolved` on the next run because their fingerprint stopped appearing — resolution is computed, never clicked. Findings you suppressed keep their state, because state is stored against the fingerprint and a collection run never clears it.
+**Verification:** Re-collect affected access before rerunning the scanner. A disappeared fingerprint is a computed resolution, not proof of cloud revocation: confirm that its input collectors still succeeded. Suppressed findings keep local state while the detector may continue reporting them.
+
+{% include screenshot.html file="fid2-iam-inbox-finding-evidence.png" title="Inspect a finding before recording workflow state" caption="No grouping is selected here to expose the evidence; the normal defaults are severity, then check, with groups collapsed. The open card shows why the access matters and that usage was not measured. Triage changes require iam.write and were not performed in this example; they do not revoke cloud access." %}
 
 ## How to find the checks that were never measured
 
 1. On `/iam/findings`, set the grouping to **Group by pillar**.
 2. Scroll to the sections carrying a note instead of a count. `not measured — the inputs for these checks were not collected` and `not built — no check exists for this pillar yet` are both rendered as notes, never as a zero.
 3. For each `not measured` pillar, open `/iam/diagnostics` and find the collectors that could not read for the relevant scopes.
-4. Fix the permission, licence or connectivity cause, rescan, and re-check the pillar.
+4. Fix the permission, license or connectivity cause, rescan, and re-check the pillar.
 
 **Expected result:** A list of pillars that produced nothing because they could not be measured, separated from pillars that were checked and came back clean.
 
@@ -93,7 +99,7 @@ Suppressing or accepting a finding hides it from the default list for everybody 
 | A suppressed finding is visible | **Show suppressed** is ticked, or the underlying condition changed enough to produce a different fingerprint. |
 | The score card says "No grade" | Coverage is below the floor a grade requires. The card states the reason; increase coverage rather than reading it as a bad score. |
 | Section counts do not match the number of cards on screen | The header is a server tally over the whole filtered set; the cards are one page. The `showing N` marker states the difference. |
-| A sub-section count reads `N shown` | Sub-section counts are page counts, and are labelled whenever the parent section was truncated. Narrow the filter so the section is complete. |
+| A sub-section count reads `N shown` | Sub-section counts are page counts, and are labeled whenever the parent section was truncated. Narrow the filter so the section is complete. |
 | Severity chips read `—` | The query has not resolved. That is deliberately not a zero. |
 | Changing a state returns a permission error | State changes require `iam.write`. Viewing and running scanners require only `iam.read`. |
 

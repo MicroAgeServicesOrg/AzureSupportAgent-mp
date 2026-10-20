@@ -1,10 +1,15 @@
 import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { Link } from "react-router-dom";
-import { api, type AssessmentRunSummary, type RadarRailItem, type ReservationItem } from "../api";
+import { api, type AssessmentRunSummary, type MissionSystem, type RadarRailItem, type RecentItem, type ReservationItem } from "../api";
 import { usePersistedState } from "../utils/persistedState";
+import { queryKeys } from "../queryKeys";
 import { TrendChart } from "./TrendChart";
 import { PdfGeneratingOverlay } from "./PdfGeneratingOverlay";
+import { useAuth } from "./AuthContext";
+import { announceRecentChanged, recentItemIcon, useRecentItems } from "./RecentItems";
+import { roleLabel } from "../utils/roleLabel";
+import { formatError } from "../utils/format";
 
 const PROVIDER_LABELS: Record<string, string> = {
   openai: "OpenAI",
@@ -73,22 +78,52 @@ function statusOk(status?: string): boolean | undefined {
 }
 
 export function DashboardPanel() {
-  const meQ = useQuery({ queryKey: ["me"], queryFn: api.me });
-  const isAdmin = meQ.data?.role === "admin";
+  const { user, has } = useAuth();
+  const canChat = has("chat.use");
+  const canSettings = has("settings.read");
+  const canManageConnections = has("connections.manage");
+  const canManageConnectors = has("connectors.manage");
+  const canWorkloads = has("workloads.read");
+  const canArchitectures = has("architectures.read");
+  const canAssessments = has("assessments.read");
+  const canPolicy = has("policy.read");
+  const canAgents = has("agents.read");
+  const canNotifications = has("notifications.read");
+  const canReservations = has("reservations.read");
+  const canRadar = has("radar.read");
+  const canInsights = has("insights.read");
+  const canCoverage = has("coverage.read");
+  const canPerformance = has("perfprofile.read");
+  const canIdentity = has("identity.read");
+  const canIam = has("iam.read");
+  const canInventory = has("inventory.read");
+  const canTasks = has("tasks.read");
+  const canMonitor = has("monitor.view");
+  const canMissions = has("missions.read");
 
-  // Setup status sources. Admin-only endpoints are gated by `enabled: isAdmin` so
-  // non-admins never trigger a 403 — they fall back to the all-users `activeLlm` /
-  // `azureConnections` summaries instead.
-  const llmQ = useQuery({ queryKey: ["llmConfig"], queryFn: api.llmConfig, enabled: isAdmin, retry: false });
+  // Section visibility affects data loading as well as rendering. A hidden lower section
+  // must not keep paying for cache/API reads every time the operator opens the dashboard.
+  const [hiddenSections, setHiddenSections] = usePersistedState<string[]>("azsup.dashboard.hidden", []);
+  const isHidden = (key: string) => hiddenSections.includes(key);
+  const postureSignalsVisible = !isHidden("posture") || !isHidden("attention");
+  const [loadSecondary, setLoadSecondary] = useState(false);
+  useEffect(() => {
+    const timer = window.setTimeout(() => setLoadSecondary(true), 250);
+    return () => window.clearTimeout(timer);
+  }, []);
+
+  // Setup status sources. Privileged endpoints are gated by their concrete capabilities so
+  // narrower roles never trigger a 403; they fall back to the all-user summaries instead.
+  const llmQ = useQuery({ queryKey: ["llmConfig"], queryFn: api.llmConfig, enabled: canSettings, retry: false });
   const activeLlmQ = useQuery({ queryKey: ["activeLlm"], queryFn: api.activeLlm, retry: false });
   const connQ = useQuery({ queryKey: ["azureConnections"], queryFn: api.azureConnections, retry: false });
-  const adminConnQ = useQuery({ queryKey: ["adminConnections"], queryFn: api.adminConnections, enabled: isAdmin, retry: false });
-  const connectorsQ = useQuery({ queryKey: ["connectors"], queryFn: api.connectors, enabled: isAdmin, retry: false });
-  const wlQ = useQuery({ queryKey: ["workloads"], queryFn: api.workloads, retry: false });
-  const archQ = useQuery({ queryKey: ["architectures"], queryFn: api.architectures, retry: false });
-  const runsQ = useQuery({ queryKey: ["assessmentRuns"], queryFn: () => api.assessmentRuns(), retry: false });
-  const policyQ = useQuery({ queryKey: ["policySnapshots"], queryFn: api.policySnapshots, enabled: isAdmin, retry: false });
-  const agentsQ = useQuery({ queryKey: ["customAgents"], queryFn: api.customAgents, enabled: isAdmin, retry: false });
+  const adminConnQ = useQuery({ queryKey: ["adminConnections"], queryFn: api.adminConnections, enabled: canManageConnections, retry: false });
+  const connectorsQ = useQuery({ queryKey: ["connectors"], queryFn: api.connectors, enabled: canManageConnectors, retry: false });
+  const wlQ = useQuery({ queryKey: ["workloads"], queryFn: api.workloads, enabled: canWorkloads, retry: false });
+  const archQ = useQuery({ queryKey: ["architectures"], queryFn: api.architectures, enabled: canArchitectures, retry: false });
+  const runsQ = useQuery({ queryKey: ["assessmentRuns"], queryFn: () => api.assessmentRuns(), enabled: canAssessments, retry: false });
+  const policyQ = useQuery({ queryKey: ["policySnapshots"], queryFn: api.policySnapshots, enabled: canPolicy, retry: false });
+  const agentsQ = useQuery({ queryKey: ["customAgents"], queryFn: api.customAgents, enabled: canAgents, retry: false });
   // New signals driving the KPI strip, posture & risks panel, and the activity feed.
   // Each query is non-blocking — a failure hides the affected tile/section instead of
   // breaking the dashboard. Defer expensive admin-only queries with a 5-minute
@@ -96,13 +131,14 @@ export function DashboardPanel() {
   const unreadQ = useQuery({
     queryKey: ["notificationsUnread"],
     queryFn: api.notificationsUnread,
+    enabled: canNotifications,
     retry: false,
     staleTime: 60_000,
   });
   const reservationsQ = useQuery({
     queryKey: ["reservationsOverview"],
     queryFn: () => api.reservationsOverview(false),
-    enabled: isAdmin,
+    enabled: canReservations,
     retry: false,
     staleTime: 5 * 60_000,
     refetchOnMount: false,
@@ -110,7 +146,7 @@ export function DashboardPanel() {
   const radarQ = useQuery({
     queryKey: ["radarOverviewDashboard"],
     queryFn: () => api.radarOverview({}),
-    enabled: isAdmin,
+    enabled: canRadar,
     retry: false,
     staleTime: 5 * 60_000,
     refetchOnMount: false,
@@ -118,12 +154,21 @@ export function DashboardPanel() {
   const recentInvQ = useQuery({
     queryKey: ["recentDeepInvestigations"],
     queryFn: () => api.deepInvestigations(5),
+    enabled: canChat,
+    retry: false,
+    staleTime: 2 * 60_000,
+  });
+  const investigationStatsQ = useQuery({
+    queryKey: ["dashboard", "investigation-stats", 7],
+    queryFn: () => api.investigationStats(7),
+    enabled: canChat,
     retry: false,
     staleTime: 2 * 60_000,
   });
   const insightLatestQ = useQuery({
     queryKey: ["insightLatestDashboard"],
     queryFn: () => api.insightLatest(),
+    enabled: canInsights && !isHidden("insights") && loadSecondary,
     retry: false,
     staleTime: 2 * 60_000,
   });
@@ -132,6 +177,15 @@ export function DashboardPanel() {
   // Coverage / telemetry / backup / performance are per-scope, so the dashboard reads
   // them for ONE persisted "primary workload" (defaults to the first discovered one).
   const [primaryWorkloadId, setPrimaryWorkloadId] = usePersistedState<string>("azsup.dashboard.primaryWorkload", "");
+  const recentItemsQ = useRecentItems(8);
+  const missionStateQ = useQuery({
+    queryKey: queryKeys.dashboard.missionReadiness(primaryWorkloadId),
+    queryFn: () => api.missionState(primaryWorkloadId),
+    enabled: canMissions && !!primaryWorkloadId,
+    retry: false,
+    staleTime: 5 * 60_000,
+    refetchOnMount: false,
+  });
 
   // --- Posture signals that aren't in the base dashboard yet ---------------------
   // All non-blocking + cache-friendly: a failure hides the affected tile, never breaks
@@ -140,7 +194,7 @@ export function DashboardPanel() {
   const ambaTrendQ = useQuery({
     queryKey: ["dashAmbaTrend", primaryWorkloadId],
     queryFn: () => api.coverageTrend("amba", covParams!),
-    enabled: isAdmin && !!primaryWorkloadId,
+    enabled: canCoverage && !!primaryWorkloadId && !isHidden("coverage") && loadSecondary,
     retry: false,
     staleTime: 5 * 60_000,
     refetchOnMount: false,
@@ -148,7 +202,7 @@ export function DashboardPanel() {
   const telemetryTrendQ = useQuery({
     queryKey: ["dashTelemetryTrend", primaryWorkloadId],
     queryFn: () => api.coverageTrend("telemetry", covParams!),
-    enabled: isAdmin && !!primaryWorkloadId,
+    enabled: canCoverage && !!primaryWorkloadId && !isHidden("coverage") && loadSecondary,
     retry: false,
     staleTime: 5 * 60_000,
     refetchOnMount: false,
@@ -156,7 +210,7 @@ export function DashboardPanel() {
   const backupTrendQ = useQuery({
     queryKey: ["dashBackupTrend", primaryWorkloadId],
     queryFn: () => api.coverageTrend("backupdr", covParams!),
-    enabled: isAdmin && !!primaryWorkloadId,
+    enabled: canCoverage && !!primaryWorkloadId && !isHidden("coverage") && loadSecondary,
     retry: false,
     staleTime: 5 * 60_000,
     refetchOnMount: false,
@@ -164,7 +218,7 @@ export function DashboardPanel() {
   const perfTrendQ = useQuery({
     queryKey: ["dashPerfTrend", primaryWorkloadId],
     queryFn: () => api.coverageTrend("performance", covParams!),
-    enabled: isAdmin && !!primaryWorkloadId,
+    enabled: canPerformance && !!primaryWorkloadId && !isHidden("coverage") && loadSecondary,
     retry: false,
     staleTime: 5 * 60_000,
     refetchOnMount: false,
@@ -172,7 +226,7 @@ export function DashboardPanel() {
   const perfRunsQ = useQuery({
     queryKey: ["dashPerfRuns", primaryWorkloadId],
     queryFn: () => api.perfRuns(covParams!),
-    enabled: isAdmin && !!primaryWorkloadId,
+    enabled: canPerformance && !!primaryWorkloadId && !isHidden("coverage") && loadSecondary,
     retry: false,
     staleTime: 5 * 60_000,
     refetchOnMount: false,
@@ -180,7 +234,7 @@ export function DashboardPanel() {
   const identityQ = useQuery({
     queryKey: ["dashIdentity"],
     queryFn: () => api.identityOverview(30),
-    enabled: isAdmin,
+    enabled: canIdentity && postureSignalsVisible && loadSecondary,
     retry: false,
     staleTime: 5 * 60_000,
     refetchOnMount: false,
@@ -188,7 +242,7 @@ export function DashboardPanel() {
   const iamQ = useQuery({
     queryKey: ["dashRbac"],
     queryFn: () => api.iamOverview(),
-    enabled: isAdmin,
+    enabled: canIam && !isHidden("posture") && loadSecondary,
     retry: false,
     staleTime: 5 * 60_000,
     refetchOnMount: false,
@@ -196,7 +250,7 @@ export function DashboardPanel() {
   const optimizationQ = useQuery({
     queryKey: ["dashOptimization"],
     queryFn: () => api.inventoryOptimization(),
-    enabled: isAdmin,
+    enabled: canInventory && !isHidden("posture") && loadSecondary,
     retry: false,
     staleTime: 5 * 60_000,
     refetchOnMount: false,
@@ -204,7 +258,7 @@ export function DashboardPanel() {
   const tasksQ = useQuery({
     queryKey: ["dashScheduledTasks"],
     queryFn: api.scheduledTasks,
-    enabled: isAdmin,
+    enabled: canTasks && !isHidden("scheduled") && loadSecondary,
     retry: false,
     staleTime: 60_000,
   });
@@ -215,7 +269,7 @@ export function DashboardPanel() {
   const effectiveProvider = activeProvider || activeLlmQ.data?.provider || "";
   const effectiveModel = activeCfg?.model || activeLlmQ.data?.model || "";
 
-  const aiReady: boolean | undefined = isAdmin
+  const aiReady: boolean | undefined = canSettings
     ? (llmQ.isSuccess ? (activeCfg ? activeCfg.has_key || KEYLESS_OK.has(activeProvider) : false) : undefined)
     : (activeLlmQ.isSuccess ? !!activeLlmQ.data?.provider : undefined);
 
@@ -262,14 +316,14 @@ export function DashboardPanel() {
   const policySnapshots = policyQ.data?.snapshots ?? [];
   const agents = agentsQ.data?.agents ?? [];
 
-  type Step = { id: string; title: string; desc: string; done: boolean | undefined; detail?: string; bullets?: string[]; cta: string; to: string; adminOnly?: boolean };
+  type Step = { id: string; title: string; desc: string; done: boolean | undefined; detail?: string; bullets?: string[]; cta: string; to: string; allowed: boolean };
   const steps: Step[] = useMemo(() => [
     {
       id: "ai", title: "Connect an AI provider",
       desc: "The agent needs a large language model (OpenAI, Claude, Azure OpenAI, GitHub Copilot, a local model, …) to think.",
       done: aiReady,
       detail: aiReady && effectiveProvider
-        ? (isAdmin
+        ? (canSettings
             ? `${plural(configuredProviders.length, "provider")} configured · Default: ${providerLabel(effectiveProvider)}${effectiveModel ? ` · ${effectiveModel}` : ""}`
             : `Default: ${providerLabel(effectiveProvider)}${effectiveModel ? ` · ${effectiveModel}` : ""}`)
         : undefined,
@@ -281,7 +335,7 @@ export function DashboardPanel() {
         "💸 Free-only model filtering (e.g. OpenRouter) to keep costs in check",
         "📊 Built-in usage and token accounting per model",
       ],
-      cta: isAdmin ? "Configure AI" : "Ask an admin", to: "/admin/providers", adminOnly: true,
+      cta: canSettings ? "Configure AI" : "Ask an admin", to: "/admin/providers", allowed: canSettings,
     },
     {
       id: "azure", title: "Connect your Azure tenant",
@@ -296,7 +350,7 @@ export function DashboardPanel() {
         "✅ Validate Entra ID permissions before you depend on a connection",
         "⭐ Set a default connection used across the whole app",
       ],
-      cta: isAdmin ? "Add connection" : "Ask an admin", to: "/admin/tenants", adminOnly: true,
+      cta: canManageConnections ? "Add connection" : "Ask an admin", to: "/admin/tenants", allowed: canManageConnections,
     },
     {
       id: "deep", title: "Run a Deep Investigation",
@@ -313,7 +367,7 @@ export function DashboardPanel() {
         "💾 The full hypothesis tree is saved with the chat — reopen the side panel anytime to review the reasoning",
         "🔁 Re-run after a change to confirm the fix actually resolved the issue, with a fresh evidence trail",
       ],
-      cta: "Start a Deep Investigation", to: "/chat",
+      cta: "Start a Deep Investigation", to: "/chat", allowed: canChat,
     },
     {
       id: "workload", title: "Let AI discover your Azure Workloads",
@@ -328,7 +382,7 @@ export function DashboardPanel() {
         "🧠 AI explains its reasoning and confidence for every discovered workload",
         "🎯 Becomes the foundation for assessments and architecture diagrams",
       ],
-      cta: "Go to Workloads", to: "/workloads",
+      cta: "Go to Workloads", to: "/workloads", allowed: canWorkloads,
     },
     {
       id: "assess", title: "Assess against the Well-Architected Framework",
@@ -343,12 +397,12 @@ export function DashboardPanel() {
         "📊 Rich report with charts and toggles to drill into each pillar",
         "⏰ Run on a schedule or across many workloads at once",
       ],
-      cta: "Go to Assessments", to: "/assessments",
+      cta: "Go to Assessments", to: "/assessments", allowed: canAssessments,
     },
     {
       id: "policy", title: "Govern your estate with Azure Policy",
       desc: "Explore live policy assignments, scan compliance, and simulate a guardrail before you enforce it — every action is read-only.",
-      done: isAdmin ? (policyQ.isSuccess ? policySnapshots.length > 0 : undefined) : undefined,
+      done: canPolicy ? (policyQ.isSuccess ? policySnapshots.length > 0 : undefined) : undefined,
       detail: policySnapshots.length
         ? `${plural(policySnapshots.length, "posture snapshot")} captured${
             policySnapshots[0]?.summary?.compliance?.available
@@ -366,7 +420,7 @@ export function DashboardPanel() {
         "\uD83D\uDD2C Analyze impact before you apply \u2014 AI simulates the change against live resources, counts exactly what's affected, and gives a go/no\u2011go verdict",
         "\uD83D\uDEA6 Roll out safely in stages (audit \u2192 deny) with copy\u2011ready policy JSON + `az` commands you run yourself \u2014 the planner never touches Azure",
       ],
-      cta: isAdmin ? "Go to Azure Policy" : "Ask an admin", to: "/policy", adminOnly: true,
+      cta: canPolicy ? "Go to Azure Policy" : "Ask an admin", to: "/policy", allowed: canPolicy,
     },
     {
       id: "arch", title: "Living architecture, built by AI agents",
@@ -382,9 +436,9 @@ export function DashboardPanel() {
         "🔍 Drift detection compares the diagram against what's actually deployed in Azure",
         "🚦 Lifecycle states (Draft → In Review → Ready) and grouping into solution categories",
       ],
-      cta: "Go to Architectures", to: "/architectures",
+      cta: "Go to Architectures", to: "/architectures", allowed: canArchitectures,
     },
-  ], [aiReady, azureReady, isAdmin, conns, workloads.length, runs.length, architectures.length, effectiveProvider, effectiveModel, configuredProviders.length, policyQ.isSuccess, policySnapshots]);
+  ], [aiReady, azureReady, canSettings, canManageConnections, canChat, canWorkloads, canAssessments, canPolicy, canArchitectures, conns, workloads.length, runs.length, architectures.length, effectiveProvider, effectiveModel, configuredProviders.length, policyQ.isSuccess, policySnapshots]);
 
   const known = steps.filter((s) => s.done !== undefined);
   const doneCount = known.filter((s) => s.done).length;
@@ -402,13 +456,13 @@ export function DashboardPanel() {
   // `forceExpanded` opens every card's bullet list by default — used when the user
   // explicitly opens the guide from the completed-state banner. The per-card
   // "Learn more / Hide details" toggle still wins once clicked.
-  const renderSetupCards = (forceExpanded: boolean) => (
+  const renderSetupCards = (forceExpanded: boolean, visibleSteps: Step[] = steps) => (
     <div className="space-y-2">
-      {steps.map((s, i) => {
-        const blocked = s.adminOnly && !isAdmin;
-        const expanded = expandedSteps[s.id] ?? (forceExpanded || s.done !== true);
+      {visibleSteps.map((s, i) => {
+        const blocked = !s.allowed;
+        const expanded = expandedSteps[s.id] ?? forceExpanded;
         return (
-          <div key={s.id} className={`flex items-start gap-3 rounded-xl border bg-white p-4 shadow-sm ${s.done ? "border-green-200" : ""}`}>
+          <div key={s.id} className={`flex items-start gap-3 rounded-xl border bg-white p-4 shadow-xs ${s.done ? "border-green-200" : ""}`}>
             <span className={`mt-0.5 flex h-6 w-6 shrink-0 items-center justify-center rounded-full text-xs font-bold ${
               s.done === true ? "bg-green-500 text-white" : s.done === false ? "bg-gray-200 text-gray-500" : "bg-amber-100 text-amber-600"
             }`}>
@@ -422,6 +476,7 @@ export function DashboardPanel() {
                 {s.bullets && s.bullets.length > 0 && (
                   <button
                     onClick={() => setExpandedSteps((m) => ({ ...m, [s.id]: !expanded }))}
+                    aria-expanded={expanded}
                     className="ml-auto rounded-md border px-1.5 py-0.5 text-[10px] text-gray-500 hover:bg-gray-50"
                   >
                     {expanded ? "Hide details" : "Learn more"}
@@ -460,16 +515,12 @@ export function DashboardPanel() {
   const radarRail = radarQ.data?.rail ?? [];
   const unreadCount = unreadQ.data?.count ?? 0;
   const recentInvestigations = recentInvQ.data?.investigations ?? [];
+  const recentItems = recentItemsQ.data?.items ?? [];
 
   const completedRuns = useMemo(
     () => runs.filter((r) => typeof r.overall_score === "number"),
     [runs],
   );
-  const avgScore = useMemo(() => {
-    if (!completedRuns.length) return null;
-    const total = completedRuns.reduce((s, r) => s + (r.overall_score ?? 0), 0);
-    return Math.round(total / completedRuns.length);
-  }, [completedRuns]);
   const lowestRun: AssessmentRunSummary | null = useMemo(() => {
     if (!completedRuns.length) return null;
     return [...completedRuns].sort((a, b) => (a.overall_score ?? 0) - (b.overall_score ?? 0))[0];
@@ -509,10 +560,10 @@ export function DashboardPanel() {
         title: `Deep investigation · ${inv.title}`,
         detail: inv.root_cause || inv.summary || "completed",
         at: inv.created_at,
-        to: `/chat/${inv.chat_id}`,
+        to: `/c/${inv.chat_id}`,
       });
     }
-    if (isAdmin) {
+    if (canPolicy) {
       for (const snap of policySnapshots.slice(0, 3)) {
         const when = (snap as unknown as { generated_at?: string; created_at?: string }).generated_at
           || (snap as unknown as { created_at?: string }).created_at
@@ -533,10 +584,10 @@ export function DashboardPanel() {
       .filter((e) => !!e.at)
       .sort((a, b) => (new Date(b.at).getTime() - new Date(a.at).getTime()))
       .slice(0, 6);
-  }, [runs, recentInvestigations, policySnapshots, isAdmin]);
+  }, [runs, recentInvestigations, policySnapshots, canPolicy]);
 
-  const userName = (meQ.data?.display_name && meQ.data.display_name.trim())
-    || (meQ.data?.email ? meQ.data.email.split("@")[0] : "")
+  const userName = (user?.display_name && user.display_name.trim())
+    || (user?.email ? user.email.split("@")[0] : "")
     || "there";
   const defaultConn = conns.find((c) => c.is_default) || conns[0];
 
@@ -548,6 +599,10 @@ export function DashboardPanel() {
   }, [primaryWorkloadId, workloads, setPrimaryWorkloadId]);
 
   const primaryWorkloadName = workloads.find((w) => w.id === primaryWorkloadId)?.name ?? "";
+  const missionReadiness = useMemo(
+    () => rollupMissionReadiness(missionStateQ.data?.systems ?? []),
+    [missionStateQ.data?.systems],
+  );
 
   type Lens = { key: string; label: string; icon: string; to: string; current: number | null; delta: number | null; points: { at: string; pct: number | null }[]; loading: boolean; hasData: boolean };
   const lenses: Lens[] = useMemo(() => {
@@ -560,36 +615,23 @@ export function DashboardPanel() {
       hasData: (q.data?.points?.length ?? 0) > 0 || q.data?.current != null,
     });
     return [
-      mk("amba", "Monitoring", "📈", "/coverage", ambaTrendQ),
-      mk("telemetry", "Telemetry", "🛰️", "/telemetry", telemetryTrendQ),
-      mk("backupdr", "Backup & DR", "💾", "/backupdr", backupTrendQ),
-      mk("performance", "Performance", "⚡", "/performance", perfTrendQ),
+      ...(canCoverage ? [
+        mk("amba", "Monitoring", "📈", "/coverage", ambaTrendQ),
+        mk("telemetry", "Telemetry", "🛰️", "/telemetry", telemetryTrendQ),
+        mk("backupdr", "Backup & DR", "💾", "/backupdr", backupTrendQ),
+      ] : []),
+      ...(canPerformance ? [mk("performance", "Performance", "⚡", "/performance", perfTrendQ)] : []),
     ];
-  }, [ambaTrendQ, telemetryTrendQ, backupTrendQ, perfTrendQ]);
+  }, [ambaTrendQ, telemetryTrendQ, backupTrendQ, perfTrendQ, canCoverage, canPerformance]);
 
   const topBottleneck = useMemo(() => {
     const latest = (perfRunsQ.data?.runs ?? []).find((r) => r.top_bottleneck);
     return latest?.top_bottleneck ?? null;
   }, [perfRunsQ.data]);
 
-  // -------- Estate Health Score (blended 0-100) ---------------------------------
-  // Weighted blend of what we can read cheaply: assessment avg, the three coverage
-  // lenses, minus penalties for due retirements and expiring identity credentials.
+  // Identity signals feed attention/posture, but no longer mutate an opaque blended
+  // estate score. Mission Control is the established readiness contract for a workload.
   const identityKpis = identityQ.data?.kpis;
-  const estateHealth = useMemo(() => {
-    const parts: { v: number; w: number }[] = [];
-    if (avgScore != null) parts.push({ v: avgScore, w: 2 });
-    for (const l of lenses) {
-      if (l.key !== "performance" && l.current != null) parts.push({ v: l.current, w: 1 });
-    }
-    if (!parts.length) return null;
-    let base = parts.reduce((s, p) => s + p.v * p.w, 0) / parts.reduce((s, p) => s + p.w, 0);
-    // Risk penalties (bounded) so live threats visibly drag the score.
-    base -= Math.min(15, retirementsSoon.length * 3);
-    const idGaps = (identityKpis?.expiring_secrets ?? 0) + (identityKpis?.expiring_certs ?? 0) + (identityKpis?.keyvault_expiring ?? 0);
-    base -= Math.min(10, idGaps * 2);
-    return Math.max(0, Math.min(100, Math.round(base)));
-  }, [avgScore, lenses, retirementsSoon.length, identityKpis]);
 
   // -------- "This week" summary --------------------------------------------------
   const weekAgo = Date.now() - 7 * 24 * 60 * 60 * 1000;
@@ -597,10 +639,7 @@ export function DashboardPanel() {
     () => runs.filter((r) => { const t = new Date(r.ended_at || r.started_at || "").getTime(); return Number.isFinite(t) && t >= weekAgo; }).length,
     [runs, weekAgo],
   );
-  const investigationsThisWeek = useMemo(
-    () => recentInvestigations.filter((i) => { const t = new Date(i.created_at).getTime(); return Number.isFinite(t) && t >= weekAgo; }).length,
-    [recentInvestigations, weekAgo],
-  );
+  const investigationsThisWeek = investigationStatsQ.data?.count ?? 0;
 
   // -------- Attention triage (what needs me today) ------------------------------
   type Attention = { id: string; icon: string; sev: "red" | "amber"; text: string; to: string; action: string };
@@ -656,20 +695,41 @@ export function DashboardPanel() {
   async function refreshDashboard() {
     setRefreshing(true);
     try {
-      await qc.invalidateQueries();
+      await Promise.all([
+        ["workloads"], ["architectures"], ["assessmentRuns"], ["notificationsUnread"],
+        ["reservationsOverview"], ["radarOverviewDashboard"], ["recentDeepInvestigations"],
+        ["insightLatestDashboard"], ["dashAmbaTrend"], ["dashTelemetryTrend"],
+        ["dashBackupTrend"], ["dashPerfTrend"], ["dashPerfRuns"], ["dashIdentity"],
+        ["dashRbac"], ["dashOptimization"], ["dashScheduledTasks"], ["dashboard"],
+      ].map((queryKey) => qc.invalidateQueries({ queryKey })));
     } finally {
       setRefreshing(false);
     }
   }
 
+  async function changeRecent(item: RecentItem, action: "pin" | "remove") {
+    if (action === "pin") await api.pinRecentItem(item.id, !item.pinned);
+    else await api.removeRecentItem(item.id);
+    await qc.invalidateQueries({ queryKey: queryKeys.dashboard.recentItems });
+    announceRecentChanged();
+  }
+
+  async function clearRecent() {
+    await api.clearRecentItems(false);
+    await qc.invalidateQueries({ queryKey: queryKeys.dashboard.recentItems });
+    announceRecentChanged();
+  }
+
   // Combined "Estate Coverage" PDF (Monitoring + Telemetry + Backup & DR) for the primary workload.
   const [estatePdfBusy, setEstatePdfBusy] = useState(false);
+  const [estatePdfError, setEstatePdfError] = useState("");
   const estatePdfAbortRef = useRef<AbortController | null>(null);
   async function downloadEstatePdf() {
     if (estatePdfBusy || !primaryWorkloadId) return;
     const controller = new AbortController();
     estatePdfAbortRef.current = controller;
     setEstatePdfBusy(true);
+    setEstatePdfError("");
     try {
       const blob = await api.estateCoveragePdf({ workload_id: primaryWorkloadId }, controller.signal);
       const url = URL.createObjectURL(blob);
@@ -678,8 +738,8 @@ export function DashboardPanel() {
       a.download = `estate-coverage-${primaryWorkloadName || "report"}.pdf`;
       a.click();
       URL.revokeObjectURL(url);
-    } catch {
-      /* best-effort download (incl. user cancel); surfaced via the disabled state */
+    } catch (error) {
+      if ((error as Error)?.name !== "AbortError") setEstatePdfError(formatError(error));
     } finally {
       estatePdfAbortRef.current = null;
       setEstatePdfBusy(false);
@@ -690,30 +750,45 @@ export function DashboardPanel() {
   }
 
   // Section visibility (persisted) — the "Customize" control toggles these off/on.
-  const [hiddenSections, setHiddenSections] = usePersistedState<string[]>("azsup.dashboard.hidden", []);
   const [customizing, setCustomizing] = useState(false);
   // "What's set up" config detail is collapsed by default — it's admin-config noise on a
   // daily dashboard. Persist the user's choice.
   const [configOpen, setConfigOpen] = usePersistedState<boolean>("azsup.dashboard.configOpen", false);
-  const isHidden = (key: string) => hiddenSections.includes(key);
   const toggleSection = (key: string) =>
     setHiddenSections(isHidden(key) ? hiddenSections.filter((k) => k !== key) : [...hiddenSections, key]);
 
   const anyPostureLoading = ambaTrendQ.isLoading || identityQ.isLoading || iamQ.isLoading;
-  const coreLoading = meQ.isLoading || wlQ.isLoading || runsQ.isLoading || archQ.isLoading;
+  const coreLoading = wlQ.isLoading || runsQ.isLoading || archQ.isLoading;
+  const dashboardSources = [
+    { label: "Workloads", enabled: canWorkloads, ok: wlQ.isSuccess, error: wlQ.isError },
+    { label: "Assessments", enabled: canAssessments, ok: runsQ.isSuccess, error: runsQ.isError },
+    { label: "Mission readiness", enabled: canMissions && !!primaryWorkloadId, ok: missionStateQ.isSuccess, error: missionStateQ.isError },
+    { label: "Notifications", enabled: canNotifications, ok: unreadQ.isSuccess, error: unreadQ.isError },
+    { label: "Retirements", enabled: canRadar, ok: radarQ.isSuccess, error: radarQ.isError },
+    { label: "Reservations", enabled: canReservations, ok: reservationsQ.isSuccess, error: reservationsQ.isError },
+    { label: "Identity", enabled: canIdentity && postureSignalsVisible, ok: identityQ.isSuccess, error: identityQ.isError },
+    { label: "IAM", enabled: canIam && !isHidden("posture"), ok: iamQ.isSuccess, error: iamQ.isError },
+    { label: "Optimization", enabled: canInventory && !isHidden("posture"), ok: optimizationQ.isSuccess, error: optimizationQ.isError },
+  ].filter((source) => source.enabled);
+  const sourceErrors = dashboardSources.filter((source) => source.error);
+  const sourcesReady = dashboardSources.filter((source) => source.ok).length;
+  const dashboardUpdatedAt = Math.max(
+    wlQ.dataUpdatedAt, runsQ.dataUpdatedAt, radarQ.dataUpdatedAt,
+    missionStateQ.dataUpdatedAt, recentItemsQ.dataUpdatedAt,
+  );
 
   return (
     <div className="h-full overflow-y-auto bg-gray-50">
-      <div className="mx-auto max-w-6xl space-y-6 p-6">
+      <div className="w-full max-w-none space-y-6 p-6">
         {/* Hero — personalized greeting + estate health */}
-        <div className="rounded-2xl border bg-gradient-to-br from-brand/10 to-violet-50 p-5">
+        <div className="rounded-2xl border bg-linear-to-br from-brand/10 to-violet-50 p-5">
           <div className="flex flex-wrap items-start justify-between gap-4">
             <div className="flex min-w-0 items-center gap-3">
               <span className="text-3xl">🤖</span>
               <div className="min-w-0">
                 <h1 className="truncate text-2xl font-bold text-gray-800">Welcome back, {userName}</h1>
                 <div className="mt-0.5 flex flex-wrap items-center gap-1.5 text-[11px] text-gray-600">
-                  <span className="rounded-full bg-white/70 px-2 py-0.5">{isAdmin ? "Administrator" : "User"}</span>
+                  <span className="rounded-full bg-white/70 px-2 py-0.5">{roleLabel(user?.active_role || user?.role) || "User"}</span>
                   {effectiveProvider && (
                     <span className="rounded-full bg-white/70 px-2 py-0.5">
                       🧠 {providerLabel(effectiveProvider)}{effectiveModel ? ` · ${effectiveModel}` : ""}
@@ -741,31 +816,29 @@ export function DashboardPanel() {
             </div>
 
             <div className="flex items-center gap-4">
-              {/* Estate Health ring */}
-              {estateHealth != null && (
-                <Link to="/assessments" className="flex items-center gap-2 rounded-xl bg-white/70 px-3 py-1.5 hover:bg-white" title="Blended health across assessments, coverage and live risks">
-                  <HealthRing value={estateHealth} />
+              {/* Mission readiness is the canonical workload rollup; unlike the retired
+                  blended score, its meaning does not change when a dashboard query fails. */}
+              {canMissions && primaryWorkloadId && (
+                <Link to={`/mission-control/${primaryWorkloadId}`} className="flex items-center gap-2 rounded-xl bg-white/70 px-3 py-1.5 hover:bg-white" title={`${missionReadiness.done} of ${missionReadiness.total} systems complete; ${missionReadiness.attention} need attention`}>
+                  <MissionReadinessRing summary={missionReadiness} />
                   <div className="leading-tight">
-                    <div className="text-[10px] font-medium uppercase tracking-wide text-gray-500">Estate health</div>
-                    <div className="text-[11px] text-gray-500">blended posture</div>
+                    <div className="text-[10px] font-medium uppercase tracking-wide text-gray-500">Mission readiness</div>
+                    <div className="text-[11px] text-gray-500">{missionReadiness.label}</div>
                   </div>
                 </Link>
               )}
               {/* Toolbar */}
               <div className="flex flex-col items-end gap-2">
                 <div className="flex items-center gap-1.5">
-                  <button onClick={() => void refreshDashboard()} disabled={refreshing} title="Refresh all dashboard data" className="rounded-lg border bg-white/70 px-2 py-1.5 text-xs text-gray-600 hover:bg-white disabled:opacity-50">
-                    {refreshing || anyPostureLoading ? "⟳ Refreshing…" : "⟳ Refresh"}
-                  </button>
                   <button onClick={() => setCustomizing((v) => !v)} title="Show or hide dashboard sections" className={`rounded-lg border px-2 py-1.5 text-xs ${customizing ? "border-brand/40 bg-brand/5 text-brand" : "bg-white/70 text-gray-600 hover:bg-white"}`}>
                     ⚙ Customize
                   </button>
                 </div>
                 <div className="flex flex-wrap items-center justify-end gap-2">
-                  <Link to="/chat" className="rounded-lg bg-brand px-3 py-1.5 text-xs font-medium text-white hover:bg-brand/90">💬 New chat</Link>
-                  <Link to="/chat?deep=1" className="rounded-lg border border-violet-300 bg-violet-50 px-3 py-1.5 text-xs font-medium text-violet-700 hover:bg-violet-100">🔎 Deep investigation</Link>
-                  <Link to="/assessments" className="rounded-lg border px-3 py-1.5 text-xs text-gray-700 hover:bg-white">🛡️ Run assessment</Link>
-                  {isAdmin && (
+                  {canChat && <Link to="/chat" className="rounded-lg bg-brand px-3 py-1.5 text-xs font-medium text-white hover:bg-brand/90">💬 New chat</Link>}
+                  {canChat && <Link to="/chat?deep=1" className="rounded-lg border border-violet-300 bg-violet-50 px-3 py-1.5 text-xs font-medium text-violet-700 hover:bg-violet-100">🔎 Deep investigation</Link>}
+                  {canAssessments && <Link to="/assessments" className="rounded-lg border px-3 py-1.5 text-xs text-gray-700 hover:bg-white">🛡️ Run assessment</Link>}
+                  {canMonitor && (
                     <Link to="/monitor" className="rounded-lg border px-3 py-1.5 text-xs text-gray-700 hover:bg-white">📊 Monitor</Link>
                   )}
                 </div>
@@ -781,6 +854,7 @@ export function DashboardPanel() {
                 <button
                   key={s.key}
                   onClick={() => toggleSection(s.key)}
+                  aria-pressed={!isHidden(s.key)}
                   className={`rounded-full border px-2.5 py-0.5 text-[11px] ${isHidden(s.key) ? "border-gray-200 bg-gray-50 text-gray-400 line-through" : "border-brand/30 bg-brand/5 text-brand"}`}
                 >
                   {s.label}
@@ -793,29 +867,59 @@ export function DashboardPanel() {
           )}
         </div>
 
+        {/* One honest scope/freshness row. Lower widgets are cached views and may have
+            their own native scopes; the selected workload controls Mission + coverage. */}
+        <div className="flex flex-col gap-3 rounded-xl border bg-white px-4 py-3 shadow-xs sm:flex-row sm:items-center sm:justify-between">
+          <div className="flex min-w-0 flex-wrap items-center gap-2 text-xs text-gray-600">
+            {defaultConn && <span className="rounded-full bg-gray-100 px-2 py-1">🏢 {defaultConn.name}</span>}
+            {workloads.length > 0 && (
+              <label className="flex min-w-0 max-w-full items-center gap-2">
+                <span className="shrink-0 font-medium text-gray-500">Primary workload</span>
+                <select
+                  value={primaryWorkloadId}
+                  onChange={(event) => setPrimaryWorkloadId(event.target.value)}
+                  className="min-w-0 max-w-full rounded-lg border bg-white px-2 py-1 text-xs sm:max-w-[260px]"
+                  aria-label="Primary workload for dashboard readiness and coverage"
+                >
+                  {workloads.map((workload) => <option key={workload.id} value={workload.id}>{workload.name}</option>)}
+                </select>
+              </label>
+            )}
+            <span className="text-gray-500">{missionReadiness.done}/{missionReadiness.total || 0} readiness signals</span>
+            <span className={sourceErrors.length ? "font-medium text-amber-700" : "text-gray-500"} title={sourceErrors.map((source) => source.label).join(", ")}>
+              {sourcesReady}/{dashboardSources.length} dashboard sources{sourceErrors.length ? ` · ${sourceErrors.length} unavailable` : ""}
+            </span>
+            {dashboardUpdatedAt > 0 && <span className="text-gray-500">updated {formatRelative(new Date(dashboardUpdatedAt).toISOString())}</span>}
+          </div>
+          <button onClick={() => void refreshDashboard()} disabled={refreshing} className="shrink-0 rounded-lg border px-3 py-1.5 text-xs text-gray-600 hover:bg-gray-50 disabled:opacity-50" aria-live="polite">
+            {refreshing || anyPostureLoading ? "⟳ Refreshing…" : "⟳ Refresh dashboard"}
+          </button>
+        </div>
+
         {/* KPI strip — at-a-glance signals */}
         <div className="grid grid-cols-2 gap-2 sm:grid-cols-3 lg:grid-cols-6">
           {coreLoading ? (
             Array.from({ length: 6 }).map((_, i) => <SkeletonTile key={i} />)
           ) : (
           <>
-          <KpiTile to="/workloads" icon="🧩" label="Workloads" value={workloads.length} />
-          <KpiTile
+          {canWorkloads && <KpiTile to="/workloads" icon="🧩" label="Workloads" value={workloads.length} />}
+          {canAssessments && <KpiTile
             to="/assessments"
             icon="🛡️"
-            label="Assessments"
-            value={runs.length}
-            sub={avgScore != null ? `avg ${avgScore}/100` : undefined}
-          />
-          <KpiTile to="/architectures" icon="🗺️" label="Architectures" value={architectures.length} />
-          <KpiTile
+            label="Lowest assessment"
+            value={lowestRun?.overall_score ?? 0}
+            sub={lowestRun ? `${lowestRun.workload_name} · of 100` : "not assessed"}
+            tone={lowestRun && (lowestRun.overall_score ?? 100) < 60 ? "red" : undefined}
+          />}
+          {canMissions && <KpiTile to={primaryWorkloadId ? `/mission-control/${primaryWorkloadId}` : "/mission-control"} icon="🚀" label="Mission attention" value={missionReadiness.attention} tone={missionReadiness.attention > 0 ? "amber" : undefined} />}
+          {canNotifications && <KpiTile
             to="/notifications"
             icon="🔔"
             label="Unread"
             value={unreadCount}
             tone={unreadCount > 0 ? "amber" : undefined}
-          />
-          {isAdmin && (
+          />}
+          {canRadar && (
             <KpiTile
               to="/radar"
               icon="📡"
@@ -824,7 +928,7 @@ export function DashboardPanel() {
               tone={retirementsSoon.length > 0 ? "red" : undefined}
             />
           )}
-          {isAdmin && (
+          {canReservations && (
             <KpiTile
               to="/reservations"
               icon="🏷️"
@@ -837,8 +941,18 @@ export function DashboardPanel() {
           )}
         </div>
 
+        {!isHidden("recent") && (
+          <RecentlyVisited
+            items={recentItems}
+            loading={recentItemsQ.isLoading}
+            failed={recentItemsQ.isError}
+            onChange={changeRecent}
+            onClear={clearRecent}
+          />
+        )}
+
         {/* Attention — what needs me today (failed runs, expiring creds, deadlines) */}
-        {isAdmin && !isHidden("attention") && attention.length > 0 && (
+        {(canAssessments || canIdentity || canRadar || canReservations) && !isHidden("attention") && attention.length > 0 && (
           <div className="rounded-xl border border-amber-200 bg-amber-50/60 p-3">
             <div className="mb-2 flex items-center gap-2">
               <span className="text-sm font-semibold text-amber-800">⚠ Needs attention</span>
@@ -851,7 +965,7 @@ export function DashboardPanel() {
                     <span className={`h-1.5 w-1.5 shrink-0 rounded-full ${a.sev === "red" ? "bg-red-500" : "bg-amber-500"}`} />
                     <span className="text-base">{a.icon}</span>
                     <span className="min-w-0 flex-1 truncate text-[12px] text-gray-700" title={a.text}>{a.text}</span>
-                    <span className="shrink-0 rounded border px-1.5 py-0.5 text-[10px] font-medium text-brand">{a.action} →</span>
+                    <span className="shrink-0 rounded-sm border px-1.5 py-0.5 text-[10px] font-medium text-brand">{a.action} →</span>
                   </Link>
                 </li>
               ))}
@@ -871,7 +985,7 @@ export function DashboardPanel() {
                 <Link
                   key={d.id}
                   to="/insights/runs"
-                  className={`block rounded-xl border p-3 hover:shadow-sm ${d.verdict === "urgent" ? "border-red-200 bg-red-50/50" : "border-amber-200 bg-amber-50/40"}`}
+                  className={`block rounded-xl border p-3 hover:shadow-xs ${d.verdict === "urgent" ? "border-red-200 bg-red-50/50" : "border-amber-200 bg-amber-50/40"}`}
                 >
                   <div className="flex items-center gap-2">
                     <span className="text-base">{d.pack_icon || "🧠"}</span>
@@ -886,33 +1000,26 @@ export function DashboardPanel() {
           </div>
         )}
 
-        {isAdmin && !isHidden("coverage") && (
+        {(canCoverage || canPerformance) && !isHidden("coverage") && (
           <div>
             <div className="mb-2 flex items-center justify-between gap-2">
               <h2 className="text-sm font-semibold uppercase tracking-wide text-gray-500">Coverage</h2>
-              <div className="flex items-center gap-2">
-                {primaryWorkloadId && (
-                  <button
-                    onClick={() => void downloadEstatePdf()}
-                    disabled={estatePdfBusy}
-                    title="Download a combined Estate Coverage PDF (Monitoring · Telemetry · Backup & DR) for this workload"
-                    className="rounded-lg border bg-white px-2 py-1 text-xs text-gray-600 hover:bg-gray-50 disabled:opacity-50"
-                  >
-                    {estatePdfBusy ? "Generating…" : "📄 Estate PDF"}
-                  </button>
-                )}
-                {workloads.length > 0 && (
-                  <select
-                    value={primaryWorkloadId}
-                    onChange={(e) => setPrimaryWorkloadId(e.target.value)}
-                    className="max-w-[220px] rounded-lg border bg-white px-2 py-1 text-xs"
-                    title="Primary workload for the coverage lenses"
-                  >
-                    {workloads.map((w) => <option key={w.id} value={w.id}>{w.name}</option>)}
-                  </select>
-                )}
-              </div>
+              {canCoverage && primaryWorkloadId && (
+                <button
+                  onClick={() => void downloadEstatePdf()}
+                  disabled={estatePdfBusy}
+                  title="Download a combined Estate Coverage PDF (Monitoring · Telemetry · Backup & DR) for this workload"
+                  className="shrink-0 rounded-lg border bg-white px-2 py-1 text-xs text-gray-600 hover:bg-gray-50 disabled:opacity-50"
+                >
+                  {estatePdfBusy ? "Generating…" : "📄 Estate PDF"}
+                </button>
+              )}
             </div>
+            {estatePdfError && (
+              <div className="mb-2 rounded-lg border border-red-200 bg-red-50 px-3 py-2 text-xs text-red-700" role="alert">
+                Could not generate the Estate Coverage PDF: {estatePdfError}
+              </div>
+            )}
             {!primaryWorkloadId ? (
               <Empty text="Discover a workload to see its coverage." />
             ) : (
@@ -926,7 +1033,7 @@ export function DashboardPanel() {
               <Link to="/performance" className="mt-2 flex items-center gap-2 rounded-lg border bg-white px-3 py-1.5 text-[12px] text-gray-600 hover:border-brand/40">
                 <span>⚡</span>
                 <span className="min-w-0 flex-1 truncate">Top bottleneck: <span className="font-medium text-gray-800">{topBottleneck.resource_name}</span> · {topBottleneck.metric_name}</span>
-                <span className="shrink-0 font-semibold text-amber-600">{topBottleneck.pct_of_threshold}%</span>
+                <span className="shrink-0 font-semibold text-amber-600">{typeof topBottleneck.pct_of_threshold === "number" ? `${topBottleneck.pct_of_threshold}%` : "—"}</span>
               </Link>
             )}
           </div>
@@ -937,12 +1044,12 @@ export function DashboardPanel() {
         <div>
           <h2 className="mb-2 text-sm font-semibold uppercase tracking-wide text-gray-500">Posture &amp; risks</h2>
           <div className="grid grid-cols-1 gap-4 lg:grid-cols-3">
-            <Card title="Lowest assessment" icon="🛡️" manageTo="/assessments">
+            {canAssessments && <Card title="Lowest assessment" icon="🛡️" manageTo="/assessments">
               {lowestRun ? (
                 <Link to={`/assessments/${lowestRun.id}`} className="block rounded-lg border bg-gray-50 p-3 hover:border-brand/40 hover:bg-white">
                   <div className="flex items-center justify-between gap-2">
                     <span className="truncate text-sm font-medium text-gray-800">{lowestRun.workload_name}</span>
-                    <span className={`shrink-0 rounded px-1.5 py-0.5 text-[10px] font-bold ${scoreTone(lowestRun.overall_score)}`}>
+                    <span className={`shrink-0 rounded-sm px-1.5 py-0.5 text-[10px] font-bold ${scoreTone(lowestRun.overall_score)}`}>
                       {lowestRun.overall_score}/100
                     </span>
                   </div>
@@ -951,9 +1058,9 @@ export function DashboardPanel() {
               ) : (
                 <Empty text={runs.length ? "No completed runs with a score yet." : "No assessment has been run yet."} />
               )}
-            </Card>
+            </Card>}
 
-            {isAdmin && (
+            {canRadar && (
               <Card title="Retirements due ≤ 90d" icon="📡" manageTo="/radar">
                 {radarQ.isError ? (
                   <Empty text="Radar data not available." />
@@ -974,7 +1081,7 @@ export function DashboardPanel() {
               </Card>
             )}
 
-            {isAdmin && (
+            {canReservations && (
               <Card title="Reservations expiring ≤ 30d" icon="🏷️" manageTo="/reservations">
                 {reservationsQ.isError ? (
                   <Empty text="Reservation data not available." />
@@ -996,7 +1103,7 @@ export function DashboardPanel() {
             )}
 
             {/* Identity risk */}
-            {isAdmin && (
+            {canIdentity && (
               <Card title="Identity risk" icon="🔑" manageTo="/entra/findings?sub=hygiene">
                 {identityQ.isError ? (
                   <Empty text="Identity data not available." />
@@ -1016,7 +1123,7 @@ export function DashboardPanel() {
             )}
 
             {/* Access (RBAC) */}
-            {isAdmin && (
+            {canIam && (
               <Card title="Access (IAM)" icon="🛂" manageTo="/iam">
                 {iamQ.isError ? (
                   <Empty text="RBAC data not available." />
@@ -1036,7 +1143,7 @@ export function DashboardPanel() {
             )}
 
             {/* Cost optimization (FinOps) */}
-            {isAdmin && (
+            {canInventory && (
               <Card title="Cost optimization" icon="💰" manageTo="/inventory">
                 {optimizationQ.isError ? (
                   <Empty text="Optimization data not available." />
@@ -1049,7 +1156,7 @@ export function DashboardPanel() {
                     <div className="flex items-center justify-between gap-2">
                       <span className="text-sm font-medium text-gray-800">{plural(optimization.total_count, "opportunity")}</span>
                       {optimization.total_monthly_cost != null && optimization.cost_available && (
-                        <span className="shrink-0 rounded bg-green-100 px-1.5 py-0.5 text-[10px] font-bold text-green-700">
+                        <span className="shrink-0 rounded-sm bg-green-100 px-1.5 py-0.5 text-[10px] font-bold text-green-700">
                           ~{formatMoney(optimization.total_monthly_cost, optimization.currency)}/mo
                         </span>
                       )}
@@ -1066,13 +1173,13 @@ export function DashboardPanel() {
         )}
 
         {/* Scheduled automations — what's coming up */}
-        {isAdmin && !isHidden("scheduled") && upcomingTasks.length > 0 && (
+        {canTasks && !isHidden("scheduled") && upcomingTasks.length > 0 && (
           <div>
             <h2 className="mb-2 text-sm font-semibold uppercase tracking-wide text-gray-500">Scheduled next</h2>
             <ul className="grid grid-cols-1 gap-2 sm:grid-cols-2">
               {upcomingTasks.map((t) => (
                 <li key={t.id}>
-                  <Link to="/automations" className="flex items-center gap-3 rounded-xl border bg-white px-3 py-2 shadow-sm hover:border-brand/40">
+                  <Link to="/automations" className="flex items-center gap-3 rounded-xl border bg-white px-3 py-2 shadow-xs hover:border-brand/40">
                     <span className="text-base">{t.target_meta?.icon || "⏰"}</span>
                     <div className="min-w-0 flex-1">
                       <div className="truncate text-sm font-medium text-gray-800">{t.name}</div>
@@ -1086,11 +1193,11 @@ export function DashboardPanel() {
           </div>
         )}
 
-        {/* Recent activity feed */}
+        {/* Generated runs and changes — deliberately separate from navigation history. */}
         {!isHidden("activity") && recentActivity.length > 0 && (
           <div>
-            <h2 className="mb-2 text-sm font-semibold uppercase tracking-wide text-gray-500">Recent activity</h2>
-            <ul className="divide-y rounded-xl border bg-white shadow-sm">
+            <h2 className="mb-2 text-sm font-semibold uppercase tracking-wide text-gray-500">Recent runs &amp; changes</h2>
+            <ul className="divide-y rounded-xl border bg-white shadow-xs">
               {recentActivity.map((e, i) => (
                 <li key={i}>
                   <Link to={e.to} className="flex items-center gap-3 px-4 py-2.5 hover:bg-gray-50">
@@ -1132,12 +1239,21 @@ export function DashboardPanel() {
           <div>
             <div className="mb-2 flex items-end justify-between gap-2">
               <h2 className="text-sm font-semibold uppercase tracking-wide text-gray-500">Setup guide</h2>
-              <span className="text-xs text-gray-500">{doneCount}/{known.length} done</span>
+              <div className="flex items-center gap-2">
+                <span className="text-xs text-gray-500">{doneCount}/{known.length} done</span>
+                <button
+                  onClick={() => setSetupGuideOpen((value) => !value)}
+                  aria-expanded={setupGuideOpen}
+                  className="rounded-sm border bg-white px-2 py-1 text-[11px] text-gray-500 hover:bg-gray-50"
+                >
+                  {setupGuideOpen ? "Hide completed" : "Show all"}
+                </button>
+              </div>
             </div>
             <div className="mb-3 h-1.5 overflow-hidden rounded-full bg-gray-200">
               <div className={`h-full rounded-full transition-all ${allDone ? "bg-green-500" : "bg-brand"}`} style={{ width: `${pct}%` }} />
             </div>
-            {renderSetupCards(false)}
+            {renderSetupCards(false, setupGuideOpen ? steps : steps.filter((step) => step.done !== true))}
           </div>
         ))}
 
@@ -1148,14 +1264,14 @@ export function DashboardPanel() {
             <span className="text-gray-400">{configOpen ? "▾" : "▸"}</span>
             What's set up
             <span className="rounded-full bg-gray-100 px-2 py-0.5 text-[10px] font-medium normal-case tracking-normal text-gray-500">
-              {plural(configuredProviders.length || (effectiveProvider ? 1 : 0), "provider")} · {plural(conns.length, "tenant")}{isAdmin ? ` · ${plural(connectors.length, "connector")}` : ""}
+              {plural(configuredProviders.length || (effectiveProvider ? 1 : 0), "provider")} · {plural(conns.length, "tenant")}{canManageConnectors ? ` · ${plural(connectors.length, "connector")}` : ""}
             </span>
           </button>
           {configOpen && (
           <div className="grid grid-cols-1 gap-4 lg:grid-cols-2">
             {/* AI providers */}
-            <Card title="AI providers" icon="🧠" manageTo={isAdmin ? "/admin/providers" : undefined}>
-              {isAdmin ? (
+            <Card title="AI providers" icon="🧠" manageTo={canSettings ? "/admin/providers" : undefined}>
+              {canSettings ? (
                 configuredProviders.length === 0 ? (
                   <Empty text="No AI provider configured yet." />
                 ) : (
@@ -1204,7 +1320,7 @@ export function DashboardPanel() {
             </Card>
 
             {/* Azure tenants */}
-            <Card title="Azure tenants" icon="🏢" manageTo={isAdmin ? "/admin/tenants" : undefined}>
+            <Card title="Azure tenants" icon="🏢" manageTo={canManageConnections ? "/admin/tenants" : undefined}>
               {conns.length === 0 ? (
                 <Empty text="No Azure tenant connected." />
               ) : (
@@ -1234,7 +1350,7 @@ export function DashboardPanel() {
             </Card>
 
             {/* Connectors (admin) */}
-            {isAdmin && (
+            {canManageConnectors && (
               <Card title="Connectors" icon="🔌" manageTo="/admin/connectors">
                 {connectors.length === 0 ? (
                   <Empty text="No connectors configured (Teams, Slack, Jira, Grafana, …)." />
@@ -1257,7 +1373,7 @@ export function DashboardPanel() {
             )}
 
             {/* Sub agents quick summary (admin) */}
-            {isAdmin && (
+            {canAgents && (
               <Card title="Sub agents" icon="✨" manageTo="/automations/agents">
                 {agents.length === 0 ? (
                   <Empty text="No specialized agents defined yet." />
@@ -1273,36 +1389,29 @@ export function DashboardPanel() {
         </div>
         )}
 
-        {/* Explore — full onboarding cards while setting up; a compact launcher strip once complete */}
+        {/* Compact launcher: onboarding belongs in Setup; this remains a fast route to the
+            long-tail capabilities that should not each consume a permanent dashboard card. */}
         {!isHidden("explore") && (
         <div>
-          {allDone ? (
-            <>
-              <h2 className="mb-2 text-sm font-semibold uppercase tracking-wide text-gray-500">Quick links</h2>
-              <div className="flex flex-wrap gap-2">
-                <QuickLink to="/chat" icon="💬" label="Chat" />
-                <QuickLink to="/workloads" icon="🧩" label="Workloads" />
-                <QuickLink to="/assessments" icon="🛡️" label="Assessments" />
-                <QuickLink to="/architectures" icon="🗺️" label="Architectures" />
-                {isAdmin && <QuickLink to="/policy" icon="📐" label="Policy" />}
-                <QuickLink to="/automations" icon="⚙️" label="Automations" />
-                {isAdmin && <QuickLink to="/monitor" icon="📊" label="Monitor" />}
-              </div>
-            </>
-          ) : (
-            <>
-              <h2 className="mb-2 text-sm font-semibold uppercase tracking-wide text-gray-500">What can I do here?</h2>
-              <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-3">
-                <ExploreCard to="/chat" icon="💬" title="Chat with the agent" desc="Ask anything about your Azure estate. It investigates with live data and explains its reasoning." />
-                <ExploreCard to="/workloads" icon="🧩" title="Azure Workloads" desc="Group resources into applications — or let ✨ Autopilot discover them for you." />
-                <ExploreCard to="/assessments" icon="🛡️" title="Assessments" desc="Score workloads against the Well-Architected Framework, mapped to CIS / NIST / ISO." />
-                <ExploreCard to="/architectures" icon="🗺️" title="Architectures" desc="AI-built, editable diagrams of your apps — with drift detection and best-practice review." />
-                {isAdmin && <ExploreCard to="/policy" icon="📐" title="Azure Policy" desc="Explore assignments, scan compliance, and simulate guardrails before you enforce — read-only." />}
-                <ExploreCard to="/automations" icon="⚙️" title="Automations" desc="Schedule recurring jobs, build workbooks & playbooks, and create specialized sub agents." />
-                {isAdmin && <ExploreCard to="/monitor" icon="📊" title="Monitor" desc="Central dashboard of activity, runs, usage, and audit across the workspace." />}
-              </div>
-            </>
-          )}
+          <h2 className="mb-2 text-sm font-semibold uppercase tracking-wide text-gray-500">All capabilities</h2>
+          <div className="flex flex-wrap gap-2">
+            {canChat && <QuickLink to="/chat" icon="💬" label="Chat" />}
+            {canWorkloads && <QuickLink to="/workloads" icon="🧩" label="Workloads" />}
+            {canMissions && <QuickLink to="/mission-control" icon="🚀" label="Mission Control" />}
+            {canAssessments && <QuickLink to="/assessments" icon="🛡️" label="Assessments" />}
+            {canArchitectures && <QuickLink to="/architectures" icon="🗺️" label="Architectures" />}
+            {has("resiliency.read") && <QuickLink to="/resiliency" icon="♻️" label="Recovery Readiness" />}
+            {has("cases.read") && <QuickLink to="/cases" icon="📁" label="Cases" />}
+            {has("evidence.read") && <QuickLink to="/evidence" icon="📎" label="Evidence" />}
+            {canInventory && <QuickLink to="/inventory" icon="📦" label="Inventory" />}
+            {canIam && <QuickLink to="/iam" icon="🛂" label="IAM" />}
+            {has("entra.read") && <QuickLink to="/entra" icon="🔑" label="Entra ID" />}
+            {has("alerts_manager.read") && <QuickLink to="/alerts-manager" icon="🚨" label="Alerts" />}
+            {canPolicy && <QuickLink to="/policy" icon="📐" label="Policy" />}
+            {(canTasks || has("workbooks.read") || has("playbooks.read") || canAgents) && <QuickLink to="/automations" icon="⚙️" label="Automations" />}
+            {canMonitor && <QuickLink to="/monitor" icon="📊" label="Monitor" />}
+            <QuickLink to="/proactive" icon="⌘" label="Browse all" />
+          </div>
         </div>
         )}
       </div>
@@ -1318,7 +1427,7 @@ export function DashboardPanel() {
 
 function Card({ title, icon, manageTo, children }: { title: string; icon: string; manageTo?: string; children: ReactNode }) {
   return (
-    <div className="rounded-xl border bg-white p-4 shadow-sm">
+    <div className="rounded-xl border bg-white p-4 shadow-xs">
       <div className="mb-3 flex items-center justify-between">
         <h3 className="flex items-center gap-1.5 text-sm font-semibold text-gray-800"><span>{icon}</span>{title}</h3>
         {manageTo && <Link to={manageTo} className="text-xs font-medium text-brand hover:underline">Manage →</Link>}
@@ -1342,20 +1451,20 @@ function Badge({ tone, children }: { tone: "brand" | "green" | "gray"; children:
     tone === "brand" ? "bg-brand/10 text-brand" :
     tone === "green" ? "bg-green-100 text-green-700" :
     "bg-gray-100 text-gray-500";
-  return <span className={`shrink-0 rounded px-1.5 py-0.5 text-[9px] font-medium ${cls}`}>{children}</span>;
+  return <span className={`shrink-0 rounded-sm px-1.5 py-0.5 text-[9px] font-medium ${cls}`}>{children}</span>;
 }
 
 function Empty({ text }: { text: string }) {
-  return <div className="rounded-lg border border-dashed bg-gray-50/60 p-3 text-center text-xs text-gray-400">{text}</div>;
+  return <div className="rounded-lg border border-dashed bg-gray-50/60 p-3 text-center text-xs text-gray-500">{text}</div>;
 }
 
 function SkeletonTile() {
   return (
-    <div className="flex items-center gap-2.5 rounded-xl border bg-white p-3 shadow-sm">
+    <div className="flex items-center gap-2.5 rounded-xl border bg-white p-3 shadow-xs">
       <div className="h-6 w-6 shrink-0 animate-pulse rounded-full bg-gray-100" />
       <div className="min-w-0 flex-1">
-        <div className="h-4 w-10 animate-pulse rounded bg-gray-100" />
-        <div className="mt-1 h-2.5 w-16 animate-pulse rounded bg-gray-100" />
+        <div className="h-4 w-10 animate-pulse rounded-sm bg-gray-100" />
+        <div className="mt-1 h-2.5 w-16 animate-pulse rounded-sm bg-gray-100" />
       </div>
     </div>
   );
@@ -1370,12 +1479,12 @@ function KpiTile({ to, icon, label, value, sub, tone }: { to: string; icon: stri
   const valueTone = tone === "red" ? "text-red-700" : tone === "amber" ? "text-amber-700" : "text-gray-800";
   const borderTone = tone === "red" ? "border-red-200" : tone === "amber" ? "border-amber-200" : "";
   return (
-    <Link to={to} className={`flex items-center gap-2.5 rounded-xl border bg-white p-3 shadow-sm transition hover:border-brand/40 hover:shadow-md ${borderTone}`}>
+    <Link to={to} className={`flex items-center gap-2.5 rounded-xl border bg-white p-3 shadow-xs transition hover:border-brand/40 hover:shadow-md ${borderTone}`}>
       <span className="text-xl">{icon}</span>
       <div className="min-w-0 flex-1">
         <div className={`text-lg font-bold leading-tight ${valueTone}`}>{value}</div>
         <div className="truncate text-[11px] text-gray-500">{label}</div>
-        {sub && <div className="truncate text-[10px] text-gray-400">{sub}</div>}
+        {sub && <div className="truncate text-[10px] text-gray-500">{sub}</div>}
       </div>
     </Link>
   );
@@ -1390,34 +1499,127 @@ function scoreTone(score: number | null | undefined): string {
 
 // Hideable dashboard sections, shown in the "Customize" panel.
 const SECTION_TOGGLES: { key: string; label: string }[] = [
+  { key: "recent", label: "Recently visited" },
   { key: "attention", label: "Needs attention" },
   { key: "insights", label: "Daily intelligence" },
   { key: "coverage", label: "Coverage" },
   { key: "posture", label: "Posture & risks" },
   { key: "scheduled", label: "Scheduled next" },
-  { key: "activity", label: "Recent activity" },
+  { key: "activity", label: "Recent runs & changes" },
   { key: "setup", label: "Setup guide" },
   { key: "configured", label: "What's set up" },
-  { key: "explore", label: "Explore" },
+  { key: "explore", label: "All capabilities" },
 ];
 
-function ringTone(v: number): string {
-  if (v >= 80) return "#16a34a";
-  if (v >= 60) return "#d97706";
-  return "#dc2626";
+type MissionReadinessSummary = {
+  readiness: "go" | "warn" | "nogo" | "unknown";
+  label: string;
+  done: number;
+  total: number;
+  attention: number;
+};
+
+function rollupMissionReadiness(systems: MissionSystem[]): MissionReadinessSummary {
+  const total = systems.length;
+  const done = systems.filter((system) => ["done", "partial", "skipped"].includes(system.status)).length;
+  const attention = systems.filter((system) => system.attention || ["partial", "fail", "error"].includes(system.status)).length;
+  const anyRun = systems.some((system) => !["idle", "queued"].includes(system.status));
+  const hardFail = systems.some((system) => ["fail", "error"].includes(system.status));
+  const readiness = !anyRun ? "unknown" : hardFail ? "nogo" : attention > 0 ? "warn" : done === total && total > 0 ? "go" : "unknown";
+  const labels = { go: "All systems go", warn: "Go with warnings", nogo: "No-go", unknown: "Not assessed" } as const;
+  return { readiness, label: labels[readiness], done, total, attention };
 }
 
-/** Compact SVG donut ring for the blended Estate Health score (0-100). */
-function HealthRing({ value }: { value: number }) {
+function MissionReadinessRing({ summary }: { summary: MissionReadinessSummary }) {
+  const colors = { go: "#16a34a", warn: "#d97706", nogo: "#dc2626", unknown: "#9ca3af" } as const;
+  const color = colors[summary.readiness];
   const r = 18;
   const c = 2 * Math.PI * r;
-  const off = c * (1 - Math.max(0, Math.min(100, value)) / 100);
+  const fraction = summary.total > 0 ? summary.done / summary.total : 0;
   return (
-    <svg viewBox="0 0 44 44" className="h-12 w-12 -rotate-90">
+    <svg viewBox="0 0 44 44" className="h-12 w-12 -rotate-90" role="img" aria-label={`${summary.label}: ${summary.done} of ${summary.total} systems complete; ${summary.attention} need attention`}>
+      <title>{summary.label}</title>
       <circle cx="22" cy="22" r={r} fill="none" stroke="#e5e7eb" strokeWidth="5" />
-      <circle cx="22" cy="22" r={r} fill="none" stroke={ringTone(value)} strokeWidth="5" strokeLinecap="round" strokeDasharray={c} strokeDashoffset={off} />
-      <text x="22" y="23" textAnchor="middle" dominantBaseline="middle" className="rotate-90" transform="rotate(90 22 22)" fontSize="13" fontWeight="700" fill={ringTone(value)}>{value}</text>
+      <circle cx="22" cy="22" r={r} fill="none" stroke={color} strokeWidth="5" strokeLinecap="round" strokeDasharray={`${fraction * c} ${c}`} />
+      <text x="22" y="23" textAnchor="middle" dominantBaseline="middle" transform="rotate(90 22 22)" fontSize="10" fontWeight="700" fill={color}>{summary.done}/{summary.total}</text>
     </svg>
+  );
+}
+
+function RecentlyVisited({
+  items,
+  loading,
+  failed,
+  onChange,
+  onClear,
+}: {
+  items: RecentItem[];
+  loading: boolean;
+  failed: boolean;
+  onChange: (item: RecentItem, action: "pin" | "remove") => Promise<void>;
+  onClear: () => Promise<void>;
+}) {
+  const [busyId, setBusyId] = useState("");
+  const [message, setMessage] = useState("");
+  async function act(item: RecentItem, action: "pin" | "remove") {
+    setBusyId(item.id);
+    setMessage("");
+    try {
+      await onChange(item, action);
+    } catch {
+      setMessage("Could not update recently visited items. Try again.");
+    } finally {
+      setBusyId("");
+    }
+  }
+  async function clear() {
+    if (!window.confirm("Clear all unpinned recently visited items?")) return;
+    setBusyId("clear");
+    setMessage("");
+    try {
+      await onClear();
+    } catch {
+      setMessage("Could not clear recently visited items. Try again.");
+    } finally {
+      setBusyId("");
+    }
+  }
+  return (
+    <section aria-labelledby="recently-visited-heading">
+      <div className="mb-2 flex items-center justify-between gap-2">
+        <div className="flex items-center gap-2">
+          <h2 id="recently-visited-heading" className="text-sm font-semibold uppercase tracking-wide text-gray-500">Continue where you left off</h2>
+          {items.length > 0 && <span className="rounded-full bg-gray-100 px-2 py-0.5 text-[10px] text-gray-500">{items.length}</span>}
+        </div>
+        {items.some((item) => !item.pinned) && (
+          <button onClick={() => void clear()} disabled={busyId === "clear"} className="text-[11px] text-gray-500 hover:text-red-600 disabled:opacity-50">Clear unpinned</button>
+        )}
+      </div>
+      {loading ? (
+        <div className="grid grid-cols-1 gap-2 sm:grid-cols-2 lg:grid-cols-4">{Array.from({ length: 4 }).map((_, index) => <SkeletonTile key={index} />)}</div>
+      ) : failed ? (
+        <Empty text="Recently visited items are unavailable. Other dashboard data is unaffected." />
+      ) : items.length === 0 ? (
+        <Empty text="Open a workload, run, design, case, or scoped operations page and it will appear here." />
+      ) : (
+        <div className="grid grid-cols-1 gap-2 sm:grid-cols-2 xl:grid-cols-4">
+          {items.map((item) => (
+            <div key={item.id} className="group flex min-w-0 items-center gap-2 rounded-xl border bg-white p-2.5 shadow-xs hover:border-brand/40">
+              <Link to={item.route} className="flex min-w-0 flex-1 items-center gap-2" title={`${item.title}${item.subtitle ? ` · ${item.subtitle}` : ""}`}>
+                <span className="text-lg" aria-hidden>{recentItemIcon(item.kind)}</span>
+                <span className="min-w-0 flex-1">
+                  <span className="block truncate text-sm font-medium text-gray-800">{item.title}</span>
+                  <span className="block truncate text-[10px] text-gray-600">{item.subtitle || humanize(item.kind)} · {formatRelative(item.last_visited_at)}</span>
+                </span>
+              </Link>
+              <button onClick={() => void act(item, "pin")} disabled={busyId === item.id} className={`rounded-sm p-1 text-xs hover:bg-gray-100 disabled:opacity-40 ${item.pinned ? "text-brand" : "text-gray-300 group-hover:text-gray-500"}`} aria-label={item.pinned ? `Unpin ${item.title}` : `Pin ${item.title}`} aria-pressed={item.pinned}>{item.pinned ? "★" : "☆"}</button>
+              <button onClick={() => void act(item, "remove")} disabled={busyId === item.id} className="rounded-sm p-1 text-xs text-gray-300 hover:bg-red-50 hover:text-red-600 disabled:opacity-40" aria-label={`Remove ${item.title} from recently visited`}>×</button>
+            </div>
+          ))}
+        </div>
+      )}
+      {message && <p className="mt-2 text-xs text-red-600" role="alert">{message}</p>}
+    </section>
   );
 }
 
@@ -1426,22 +1628,22 @@ function CoverageLensTile({ lens, scopeName }: { lens: { key: string; label: str
   const pct = lens.current;
   const valueTone = pct == null ? "text-gray-400" : pct >= 80 ? "text-green-600" : pct >= 50 ? "text-amber-600" : "text-red-600";
   return (
-    <Link to={lens.to} className="rounded-xl border bg-white p-3 shadow-sm transition hover:border-brand/40 hover:shadow-md" title={scopeName}>
+    <Link to={lens.to} className="rounded-xl border bg-white p-3 shadow-xs transition hover:border-brand/40 hover:shadow-md" title={scopeName}>
       <div className="flex items-center justify-between gap-2">
         <span className="flex items-center gap-1.5 text-[12px] font-medium text-gray-600"><span>{lens.icon}</span>{lens.label}</span>
         {lens.delta != null && lens.delta !== 0 && (
-          <span className={`rounded px-1 text-[10px] font-bold ${lens.delta > 0 ? "bg-green-100 text-green-700" : "bg-red-100 text-red-700"}`}>
+          <span className={`rounded-sm px-1 text-[10px] font-bold ${lens.delta > 0 ? "bg-green-100 text-green-700" : "bg-red-100 text-red-700"}`}>
             {lens.delta > 0 ? "▲" : "▼"} {Math.abs(lens.delta)}
           </span>
         )}
       </div>
       {lens.loading ? (
-        <div className="mt-2 h-7 w-16 animate-pulse rounded bg-gray-100" />
+        <div className="mt-2 h-7 w-16 animate-pulse rounded-sm bg-gray-100" />
       ) : lens.hasData ? (
         <>
           <div className={`mt-1 text-2xl font-bold leading-tight ${valueTone}`}>{pct != null ? `${pct}${lens.key === "performance" ? "" : "%"}` : "—"}</div>
           {lens.points.length > 1 && (
-            <div className="mt-1 [&_svg]:!h-7">
+            <div className="mt-1 [&_svg]:h-7!">
               <TrendChart points={lens.points} current={lens.current} delta={lens.delta} unit={lens.key === "performance" ? "" : "%"} />
             </div>
           )}
@@ -1453,7 +1655,7 @@ function CoverageLensTile({ lens, scopeName }: { lens: { key: string; label: str
   );
 }
 
-/** Small labelled stat used inside the Identity / RBAC posture cards. */
+/** Small labeled stat used inside the Identity / RBAC posture cards. */
 function MiniStat({ to, label, value, tone }: { to: string; label: string; value: number; tone: "red" | "amber" | "ok" }) {
   const cls = value === 0 || tone === "ok" ? "text-gray-700" : tone === "red" ? "text-red-700" : "text-amber-700";
   return (
@@ -1502,24 +1704,12 @@ function formatRelative(iso: string): string {
   return `${mo}mo ago`;
 }
 
-function ExploreCard({ to, icon, title, desc }: { to: string; icon: string; title: string; desc: string }) {
-  return (
-    <Link to={to} className="group rounded-xl border bg-white p-4 shadow-sm transition hover:border-brand/40 hover:shadow-md">
-      <div className="flex items-center gap-2">
-        <span className="text-lg">{icon}</span>
-        <span className="text-sm font-semibold text-gray-800 group-hover:text-brand">{title}</span>
-      </div>
-      <p className="mt-1 text-xs text-gray-500">{desc}</p>
-    </Link>
-  );
-}
-
-// Compact icon+label chip used for the quick-links launcher strip once setup is complete.
+// Compact icon+label chip used for the permission-aware capability launcher.
 function QuickLink({ to, icon, label }: { to: string; icon: string; label: string }) {
   return (
     <Link
       to={to}
-      className="group inline-flex items-center gap-1.5 rounded-full border bg-white px-3 py-1.5 text-xs font-medium text-gray-700 shadow-sm transition hover:border-brand/40 hover:text-brand hover:shadow"
+      className="group inline-flex items-center gap-1.5 rounded-full border bg-white px-3 py-1.5 text-xs font-medium text-gray-700 shadow-xs transition hover:border-brand/40 hover:text-brand hover:shadow-sm"
     >
       <span className="text-sm">{icon}</span>
       <span>{label}</span>

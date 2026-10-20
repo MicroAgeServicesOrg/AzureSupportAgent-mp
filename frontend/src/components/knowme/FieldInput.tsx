@@ -15,6 +15,7 @@ export function FieldInput({
   autoFocus,
   onSuggest,
   suggesting,
+  suggestionError,
 }: {
   todo: KnowMeTodo;
   value: string;
@@ -25,11 +26,18 @@ export function FieldInput({
   // that don't already have a useful choice set.
   onSuggest?: () => void;
   suggesting?: boolean;
+  suggestionError?: string;
 }) {
   const ref = useRef<HTMLInputElement | HTMLTextAreaElement>(null);
+  const initial = useRef({ id: todo.id, loading: !!suggesting });
+  if (initial.current.id !== todo.id) initial.current = { id: todo.id, loading: !!suggesting };
+  // Keep an already-open input stable while background results arrive, preserving the caret.
+  const display = initial.current.loading && todo.choice_source === "ai"
+    ? { ...todo, suggestions: todo.choices ?? [], choices: [] }
+    : todo;
   const meta = FIELD_META[todo.type] ?? FIELD_META.text;
   const error = validateField(todo, value);
-  const control = fieldControl(todo);
+  const control = fieldControl(display);
   useEffect(() => {
     if (autoFocus && ref.current && control !== "combobox") {
       ref.current.focus();
@@ -42,7 +50,7 @@ export function FieldInput({
     onChange: (e: React.ChangeEvent<HTMLInputElement | HTMLTextAreaElement>) => onChange(e.target.value),
     placeholder: meta.placeholder,
     className:
-      "w-full rounded-lg border px-3 py-2 text-sm focus:outline-none " +
+      "w-full rounded-lg border px-3 py-2 text-sm focus:outline-hidden " +
       (error ? "border-red-300 focus:border-red-400" : "border-gray-300 focus:border-brand"),
     onKeyDown: (e: React.KeyboardEvent) => {
       if (e.key === "Enter" && !e.shiftKey && onEnter) {
@@ -70,10 +78,10 @@ export function FieldInput({
       )}
 
       {/* Legacy one-click suggestions (kept for plain inputs that only carry suggestions). */}
-      {control === "input" && (todo.suggestions?.length ?? 0) > 0 && (
+      {control === "input" && (display.suggestions?.length ?? 0) > 0 && (
         <div className="mt-1.5 flex flex-wrap items-center gap-1.5">
           <span className="text-[10px] uppercase tracking-wide text-gray-400">Suggestions</span>
-          {todo.suggestions.map((s) => (
+          {display.suggestions.map((s) => (
             <button
               key={s}
               type="button"
@@ -101,10 +109,12 @@ export function FieldInput({
             title="Let AI suggest realistic options for this field"
           >
             {suggesting ? <span className="inline-block h-3 w-3 animate-spin rounded-full border-2 border-violet-500 border-t-transparent" /> : "✨"}
-            {suggesting ? "Suggesting…" : "Suggest options"}
+            {suggesting ? "Suggesting…" : suggestionError ? "Retry suggestions" : "Suggest options"}
           </button>
         )}
       </div>
+      {suggestionError && <div role="status" className="mt-1 text-[11px] text-amber-700">Suggestions unavailable: {suggestionError}</div>}
+      {todo.choice_source === "ai" && !todo.choices?.length && <div className="mt-1 text-[11px] text-gray-500">No suitable AI suggestions; enter your own value.</div>}
 
       {error && value.trim() && <div className="mt-1 text-[11px] text-red-600">{error}</div>}
     </div>
@@ -183,7 +193,7 @@ function Combobox({
         placeholder={allowCustom ? "Pick an option or type your own…" : "Pick an option…"}
         aria-label={todo.label}
         className={
-          "w-full rounded-lg border px-3 py-2 text-sm focus:outline-none " +
+          "w-full rounded-lg border px-3 py-2 text-sm focus:outline-hidden " +
           (error ? "border-red-300 focus:border-red-400" : "border-gray-300 focus:border-brand")
         }
         onKeyDown={(e) => {

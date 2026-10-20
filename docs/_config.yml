@@ -53,14 +53,20 @@ exclude:
   - _build_journey_slides.py
   - _build_usecases.py
   - _crawl_site.py
+  - _feature_inventory.py
+  - _feature_inventory.json
   - _render.py
   - _uc_helpers.py
   - _usecases_build.py
   - _validate.py
+  - _validate_public_docs.py
+  - _validate_screenshots.py
+  - _test_screenshots.py
   - _journey_render
   - deck-assets
   - improvement-plans
   - test-findings
+  - usecase-assets
   - usecase-render
   - ARCHITECTURES_FEATURE.md
   - ARCHITECTURES_TEST_PLAN.md

@@ -7,7 +7,7 @@
  * export (Markdown / PDF). A workload can have MANY Know-Me documents (drafts + a published
  * reference); each is keyed by its own ``km_id`` and supports soft-delete to a Trash.
  */
-import { memo, useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { lazy, memo, Suspense, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useLocation, useNavigate, useSearchParams } from "react-router-dom";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { Skeleton, useDebounced } from "../utils/perf";
@@ -29,8 +29,14 @@ import { MermaidDiagram } from "./MermaidDiagram";
 import { formatError } from "../utils/format";
 import { GuidedFill } from "./knowme/GuidedFill";
 import { SectionEditor } from "./knowme/SectionEditor";
-import { FieldInput } from "./knowme/FieldInput";
-import { fieldProgress, renderSectionRead, isPlaceholderMermaid, parseFieldToken, validateField, FIELD_META } from "./knowme/fields";
+import { useSuggestions } from "./knowme/useSuggestions";
+import { useAuth } from "./AuthContext";
+import { fieldProgress, renderSectionRead, isPlaceholderMermaid, parseFieldToken, validateField } from "./knowme/fields";
+
+const CompositeSla = lazy(() => import("./knowme/CompositeSla").then((m) => ({ default: m.CompositeSla })));
+const FieldPopover = lazy(() => import("./knowme/FieldPopover").then((m) => ({ default: m.FieldPopover })));
+const HistoricalSlaDocument = lazy(() => import("./knowme/CompositeSla").then((m) => ({ default: m.HistoricalSlaDocument })));
+const SLA_LOADING = <div role="status" className="my-3 rounded-xl border p-4 text-xs text-gray-500">Loading Composite SLA…</div>;
 
 // KP1 — memoized Markdown wrapper: only re-parses when its own body string or the (now stable)
 // components object changes. With the imperatively-driven chip highlight, a field click no longer
@@ -58,6 +64,16 @@ const STATUS_OPTIONS: { value: string; label: string }[] = [
   { value: "published", label: "Published" },
   { value: "archived", label: "Archived" },
 ];
+
+function isResiliencySection(section: KnowMeSection) {
+  return /resilien/i.test(section.key) || /resilien/i.test(section.label);
+}
+
+function withResiliencySection(sections: KnowMeSection[]) {
+  if (sections.some(isResiliencySection)) return sections;
+  // Presentation-only fallback for legacy/partial documents; ordinary saves keep their sections.
+  return [...sections, { key: "resiliency_dr", label: "Resiliency & DR", content: "" }];
+}
 
 function fmtElapsed(s: number): string {
   const m = Math.floor(s / 60);
@@ -88,149 +104,6 @@ function lineDiff(oldText: string, newText: string): DiffRow[] {
   return rows;
 }
 
-/** Inline pick-or-type popover anchored to a clicked field chip. Shows the field's choices /
- *  suggestions (segmented buttons, a combobox, or suggestion pills via FieldInput) plus a
- *  free-text box — the user can pick an option OR type their own value, then Save. No
- *  right-hand guided-fill panel involved. Closes on outside-click / Esc / scroll. */
-function FieldPopover({
-  todo,
-  anchor,
-  saving,
-  onSave,
-  onClose,
-  onSuggest,
-  suggesting,
-  onStep,
-}: {
-  todo: KnowMeTodo;
-  anchor: DOMRect;
-  saving: boolean;
-  onSave: (value: string) => void;
-  onClose: () => void;
-  onSuggest: () => void;
-  suggesting: boolean;
-  // KU5 — step to the previous/next field without leaving the popover. Receives the current
-  // draft so the parent can persist it before moving on.
-  onStep: (dir: 1 | -1, draft: string) => void;
-}) {
-  const [draft, setDraft] = useState(todo.value || "");
-  const ref = useRef<HTMLDivElement>(null);
-  // Position: prefer below the chip; flip above if it would overflow the viewport bottom.
-  const WIDTH = 340;
-  const vw = typeof window !== "undefined" ? window.innerWidth : 1280;
-  const vh = typeof window !== "undefined" ? window.innerHeight : 800;
-  const left = Math.max(8, Math.min(anchor.left, vw - WIDTH - 8));
-  const below = anchor.bottom + 8;
-  const placeAbove = below + 220 > vh && anchor.top > vh - anchor.bottom;
-  const style: React.CSSProperties = placeAbove
-    ? { position: "fixed", left, bottom: vh - anchor.top + 8, width: WIDTH, zIndex: 50 }
-    : { position: "fixed", left, top: below, width: WIDTH, zIndex: 50 };
-
-  useEffect(() => {
-    // Outside-click close. Runs in the CAPTURE phase: a combobox option unmounts itself
-    // synchronously on mousedown (React 18 flushes discrete events), so by the bubble phase
-    // the clicked node is detached and ``contains`` would wrongly report "outside" — closing
-    // the popover and discarding the pick. Capturing fires before that unmount, while the
-    // option is still in the DOM and correctly inside the popover.
-    const onDown = (e: MouseEvent) => {
-      const t = e.target as Node;
-      if (ref.current && t && ref.current.contains(t)) return; // click inside → keep open
-      onClose();
-    };
-    const onKey = (e: KeyboardEvent) => { if (e.key === "Escape") onClose(); };
-    // A scroll in the document moves the anchor out from under us → just close.
-    const onScroll = () => onClose();
-    window.addEventListener("mousedown", onDown, true);
-    window.addEventListener("keydown", onKey);
-    window.addEventListener("scroll", onScroll, true);
-    return () => {
-      window.removeEventListener("mousedown", onDown, true);
-      window.removeEventListener("keydown", onKey);
-      window.removeEventListener("scroll", onScroll, true);
-    };
-  }, [onClose]);
-
-  const error = validateField(todo, draft);
-  const meta = FIELD_META[todo.type];
-
-  // Automatically ask AI for suggestions the moment the popover opens — but only for fields that
-  // don't already have a useful choice set (mirrors FieldInput's `canSuggest`), only when the
-  // field is still empty, and only once per open. Once AI returns, choice_source becomes "ai" and
-  // this won't re-fire. The user can still type their own value while suggestions load.
-  const autoSuggestedRef = useRef(false);
-  useEffect(() => {
-    if (autoSuggestedRef.current) return;
-    const eligible =
-      todo.choice_source !== "platform" &&
-      todo.choice_source !== "ai" &&
-      (todo.choices?.length ?? 0) === 0 &&
-      !(todo.value || "").trim() &&
-      !suggesting;
-    if (eligible) {
-      autoSuggestedRef.current = true;
-      onSuggest();
-    }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [todo.id]);
-
-  return (
-    <div ref={ref} style={style} className="rounded-xl border border-gray-200 bg-white p-3 shadow-2xl">
-      <div className="mb-1.5 flex items-start gap-2">
-        <span className="min-w-0 flex-1 text-[13px] font-semibold text-gray-800">{todo.label}</span>
-        {todo.required && <span className="shrink-0 rounded-full bg-amber-50 px-1.5 py-0.5 text-[10px] font-medium text-amber-700">required</span>}
-        {/* KU5 — step between fields without closing; saves the current valid entry first. */}
-        <div className="shrink-0 flex items-center gap-0.5">
-          <button
-            onClick={() => onStep(-1, draft)}
-            disabled={saving || !!error}
-            className="rounded p-0.5 text-gray-400 hover:bg-gray-100 hover:text-gray-700 disabled:opacity-40"
-            title="Previous field"
-            aria-label="Previous field"
-          >↤</button>
-          <button
-            onClick={() => onStep(1, draft)}
-            disabled={saving || !!error}
-            className="rounded p-0.5 text-gray-400 hover:bg-gray-100 hover:text-gray-700 disabled:opacity-40"
-            title="Next field"
-            aria-label="Next field"
-          >↦</button>
-        </div>
-        <button onClick={onClose} aria-label="Close" className="shrink-0 rounded p-0.5 text-gray-400 hover:bg-gray-100">✕</button>
-      </div>
-      {meta?.label && <div className="mb-1.5 text-[11px] text-gray-400">{meta.label}{meta.placeholder ? ` · e.g. ${meta.placeholder}` : ""}</div>}
-      <FieldInput
-        todo={todo}
-        value={draft}
-        onChange={setDraft}
-        onEnter={() => { if (!error) onSave(draft); }}
-        autoFocus
-        onSuggest={onSuggest}
-        suggesting={suggesting}
-      />
-      <div className="mt-2.5 flex items-center gap-2">
-        <button
-          onClick={() => onSave(draft)}
-          disabled={saving || !!error}
-          className="rounded-lg bg-brand px-3 py-1.5 text-xs font-semibold text-white hover:bg-brand-dark disabled:opacity-50"
-        >
-          {saving ? "Saving…" : "Save"}
-        </button>
-        {todo.value && (
-          <button
-            onClick={() => onSave("")}
-            disabled={saving}
-            className="rounded-lg border px-2.5 py-1.5 text-xs text-gray-500 hover:bg-gray-50 disabled:opacity-50"
-            title="Clear this field"
-          >
-            Clear
-          </button>
-        )}
-        <button onClick={onClose} className="ml-auto rounded-lg border px-2.5 py-1.5 text-xs text-gray-600 hover:bg-gray-50">Cancel</button>
-      </div>
-    </div>
-  );
-}
-
 /** Rewrite ``asset:<id>`` image refs to the live asset API URL so images render in the doc.
  *  Assets are keyed by the Know-Me's own id. */
 function withAssetUrls(kmId: string, md: string): string {
@@ -239,6 +112,8 @@ function withAssetUrls(kmId: string, md: string): string {
 
 export function KnowMeView({ kmId }: { kmId: string }) {
   const navigate = useNavigate();
+  const location = useLocation();
+  const { has } = useAuth();
   const qc = useQueryClient();
   const kmQ = useQuery({ queryKey: ["knowMe", kmId], queryFn: () => api.knowMe(kmId), staleTime: 5 * 60 * 1000 });
 
@@ -260,6 +135,7 @@ export function KnowMeView({ kmId }: { kmId: string }) {
   const [fillScope, setFillScope] = useState<string>("");
   const [err, setErr] = useState("");
   const [saving, setSaving] = useState(false);
+  const [viewingRevId, setViewingRevId] = useState<string | null>(null);
 
   // --- generation (SSE) ---
   const [genState, setGenState] = useState<"idle" | "running">("idle");
@@ -340,8 +216,15 @@ export function KnowMeView({ kmId }: { kmId: string }) {
   }, [kmId]);
 
   // --- todos / fields ---
-  const todos: KnowMeTodo[] = km?.todos ?? [];
   const sections: KnowMeSection[] = km?.sections ?? [];
+  const suggestionSource = JSON.stringify([km?.ai?.generated_at, kmQ.data?.memory_updated_at, kmQ.data?.architecture.updated_at, sections]);
+  const suggestions = useSuggestions(
+    kmId, km?.todos ?? [], suggestionSource,
+    !!km && !km.deleted_at && !viewingRevId && genState !== "running" &&
+      location.pathname.replace(/\/$/, "") === `/knowme/${kmId}` && has("architects.write"),
+  );
+  const todos = suggestions.todos;
+  const displaySections = useMemo(() => withResiliencySection(sections), [sections]);
   const sectionKeys = useMemo(() => sections.map((s) => s.key), [sections]);
   const prog = useMemo(() => fieldProgress(todos), [todos]);
 
@@ -386,18 +269,6 @@ export function KnowMeView({ kmId }: { kmId: string }) {
       qc.setQueryData(["knowMe", kmId], r);
       void qc.invalidateQueries({ queryKey: ["knowMeIndex"] });
     } catch (e) { setErr(formatError(e)); }
-  }
-  // On-demand AI "suggest options" for a single field (P3).
-  const [suggestingId, setSuggestingId] = useState("");
-  async function suggestField(fieldId: string) {
-    if (suggestingId) return;
-    setSuggestingId(fieldId);
-    setErr("");
-    try {
-      const r = await api.suggestKnowMeField(kmId, fieldId);
-      // Refetch the doc so the field's new choices flow into the walker.
-      if (r.choices?.length) await qc.invalidateQueries({ queryKey: ["knowMe", kmId] });
-    } catch (e) { setErr(formatError(e)); } finally { setSuggestingId(""); }
   }
   // Inline title / description editing.
   const [editingMeta, setEditingMeta] = useState(false);
@@ -575,7 +446,7 @@ export function KnowMeView({ kmId }: { kmId: string }) {
               title={filled ? `${field.label}: ${field.value} — click to edit` : `Click to pick or type: ${field.label}`}
               aria-label={filled ? `Edit field ${field.label}, current value ${field.value}` : `Fill field: ${field.label}`}
               className={
-                "km-field mx-0.5 inline-flex items-center gap-1 rounded-md border-2 px-1.5 py-0.5 align-baseline text-[12px] font-medium transition focus:outline-none focus:border-red-400 focus:bg-red-50 focus:text-red-700 focus:ring-2 focus:ring-red-300 " +
+                "km-field mx-0.5 inline-flex items-center gap-1 rounded-md border-2 px-1.5 py-0.5 align-baseline text-[12px] font-medium transition focus:outline-hidden focus:border-red-400 focus:bg-red-50 focus:text-red-700 focus:ring-2 focus:ring-red-300 " +
                 (active ? "km-active-field " : "") +
                 (filled
                   ? "border-gray-300 bg-white text-gray-800 hover:border-red-300 hover:bg-red-50"
@@ -607,7 +478,7 @@ export function KnowMeView({ kmId }: { kmId: string }) {
   const [copied, setCopied] = useState(false);
   const [exportToast, setExportToast] = useState(""); // KU7 — export feedback
   function copyMarkdown() {
-    void navigator.clipboard.writeText(kmQ.data?.markdown ?? "");
+    void navigator.clipboard.writeText(viewingRevId ? revContentQ.data?.markdown ?? "" : kmQ.data?.markdown ?? "");
     setCopied(true);
     setTimeout(() => setCopied(false), 1500);
   }
@@ -634,7 +505,6 @@ export function KnowMeView({ kmId }: { kmId: string }) {
     window.addEventListener("mousedown", onDown);
     return () => window.removeEventListener("mousedown", onDown);
   }, [openMenu]);
-  const [viewingRevId, setViewingRevId] = useState<string | null>(null);
   const revQ = useQuery({
     queryKey: ["knowMeRevisions", kmId],
     queryFn: () => api.knowMeRevisions(kmId),
@@ -670,6 +540,16 @@ export function KnowMeView({ kmId }: { kmId: string }) {
   const statusMeta = STATUS_META[km?.status ?? "draft"] ?? STATUS_META.draft;
   const confidence = km?.ai?.confidence ?? km?.confidence;
   const viewingRevMd = useMemo(() => revContentQ.data?.markdown ?? "", [revContentQ.data]);
+  function downloadRevisionMarkdown() {
+    if (!revContentQ.data) return;
+    const url = URL.createObjectURL(new Blob([viewingRevMd], { type: "text/markdown;charset=utf-8" }));
+    const link = document.createElement("a");
+    link.href = url;
+    link.download = `know-me-${kmId}-revision-${viewingRevId}.md`;
+    link.click();
+    setTimeout(() => URL.revokeObjectURL(url), 1000);
+    noteExport("Revision Markdown");
+  }
   const ev = km?.ai?.evidence_used;
 
   // --- staleness: the source Memory changed after this Know-Me was generated ---
@@ -685,22 +565,22 @@ export function KnowMeView({ kmId }: { kmId: string }) {
   // --- in-doc table of contents (sections with content) ---
   const [showToc, setShowToc] = useState(false);
   const tocSections = useMemo(
-    () => sections.filter((s) => (s.content || "").trim()).map((s) => ({ key: s.key, label: s.label })),
-    [sections],
+    () => displaySections.filter((s) => (s.content || "").trim() || isResiliencySection(s)).map((s) => ({ key: s.key, label: s.label })),
+    [displaySections],
   );
   // KP1 — precompute each read-mode section's rendered Markdown body ONCE (keyed on its content +
   // todos), so a chip click doesn't re-run renderSectionRead for all 13 sections. Paired with the
   // memoized <Markdown> wrapper + stable components object, only edited sections re-render.
   const readSections = useMemo(
     () =>
-      sections
-        .filter((s) => (s.content || "").trim())
+      displaySections
+        .filter((s) => (s.content || "").trim() || isResiliencySection(s))
         .map((s) => ({
           section: s,
           body: withAssetUrls(kmId, renderSectionRead(s.content, s.key, todos, "", s.label)),
           openCount: todos.filter((t) => t.section_key === s.key && t.status !== "done").length,
         })),
-    [sections, todos, kmId],
+    [displaySections, todos, kmId],
   );
   function jumpToSection(key: string) {
     const el = docRef.current?.querySelector(`[data-kmsec="${key}"]`) as HTMLElement | null;
@@ -730,15 +610,16 @@ export function KnowMeView({ kmId }: { kmId: string }) {
         const todo = todos.find((t) => t.id === picker.id);
         if (!todo) return null;
         return (
-          <FieldPopover
+          <Suspense fallback={null}><FieldPopover
             key={picker.id}
             todo={todo}
             anchor={picker.anchor}
             saving={saving}
             onSave={async (v) => { await saveField(picker.id, v); closePicker(); }}
             onClose={closePicker}
-            onSuggest={() => void suggestField(picker.id)}
-            suggesting={suggestingId === picker.id}
+            onSuggest={() => suggestions.retry(picker.id)}
+            suggesting={suggestions.pending(picker.id)}
+            suggestionError={suggestions.results[picker.id]?.error}
             onStep={async (dir, draft) => {
               // Persist the current entry first (if it's a valid change), then move to the
               // prev/next field — so walking the doc doesn't lose what you just typed.
@@ -748,7 +629,7 @@ export function KnowMeView({ kmId }: { kmId: string }) {
               }
               stepField(fid, dir);
             }}
-          />
+          /></Suspense>
         );
       })()}
       {/* Toolbar */}
@@ -823,7 +704,7 @@ export function KnowMeView({ kmId }: { kmId: string }) {
                   key={m}
                   onClick={() => { setMode(m); if (m === "fill") setFillScope(""); }}
                   aria-label={m === "fill" ? "Guided fill mode" : `${m} mode`}
-                  className={`rounded px-2 py-0.5 ${mode === m ? "bg-brand/10 font-medium text-brand" : "text-gray-500 hover:bg-gray-100"}`}
+                  className={`rounded-sm px-2 py-0.5 ${mode === m ? "bg-brand/10 font-medium text-brand" : "text-gray-500 hover:bg-gray-100"}`}
                 >
                   {m === "read" ? "Read" : m === "fill" ? `✍️ Fill${prog.open ? ` (${prog.open})` : ""}` : "Edit"}
                 </button>
@@ -847,9 +728,13 @@ export function KnowMeView({ kmId }: { kmId: string }) {
           </button>
           )}
           {km && <>
-            <button onClick={copyMarkdown} aria-label="Copy document as Markdown" className="rounded-lg border px-2 py-1 text-xs text-gray-600 hover:bg-gray-50">{copied ? "✓ Copied" : "Copy"}</button>
+            <button onClick={copyMarkdown} disabled={!!viewingRevId && !revContentQ.data} aria-label={viewingRevId ? "Copy revision as Markdown" : "Copy document as Markdown"} className="rounded-lg border px-2 py-1 text-xs text-gray-600 hover:bg-gray-50 disabled:opacity-50">{copied ? "✓ Copied" : viewingRevId ? "Copy revision" : "Copy"}</button>
+            {viewingRevId ? (
+              <button onClick={downloadRevisionMarkdown} disabled={!revContentQ.data} aria-label="Download revision as Markdown" title="Downloads this historical revision, including its saved SLA snapshot. PDF export is available only for the current document." className="rounded-lg border px-2 py-1 text-xs text-gray-600 hover:bg-gray-50 disabled:opacity-50">⬇ Revision .md</button>
+            ) : (<>
             <a href={api.knowMeExportUrl(kmId, "md")} onClick={() => noteExport("Markdown")} aria-label="Download as Markdown" className="rounded-lg border px-2 py-1 text-xs text-gray-600 hover:bg-gray-50">⬇ .md</a>
             <a href={api.knowMeExportUrl(kmId, "pdf")} onClick={() => noteExport("PDF")} aria-label="Download as PDF" className="rounded-lg border px-2 py-1 text-xs text-gray-600 hover:bg-gray-50">📄 PDF</a>
+            </>)}
             <button onClick={() => (showHistory ? closeHistory() : setShowHistory(true))} aria-label="Toggle revision history" className={`rounded-lg border px-2 py-1 text-xs ${showHistory ? "border-brand/40 bg-brand/5 text-brand" : "text-gray-600 hover:bg-gray-50"}`}>🕘 History</button>
           </>}
         </div>
@@ -953,18 +838,20 @@ export function KnowMeView({ kmId }: { kmId: string }) {
                 </div>
                 {revContentQ.isLoading ? (
                   <div className="py-10 text-center text-sm text-gray-400">Loading revision…</div>
+                ) : revContentQ.isError ? (
+                  <p role="alert" className="rounded-lg border border-red-200 bg-red-50 p-3 text-sm text-red-700">Could not load this revision: {formatError(revContentQ.error)}</p>
                 ) : diffMode ? (
                   <div className="overflow-hidden rounded-xl border">
                     <div className="flex items-center gap-3 border-b bg-gray-50 px-3 py-1.5 text-[11px] text-gray-500">
-                      <span><span className="rounded bg-red-100 px-1 text-red-700">− this revision</span></span>
-                      <span><span className="rounded bg-green-100 px-1 text-green-700">+ current version</span></span>
+                      <span><span className="rounded-sm bg-red-100 px-1 text-red-700">− this revision</span></span>
+                      <span><span className="rounded-sm bg-green-100 px-1 text-green-700">+ current version</span></span>
                       <span className="ml-auto">{diffRows.filter((r) => r.type !== "same").length} changed line(s)</span>
                     </div>
                     <pre className="max-h-[70vh] overflow-auto bg-white p-0 text-[12px] leading-relaxed">
                       {diffRows.map((r, idx) => (
                         <div
                           key={idx}
-                          className={`whitespace-pre-wrap break-words px-3 ${r.type === "add" ? "bg-green-50 text-green-800" : r.type === "del" ? "bg-red-50 text-red-800" : "text-gray-600"}`}
+                          className={`whitespace-pre-wrap wrap-break-word px-3 ${r.type === "add" ? "bg-green-50 text-green-800" : r.type === "del" ? "bg-red-50 text-red-800" : "text-gray-600"}`}
                         >
                           <span className="mr-2 select-none text-gray-300">{r.type === "add" ? "+" : r.type === "del" ? "−" : " "}</span>{r.text || " "}
                         </div>
@@ -972,9 +859,18 @@ export function KnowMeView({ kmId }: { kmId: string }) {
                     </pre>
                   </div>
                 ) : (
-                  <div className={`${PROSE} rounded-xl border border-amber-200 bg-amber-50/20 p-5`}>
-                    <Markdown components={docMarkdownComponents}>{withAssetUrls(kmId, viewingRevMd)}</Markdown>
-                  </div>
+                  revContentQ.data && <Suspense fallback={SLA_LOADING}>
+                    <HistoricalSlaDocument
+                      key={`${kmId}-${viewingRevId}`} kmId={kmId} revision={revContentQ.data.revision}
+                      components={docMarkdownComponents} proseClassName={PROSE}
+                      sections={withResiliencySection(revContentQ.data.revision.sections)
+                        .filter((s) => s.content.trim() || isResiliencySection(s))
+                        .map((s) => ({
+                          key: s.key, label: s.label, isResiliency: isResiliencySection(s),
+                          body: withAssetUrls(kmId, renderSectionRead(s.content, s.key, revContentQ.data!.revision.todos, "", s.label)),
+                        }))}
+                    />
+                  </Suspense>
                 )}
               </div>
             ) : (<>
@@ -1001,7 +897,7 @@ export function KnowMeView({ kmId }: { kmId: string }) {
                     onChange={(e) => setDraftTitle(e.target.value)}
                     placeholder={`Know-Me — ${workloadName}`}
                     aria-label="Document title"
-                    className="w-full rounded-lg border border-gray-300 px-3 py-1.5 text-lg font-bold text-gray-900 focus:border-brand focus:outline-none"
+                    className="w-full rounded-lg border border-gray-300 px-3 py-1.5 text-lg font-bold text-gray-900 focus:border-brand focus:outline-hidden"
                     autoFocus
                   />
                   <input
@@ -1009,7 +905,7 @@ export function KnowMeView({ kmId }: { kmId: string }) {
                     onChange={(e) => setDraftDesc(e.target.value)}
                     placeholder="Optional one-line description (helps tell multiple drafts apart)"
                     aria-label="Document description"
-                    className="w-full rounded-lg border border-gray-300 px-3 py-1.5 text-sm text-gray-700 focus:border-brand focus:outline-none"
+                    className="w-full rounded-lg border border-gray-300 px-3 py-1.5 text-sm text-gray-700 focus:border-brand focus:outline-hidden"
                   />
                   <div className="flex items-center gap-2">
                     <button onClick={() => void commitMeta()} disabled={saving} className="rounded-lg bg-brand px-3 py-1 text-xs font-semibold text-white hover:bg-brand-dark disabled:opacity-50">Save</button>
@@ -1034,28 +930,28 @@ export function KnowMeView({ kmId }: { kmId: string }) {
                   <section key={s.key} data-kmsec={s.key} className="group scroll-mt-20 rounded-xl border border-transparent px-3 py-2 transition hover:border-gray-100 hover:bg-gray-50/40">
                     <div className="flex items-center gap-2">
                       <h2 className="flex-1 text-lg font-bold text-gray-900">{s.label}</h2>
-                      <div className={`relative flex items-center gap-1 transition ${regenKey === s.key ? "opacity-100" : "opacity-0 group-hover:opacity-100"}`}>
+                      {sectionKeys.includes(s.key) && <div className={`relative flex items-center gap-1 transition ${regenKey === s.key ? "opacity-100" : "opacity-0 group-hover:opacity-100"}`}>
                         {sectionOpen > 0 && (
                           <button
                             onClick={() => { setFillScope(s.key); setMode("fill"); }}
                             disabled={!!regenKey}
                             title={`Fill this section's ${sectionOpen} open field${sectionOpen === 1 ? "" : "s"} with AI assistance`}
-                            className="flex items-center gap-1 rounded border border-brand/30 bg-brand/5 px-1.5 py-0.5 text-[11px] font-medium text-brand hover:bg-brand/10 disabled:opacity-50"
+                            className="flex items-center gap-1 rounded-sm border border-brand/30 bg-brand/5 px-1.5 py-0.5 text-[11px] font-medium text-brand hover:bg-brand/10 disabled:opacity-50"
                           >
                             ✍️ Fill <span className="rounded-full bg-brand/15 px-1 text-[9px] tabular-nums">{sectionOpen}</span>
                           </button>
                         )}
-                        <button onClick={() => void regenSection(s.key)} disabled={!!regenKey} aria-label={`Regenerate section ${s.label} with AI`} title="Regenerate this section with AI" className="rounded border px-1.5 py-0.5 text-[11px] text-gray-500 hover:bg-white disabled:opacity-50">
+                        <button onClick={() => void regenSection(s.key)} disabled={!!regenKey} aria-label={`Regenerate section ${s.label} with AI`} title="Regenerate this section with AI" className="rounded-sm border px-1.5 py-0.5 text-[11px] text-gray-500 hover:bg-white disabled:opacity-50">
                           {regenKey === s.key ? <span className="inline-block h-3 w-3 animate-spin rounded-full border-2 border-brand border-t-transparent align-middle" /> : "✨"}
                         </button>
-                        <button onClick={() => setEditSection(s)} disabled={!!regenKey} aria-label={`Edit section ${s.label}`} title="Edit this section" className="rounded border px-1.5 py-0.5 text-[11px] text-gray-500 hover:bg-white disabled:opacity-50">✏️</button>
+                        <button onClick={() => setEditSection(s)} disabled={!!regenKey} aria-label={`Edit section ${s.label}`} title="Edit this section" className="rounded-sm border px-1.5 py-0.5 text-[11px] text-gray-500 hover:bg-white disabled:opacity-50">✏️</button>
                         {/* Live regenerate status popup, anchored to this section's ✨ button. */}
                         {regenKey === s.key && (
                           <div className="absolute right-0 top-full z-30 mt-1.5 w-80 rounded-xl border border-brand/20 bg-white p-2.5 text-left shadow-xl">
                             <div className="flex items-center gap-2 border-b border-brand/10 pb-1.5 text-[12px] font-medium text-brand">
                               <span className="inline-block h-3.5 w-3.5 animate-spin rounded-full border-2 border-brand border-t-transparent" />
                               <span>Regenerating “{s.label}”…</span>
-                              <button onClick={cancelRegen} className="ml-auto rounded border border-brand/30 px-1.5 py-0.5 text-[10px] font-medium text-brand hover:bg-brand/5">Cancel</button>
+                              <button onClick={cancelRegen} className="ml-auto rounded-sm border border-brand/30 px-1.5 py-0.5 text-[10px] font-medium text-brand hover:bg-brand/5">Cancel</button>
                             </div>
                             <ol className="mt-1.5 max-h-48 space-y-0.5 overflow-y-auto">
                               {regenSteps.map((st, i) => {
@@ -1071,9 +967,21 @@ export function KnowMeView({ kmId }: { kmId: string }) {
                             </ol>
                           </div>
                         )}
-                      </div>
+                      </div>}
                     </div>
                     <div className={PROSE}><MemoMarkdown components={docMarkdownComponents}>{body}</MemoMarkdown></div>
+                    {isResiliencySection(s) && (
+                      <Suspense fallback={SLA_LOADING}>
+                        <CompositeSla
+                          key={kmId} kmId={kmId} snapshot={km.composite_sla}
+                          stale={kmQ.data?.composite_sla_stale}
+                          canReview={has("architects.write")}
+                          readOnlyReason={km.deleted_at ? "Deleted document: restore it before refreshing or reviewing the SLA." : undefined}
+                          busy={saving || genState === "running" || !!regenKey}
+                          onUpdated={onGenDone}
+                        />
+                      </Suspense>
+                    )}
                   </section>
                 );
               })}
@@ -1115,8 +1023,9 @@ export function KnowMeView({ kmId }: { kmId: string }) {
               onPublish={() => void saveTodos(todos, "published")}
               scopeSection={fillScope || undefined}
               onClearScope={() => setFillScope("")}
-              onSuggestField={(fid) => void suggestField(fid)}
-              suggestingId={suggestingId}
+              onSuggestField={suggestions.retry}
+              suggestingField={suggestions.pending}
+              suggestionError={(fid) => suggestions.results[fid]?.error}
             />
           )}
 
@@ -1156,7 +1065,7 @@ export function KnowMeView({ kmId }: { kmId: string }) {
                       <button
                         onClick={(e) => { e.stopPropagation(); void restoreRev(r.id); }}
                         title="Restore this version as the new current version"
-                        className="ml-auto rounded border border-amber-300 bg-white px-1.5 py-0.5 font-medium text-amber-700 opacity-0 transition hover:bg-amber-100 group-hover:opacity-100"
+                        className="ml-auto rounded-sm border border-amber-300 bg-white px-1.5 py-0.5 font-medium text-amber-700 opacity-0 transition hover:bg-amber-100 group-hover:opacity-100"
                       >↩ Restore</button>
                     </div>
                   </div>
@@ -1341,7 +1250,7 @@ function BuildFromWorkloadModal({ onClose, onBuilt }: { onClose: () => void; onB
               value={wlId}
               onChange={(e) => setWlId(e.target.value)}
               disabled={state === "running"}
-              className="w-full rounded-lg border border-gray-300 px-3 py-2 text-sm focus:border-brand-dark focus:outline-none disabled:bg-gray-50"
+              className="w-full rounded-lg border border-gray-300 px-3 py-2 text-sm focus:border-brand-dark focus:outline-hidden disabled:bg-gray-50"
             >
               <option value="">Select a workload…</option>
               {workloads.map((w) => (
@@ -1662,7 +1571,7 @@ export function KnowMeIndex() {
               onChange={(e) => setQ(e.target.value)}
               placeholder="Search workloads…"
               aria-label="Search Know-Me documents"
-              className="w-56 rounded-lg border border-gray-300 px-3 py-2 text-sm focus:border-brand-dark focus:outline-none"
+              className="w-56 rounded-lg border border-gray-300 px-3 py-2 text-sm focus:border-brand-dark focus:outline-hidden"
             />
             {q && <button onClick={() => setQ("")} className="text-[11px] text-gray-400 hover:text-gray-700">✕ clear</button>}
             <span className="shrink-0 text-[11px] text-gray-400">{groups.length} of {totalGroups}</span>
@@ -1671,7 +1580,7 @@ export function KnowMeIndex() {
               onChange={(e) => setStatusFilter(e.target.value as typeof statusFilter)}
               aria-label="Filter by status"
               title="Filter documents by lifecycle status"
-              className="shrink-0 rounded-lg border border-gray-300 px-2.5 py-2 text-sm text-gray-600 focus:border-brand-dark focus:outline-none"
+              className="shrink-0 rounded-lg border border-gray-300 px-2.5 py-2 text-sm text-gray-600 focus:border-brand-dark focus:outline-hidden"
             >
               <option value="all">All statuses</option>
               <option value="published">Published</option>
@@ -1805,4 +1714,3 @@ export function KnowMePanel() {
   if (id) return <KnowMeView kmId={id} />;
   return <KnowMeIndex />;
 }
-

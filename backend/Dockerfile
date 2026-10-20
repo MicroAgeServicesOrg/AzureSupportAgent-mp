@@ -1,5 +1,5 @@
 # Digest-pinned; bumped by the `docker` ecosystem in .github/dependabot.yml.
-FROM python:3.12-slim@sha256:57cd7c3a7a273101a6485ba99423ee568157882804b1124b4dd04266317710de
+FROM python:3.12-slim@sha256:229a2c5bfa27522db7815ea81f9bed70af17ccb9de9fc7ad142b1877b5830d36
 
 ENV PYTHONUNBUFFERED=1 \
     PYTHONDONTWRITEBYTECODE=1 \
@@ -12,6 +12,9 @@ RUN apt-get update \
     && curl -fsSL https://deb.nodesource.com/setup_22.x | bash - \
     && apt-get install -y --no-install-recommends nodejs \
     && curl -sL https://aka.ms/InstallAzureCLIDeb | bash \
+    && /opt/az/bin/python3 -m pip install --no-cache-dir \
+        "cryptography>=50.0.0" "setuptools>=83.0.0" "PyJWT>=2.15.0" \
+        "urllib3>=2.8.0,<3" "oauthlib>=4.0.0,<5" \
     && apt-get clean \
     && rm -rf /var/lib/apt/lists/*
 
@@ -40,4 +43,6 @@ ENV HOME=/home/azsup \
     NPM_CONFIG_CACHE=/home/azsup/.npm
 USER azsup
 
+# Alembic serializes PostgreSQL migrations across replicas. Keep one uvicorn worker because
+# background work is process-owned; horizontal capacity comes from Container Apps replicas.
 CMD ["sh", "-c", "alembic upgrade head && uvicorn app.main:app --host 0.0.0.0 --port 8000"]

@@ -19,6 +19,7 @@ import tempfile
 import threading
 import time
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any, AsyncIterator
 
 from app.core.app_settings import load_settings
@@ -213,6 +214,15 @@ def _run_env(conn: dict[str, Any] | None, config_dir: str | None) -> dict[str, s
             env["AZURE_SUBSCRIPTION_ID"] = conn["default_subscription"]
     if config_dir:
         env["AZURE_CONFIG_DIR"] = config_dir
+        # A throwaway AZURE_CONFIG_DIR otherwise gets its own empty `cliextensions` folder.
+        # That makes every service-principal profile dynamically download resource-graph and
+        # occasionally exposes `az graph is misspelled` while extension discovery/install races.
+        # Production already pins AZURE_EXTENSION_DIR to the image-baked extension.  Local
+        # development should similarly reuse the user's stable extension directory.
+        if not env.get("AZURE_EXTENSION_DIR"):
+            shared_extensions = Path.home() / ".azure" / "cliextensions"
+            if shared_extensions.is_dir():
+                env["AZURE_EXTENSION_DIR"] = str(shared_extensions)
     # Make az emit plain, non-paged output.
     env["AZURE_CORE_NO_COLOR"] = "true"
     env["AZURE_CORE_ONLY_SHOW_ERRORS"] = "false"
@@ -250,6 +260,8 @@ async def _arm_rest_mode(conn: dict[str, Any] | None) -> tuple[str, str | None, 
     - ``("rest", token, "")``    non-SP with an acquirable ARM token — run it over ARM REST.
     - ``("error", None, msg)``   non-SP that can't get a token and has no ambient ``az`` — fail closed.
     """
+    if conn is None:
+        return ("error", None, "No Azure connection is configured for this scope.")
     if _is_service_principal(conn):
         return ("cli", None, "")
     from app.azure.credentials import get_arm_token
@@ -693,6 +705,9 @@ async def run_kql_stream(
     sp = _is_service_principal(connection)
 
     # --- REST path: non-service-principal connections (managed identity / pasted token).
+    if connection is None:
+        yield {"type": "error", "message": "No Azure connection is configured for this scope."}
+        return
     # These have no ambient `az login` in the cloud, so `az graph query` would return
     # nothing. Use the connection's ARM token to query Resource Graph directly.
     if not sp:
@@ -872,7 +887,8 @@ class KqlResult:
     ``ok`` is False on ANY hard failure (auth, throttle-exhausted, JSON parse). Callers MUST
     treat ``ok is False`` as "could not evaluate" — never as an empty (passing) result. This
     is the contract that prevents a truncated/garbled response from masquerading as a clean
-    pass. ``complete`` is False when ``max_rows`` capped the violating set (more exist)."""
+    pass. ``complete`` is False when rows were capped or enumeration could not be verified
+    complete (a continuation, server truncation, or a known total larger than the rows)."""
 
     ok: bool
     rows: list[dict[str, Any]] = field(default_factory=list)
@@ -953,7 +969,9 @@ async def run_kql_collect(
 
     query, qerr = _normalize_kql(kql)
     if qerr:
-        return KqlResult(ok=False, error=qerr)
+        return KqlResult(ok=False, error=qerr, complete=False)
+    if connection is None:
+        return KqlResult(ok=False, error="No Azure connection is configured for this scope.", complete=False)
 
     settings = load_settings()
     timeout = int(settings.get("command_timeout_seconds", 120))
@@ -971,19 +989,21 @@ async def run_kql_collect(
                 rows, err, complete, total = await query_resource_graph_paged(
                     token, query, page_size=page_size, max_rows=max_rows
                 )
+            pages = max(1, (len(rows) + page_size - 1) // page_size)
             if err:
-                return KqlResult(ok=False, rows=rows, error=err, complete=False, total=total)
-            return KqlResult(ok=True, rows=rows, complete=complete, total=total)
+                return KqlResult(ok=False, rows=rows, error=err, complete=False, pages=pages, total=total)
+            complete = complete and (total is None or total == len(rows))
+            return KqlResult(ok=True, rows=rows, complete=complete, pages=pages, total=total)
         # No token: only error out when we KNOW there is no ambient `az` to fall back to.
         method = (connection or {}).get("auth_method", "")
         if method == "az_cli_token" or os.environ.get("IDENTITY_ENDPOINT") or os.environ.get("MSI_ENDPOINT"):
-            return KqlResult(ok=False, error=terr or "Could not acquire an Azure token for this connection.")
+            return KqlResult(ok=False, error=terr or "Could not acquire an Azure token for this connection.", complete=False)
         # else: fall through to ambient CLI (local dev default_chain).
 
     # --- CLI path: service principals (and ambient local `az`). ------------------------------
     az_path = shutil.which("az")
     if not az_path:
-        return KqlResult(ok=False, error="'az' is not installed on the host.")
+        return KqlResult(ok=False, error="'az' is not installed on the host.", complete=False)
 
     config_dir: str | None = None
     own_config = False
@@ -996,7 +1016,7 @@ async def run_kql_collect(
                 own_config = True
                 err = await _sp_login(connection, az_path, config_dir)
                 if err:
-                    return KqlResult(ok=False, error=err)
+                    return KqlResult(ok=False, error=err, complete=False)
         env = _run_env(connection, config_dir)
 
         rows: list[dict[str, Any]] = []
@@ -1004,6 +1024,7 @@ async def run_kql_collect(
         complete = True
         pages = 0
         total: int | None = None
+        seen_tokens: set[str] = set()
         max_retries = 4
         for _page in range(200):
             cap: CaptureResult | None = None
@@ -1019,42 +1040,70 @@ async def run_kql_collect(
                     # Back the shared limiter off too, so sibling scans on this principal slow
                     # down instead of each discovering the quota wall independently.
                     with arg_throttle.use_principal(connection):
-                        arg_throttle.note_throttled(None)
+                        await arg_throttle.note_throttled_async(None)
                 if transient and attempt < max_retries:
                     await asyncio.sleep(min(60.0, (2 ** attempt) + random.uniform(0, 0.5)))
                     continue
                 break
             if cap is None or not cap.ok:
-                return KqlResult(ok=False, rows=rows, error=(cap.error if cap else "Query failed."), complete=False, total=total)
+                return KqlResult(ok=False, rows=rows, error=(cap.error if cap else "Query failed."), complete=False, pages=pages, total=total)
             # Fail-closed parse: a truncated/garbled wrapper is an ERROR, not an empty pass.
             try:
-                wrapper = _json.loads(cap.stdout or "{}")
-            except (ValueError, TypeError) as e:
-                return KqlResult(ok=False, rows=rows, error=f"Result parse error: {e}", complete=False, total=total)
-            if isinstance(wrapper, list):
-                # Defensive: some az versions may already project to a list.
-                page_rows = wrapper
-                skip_token = ""
-            elif isinstance(wrapper, dict):
-                page_rows = wrapper.get("data", [])
-                skip_token = wrapper.get("skip_token") or wrapper.get("skipToken") or ""
-                if total is None:
+                wrapper = _json.loads(cap.stdout)
+                server_truncated = False
+                page_total = None
+                if isinstance(wrapper, list):
+                    # Defensive compatibility with az versions that project to a list.
+                    page_rows = wrapper
+                    next_token = ""
+                elif isinstance(wrapper, dict):
+                    page_rows = wrapper.get("data")
+                    next_token = next((
+                        wrapper[key] for key in ("skip_token", "skipToken", "$skipToken")
+                        if wrapper.get(key) not in (None, "")
+                    ), "")
+                    if not isinstance(next_token, str):
+                        raise ValueError("Continuation token must be a string.")
                     tr = wrapper.get("total_records")
                     if tr is None:
                         tr = wrapper.get("totalRecords")
-                    if isinstance(tr, (int, float)):
-                        total = int(tr)
-            else:
-                page_rows, skip_token = [], ""
-            if isinstance(page_rows, list):
-                rows.extend(page_rows)
+                    if tr is not None:
+                        if isinstance(tr, bool) or not isinstance(tr, (int, float)) or tr < 0 or int(tr) != tr:
+                            raise ValueError("Total record count must be a non-negative integer.")
+                        page_total = int(tr)
+                    truncated = wrapper.get("result_truncated", wrapper.get("resultTruncated", False))
+                    if isinstance(truncated, str) and truncated.lower() in ("true", "false"):
+                        server_truncated = truncated.lower() == "true"
+                    elif isinstance(truncated, bool):
+                        server_truncated = truncated
+                    else:
+                        raise ValueError("Truncation flag must be a boolean.")
+                else:
+                    raise ValueError("Expected a Resource Graph object or row array.")
+                if not isinstance(page_rows, list) or any(not isinstance(row, dict) for row in page_rows):
+                    raise ValueError("Resource Graph data must be an array of objects.")
+            except (ValueError, TypeError, OverflowError) as e:
+                return KqlResult(ok=False, rows=rows, error=f"Result parse error: {e}", complete=False, pages=pages, total=total)
+            if page_total is not None:
+                # Keep the highest known total if the estate changes while paging.
+                total = max(total, page_total) if total is not None else page_total
+            rows.extend(page_rows)
             pages += 1
+            skip_token = next_token
             if len(rows) >= max_rows:
+                discarded = len(rows) > max_rows
                 rows = rows[:max_rows]
-                complete = not bool(skip_token)
+                complete = not (
+                    discarded or skip_token or server_truncated
+                    or (total is not None and total != len(rows))
+                )
                 break
             if not skip_token:
+                complete = not server_truncated and (total is None or total == len(rows))
                 break
+            if skip_token in seen_tokens:
+                return KqlResult(ok=False, rows=rows, error="Repeated Resource Graph continuation token.", complete=False, pages=pages, total=total)
+            seen_tokens.add(skip_token)
         else:
             complete = not bool(skip_token)
         return KqlResult(ok=True, rows=rows, complete=complete, pages=pages, total=total)
@@ -1196,6 +1245,7 @@ async def run_metrics_capture(
     timespan: str | None = None,
     end_time: str | None = None,
     dimension_filter: str | None = None,
+    metric_namespace: str | None = None,
     session_config_dir: str | None = None,
 ) -> CaptureResult:
     """Run `az monitor metrics list` for a resource + metric(s) and capture JSON.
@@ -1227,6 +1277,7 @@ async def run_metrics_capture(
                 token, resource_id, metricnames=metric_names, aggregations=aggs,
                 interval=interval or "PT5M", start_time=timespan, end_time=end_time,
                 dimension_filter=dimension_filter,
+                metric_namespace=metric_namespace,
             )
             return CaptureResult(ok=(err is None), stdout=text, error=err or "")
         return CaptureResult(ok=False, error=_non_sp_unavailable_msg("arm", terr))
@@ -1245,6 +1296,8 @@ async def run_metrics_capture(
     if dimension_filter:
         # Splits the metric by an Azure Monitor dimension, e.g. "StatusCode eq '403'".
         argv_tail += ["--filter", dimension_filter]
+    if metric_namespace:
+        argv_tail += ["--namespace", metric_namespace]
     return await _capture(
         _run_az_argv_stream(
             argv_tail, connection,

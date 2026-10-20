@@ -6,7 +6,7 @@ grand_parent: How-to guides
 nav_order: 8
 description: Grant the read-only Microsoft Graph consent tiers, verify them, run the first tenant collection, and read the resulting domain coverage table.
 permalink: /how-to/governance-identity/entra-first-refresh/
-feature_ids: [PROACTIVE_NAV:entra, ENTRA_NAV:setup]
+feature_ids: [PROACTIVE_NAV:entra, ENTRA_NAV:setup, ENTRA_NAV:posture]
 ---
 
 # Set up and run the first Entra collection
@@ -17,15 +17,17 @@ feature_ids: [PROACTIVE_NAV:entra, ENTRA_NAV:setup]
 - A connection holding service-principal credentials (tenant, client, and a client secret or certificate) that can obtain a Microsoft Graph application token for the tenant.
 - A directory role in the Microsoft Entra admin center that can add API permissions and grant admin consent. This app cannot grant consent for you.
 - Tier 1 consent for a usable tenant; tier 2 adds dormancy, MFA truth, consent posture and sign-in analysis; tier 3 adds PIM depth, Identity Protection risk, access reviews, entitlement management and lifecycle workflows.
-- Entra ID P1 for Conditional Access, sign-in logs and PIM schedules; Entra ID P2 for risk, PIM depth and governance data.
+- Entra ID P1 for Conditional Access/relevant sign-in data; appropriate P2 or ID Governance licensing for PIM, risk and governance. Lifecycle and workload-identity risk have separate licensing requirements; read the collector-specific result.
 
 ## Route
 
 `/entra/setup` for consent and coverage, then `/entra` for the posture score once the collection completes.
 
+**Screenshot notes:** These synthetic browser fixtures illustrate how to read setup and posture; no consent, permission recheck, refresh or backend assessment was performed for them. Their shortened permission catalog and pillar model are examples, not the complete tiers, weights or default configuration documented in the linked references.
+
 ## How to grant a consent tier
 
-1. Open `/entra/setup` and select the connection for the tenant you intend to analyse.
+1. Open `/entra/setup` and select the connection for the tenant you intend to analyze.
 
 2. Read the **Microsoft Graph access** card. Confirm the token state and how many application permissions are currently known.
 3. Read the consent tier list. Each tier shows every scope with a granted or missing marker and a completeness state for the tier as a whole.
@@ -35,13 +37,13 @@ feature_ids: [PROACTIVE_NAV:entra, ENTRA_NAV:setup]
 
 **Expected result:** The app registration requests the tier 1 scopes as application permissions and the tenant has admin-consented to them.
 
-**Verification:** In the Microsoft Entra admin center, confirm each scope is listed as an application permission with consent granted for the organisation.
+**Verification:** In the Microsoft Entra admin center, confirm each scope is listed as an application permission with consent granted for the organization.
 
 ## How to confirm the grant reached the product
 
 1. Return to `/entra/setup` and select **Re-check permissions now**. This reads consent live from Microsoft; every other number on the page reflects the last collection.
 
-2. Read the result: what is granted now, what was **gained** since the previous check, what was **revoked**, which domains remain blind, and which are blocked by licence rather than consent.
+2. Read the result: what is granted now, what was **gained** since the previous check, what was **revoked**, which domains remain blind, and which are blocked by license rather than consent.
 3. If the result still reports a scope as missing a minute after granting it, wait and re-check. Consent propagation is not instant, and re-granting is not the fix.
 4. Note that a re-check never marks a domain as measured. Holding a permission and having collected the data are different facts.
 
@@ -49,11 +51,13 @@ feature_ids: [PROACTIVE_NAV:entra, ENTRA_NAV:setup]
 
 **Verification:** The page reports that a fresh collection is needed for the new scopes to change any data.
 
+{% include screenshot.html file="fid2-entra-setup-permission-tiers.png" title="First collection: consent tiers, licenses and collector coverage" caption="Read granted application permissions separately from license flags and collector results. A granted scope does not establish measured coverage. The combined setup view distinguishes successful, partial and unreadable domains; zero items beside not permitted is not evidence of an empty domain." %}
+
 ## How to run the first collection
 
 1. Check the freshness badge in the Entra header. Before any collection it reads `not loaded`.
 
-2. Select **Refresh**. This is the only path in the feature that calls Microsoft Graph; opening a tab never triggers a collection.
+2. Select **Refresh** to start the full collection. Ordinary posture tabs read caches; permission recheck, application sign-in backfill, activation action detail and Investigate have separate live-read paths.
 3. Watch the progress strip that appears under the tab bar. It streams collector-level messages over server-sent events while the job runs.
 4. Expand **log** to read the full transcript, including any collector that failed or was throttled.
 5. Leave the page or reload it if you need to. The panel re-attaches to a job that is still running rather than starting a second one; a per-tenant lock prevents duplicate collections.
@@ -67,7 +71,7 @@ feature_ids: [PROACTIVE_NAV:entra, ENTRA_NAV:setup]
 
 1. Open `/entra/setup` and read the **Collector coverage** table. Each collector domain carries a state, an item count, and a reason for anything short of measured.
 
-2. Interpret the state before acting: `measured` needs nothing; `partial` collected some of the domain and names why the rest did not; `blind` means no alternative scope in the requirement group is held; `unlicensed` means the scope is consented but the tenant lacks the licence; `error` points at the diagnostics; `stale` means the data came from an earlier snapshot.
+2. Interpret the state before acting: `measured` needs nothing; `partial` collected some of the domain and names why the rest did not; `blind` means no alternative scope in the requirement group is held; `unlicensed` means the scope is consented but the tenant lacks the license; `error` points at the diagnostics; `stale` means the data came from an earlier snapshot.
 3. Grant a further tier only against `blind` domains you actually need. Consent cannot fix `unlicensed`, and an inconclusive probe is not evidence of a missing permission.
 4. Repeat the grant, re-check, refresh sequence for the next tier.
 5. Treat the coverage banner on each tab as the honest caveat on that screen's numbers: a score computed over part of the model is a statement about that part only.
@@ -76,11 +80,25 @@ feature_ids: [PROACTIVE_NAV:entra, ENTRA_NAV:setup]
 
 **Verification:** After the next collection, the domains you targeted move from `blind` to `measured` and the coverage percentage on `/entra` rises.
 
+## How to interpret the posture score
+
+1. Open `/entra/posture` only after the freshness badge shows a completed collection.
+2. Read the coverage percentage beside the score before comparing it with an earlier run; a score over a different measured set is not a like-for-like trend.
+3. Use each pillar's **View findings** handoff, then find the relevant signal in the inbox. It opens the inbox without a pillar filter; API pillar detail is a separate read capability.
+4. Treat blind, partial, unlicensed, and stale domains as limitations, not passing controls.
+5. Validate any AI or derived explanation against the source policy, principal, credential, or finding evidence before using it in a decision.
+
+**Expected result:** The posture score is interpreted together with snapshot age, measured coverage, and source findings.
+
+**Verification:** Every quoted deduction resolves to a current finding and authoritative directory evidence; unexplored domains remain explicitly excluded from conclusions.
+
+{% include screenshot.html file="fid2-entra-posture-score.png" title="After collection: read posture and coverage together" caption="This illustrative result pairs a score with partial coverage and a named authentication blind spot. It shows what to inspect after your own collection, not evidence that a collection ran for this example. A missing pillar score is unknown, not zero." %}
+
 ## Safety and rollback
 
 Every collector in this feature is read-only. No directory object, credential, Conditional Access policy or role assignment is modified, and no secret or certificate value is ever retrieved. The only writes are local to the product: finding workflow state, break-glass confirmations and saved simulations.
 
-Granting consent is a change to your tenant, not to this app, and it is reversible only in the Microsoft Entra admin center. Remove a permission there if you decide a tier is too broad, then re-check permissions so the coverage table stops claiming it. Refresh starts a background job; there is no partial rollback for a collection, but a failed or throttled run leaves the previous snapshot in place rather than replacing it with an empty one.
+Granting consent changes the tenant and must be reversed there. Recheck and recollect after any approved removal. Native collection writes domains independently; a failed run can leave mixed generations, and token failure can replace requested domains with blind results. It is not an atomic last-known-good snapshot rollback. Inspect each domain's timestamp/status rather than relying on the newest header age. A completed full-domain run can record score history even with partial collectors.
 
 ## Troubleshooting
 
