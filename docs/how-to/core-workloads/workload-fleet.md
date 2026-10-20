@@ -6,6 +6,7 @@ grand_parent: How-to guides
 nav_order: 2
 description: Triage fleet health and create a workload manually from explicit Azure scopes and resources.
 permalink: /how-to/core-workloads/workload-fleet/
+feature_ids: [SHELL_NAV:workloads, ROUTE:workloads]
 ---
 
 # Operate the workload fleet and create workloads
@@ -14,7 +15,7 @@ permalink: /how-to/core-workloads/workload-fleet/
 
 ## Prerequisites
 
-- `workloads.read` for fleet/profile views; `workloads.write` for create, edit, merge, delete, and grouping.
+- `workloads.read` for fleet/profile views; `workloads.write` for create, membership Refresh, edit, merge, delete, and grouping.
 - A readable Azure connection for resource selection.
 - Prior source scans for meaningful health, freshness, and risk values.
 
@@ -39,7 +40,7 @@ Open `/workloads`.
 
 1. On `/workloads`, select **+ New workload**.
 2. Enter a unique **Name** and useful **Description**.
-3. Select the Azure connection.
+3. Select an enabled Azure connection. Workload discovery and save reject an explicit missing or disabled connection instead of using the default; reselect the intended connection if it was removed or disabled.
 4. Set workload type, **Environment**, **Criticality**, and **Data class** when known; leave unknown values unset rather than guessing.
 5. In the resource picker, browse or search management groups, subscriptions, resource groups, and resources.
 6. Select the narrowest maintainable boundary. Use explicit resources when only part of a resource group belongs to the workload; use exclusions where the picker supports “scope minus resource.”
@@ -62,12 +63,34 @@ Open `/workloads`.
 
 **Verification:** Confirm active/trash lists, merged membership, and downstream links before permanent deletion.
 
+## How to bulk move workloads to Trash
+
+1. Use the **Resources min–max** filter to isolate small definitions; for example, maximum `4`
+	shows workloads containing fewer than five resources. Combine it with search, classification,
+	group, or fleet filters as needed.
+2. Select individual workloads, or choose **Select all shown**. Selection persists when changing
+	cards/table/board/map views and when filters hide rows, so review the selected count—not only
+	the visible cards.
+3. Select **Move N to Trash**. A single operation supports up to 500 workloads.
+4. Review the confirmation: workload count, represented resource count, names, and grouped-workload
+	warning. Confirm only after verifying the intended set.
+5. Open **Trash** to restore accidental removals. Group associations and dependent historical
+	records remain intact; only the active workload definitions were hidden.
+
+**Expected result:** The selected definitions leave every active fleet view and appear in Trash.
+Azure resources, architectures, Know-Me, FMEA, assessments, missions, evidence, and audit history
+are not deleted.
+
+**Verification:** Restore one workload and confirm its membership and group association return.
+Audit shows one `workloads.bulk_trash` entry with deleted/already-trashed/not-found counts.
+
 ## Safety and rollback
 
 - Fleet and profile views are cache reads, not live scans.
 - Membership edits change downstream assessment, coverage, cost, ownership, and investigation scope.
 - Manual save changes only the application registry; it does not move or tag Azure resources.
 - Normal delete is reversible. Merge has no one-click undo; sources remain in Trash until purged. Purge and empty-trash are permanent.
+- Bulk delete is the same reversible soft-delete as single delete. It never calls an Azure deletion API.
 - Never include secrets in names, descriptions, or tags.
 
 ## Troubleshooting
@@ -79,6 +102,10 @@ Open `/workloads`.
 | Picker returns no resources | Check connection, scope, Reader access, and Resource Graph capability. |
 | Resource count is surprising | Inspect broad scope nodes and exclusions, then run overlap analysis. |
 | Merge is wrong | Inspect the merged record and restore sources from Trash before purging anything. |
+| Bulk Trash is disabled | No workloads are selected, the operation is running, or more than 500 are selected. Narrow the selection. |
+| Fewer workloads moved than requested | Some selected IDs were already in Trash or disappeared concurrently; review the result banner. |
+| The resource-count filter returns nothing | Clear the values or ensure the inclusive minimum is not greater than the maximum. |
+| The selected count exceeds visible cards | Selections survive layout and filter changes. Select **Clear** or **Deselect all**, then rebuild the reviewed selection. |
 
 ## Related docs
 

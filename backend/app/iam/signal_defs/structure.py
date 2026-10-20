@@ -6,7 +6,6 @@ a deployment that fails at 2am with an opaque error.
 from __future__ import annotations
 
 from collections import defaultdict
-from typing import Any
 
 from app.iam import schema
 from app.iam.signals import Finding, SignalContext, SignalSpec
@@ -88,7 +87,7 @@ def _scope_hierarchy_flat(ctx: SignalContext) -> list[Finding]:
     return [
         Finding(
             signal_id="str.flat_scope_hierarchy",
-            title="Subscriptions are not organised under management groups",
+            title="Subscriptions are not organized under management groups",
             severity="info",
             pillar="str",
             object_kind="tenant",

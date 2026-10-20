@@ -48,6 +48,10 @@ DEPLOY_RUNBOOK.md
 
 # Internal UI test plan (QA working notes — not product documentation).
 docs/UI_TEST_PLAN.md
+docs/BUG_HUNTING_PLAN.md
+docs/ARCHITECTURES_TEST_PLAN.md
+docs/GRAPH_TEST_PLAN.md
+docs/INVENTORY_TEST_PLAN.md
 
 # Full-suite test findings (QA working notes / bug documentation — not distributable).
 docs/test-findings/
@@ -80,6 +84,7 @@ docs/UX_ADVANCED_PLAN.md
 
 # --- Presentation / deck working files (non-distributable) -------------------
 # The pitch deck, its product screenshots, and its build scripts are internal.
+/presentations/
 docs/deck-assets/
 docs/_build_deck.py
 docs/_validate.py
@@ -120,6 +125,7 @@ pnpm-debug.log*
 playwright-report/
 test-results/
 .playwright/
+.playwright-mcp/
 
 # --- Local security scan reports (gitleaks/trivy/zap/etc.) --------------------
 .security/
@@ -179,3 +185,10 @@ docs/.bundle/
 
 # --- UI Test Pilot run artifacts (screenshots + run reports) -----------------
 .uxshots/ui-test/
+
+# Scratch scripts written while investigating (diagnostics, one-off scans). These are
+# working notes, not product code, and they routinely quote live tenant/connection names
+# while hunting for them -- exactly what must never reach a public repo. The deploy flow
+# uses `git add -A`, so leaving this untracked-but-not-ignored was one command away from
+# publishing them.
+state/

@@ -15,7 +15,6 @@ Covers the "advanced settings" found in ChatGPT/Claude-style apps:
 """
 from __future__ import annotations
 
-import json
 import re
 from pathlib import Path
 from typing import Any
@@ -156,6 +155,19 @@ DEFAULTS: dict[str, Any] = {
     # Max characters of a tool DISCOVERY ("learn") result — these list a service's
     # sub-commands and are large, so they need more room than normal results.
     "tool_discovery_limit": 60000,
+    # Progressive tool discovery. The initial surface stays far below provider hard
+    # limits; local search may expand up to the per-turn ceiling.
+    "tool_routing_enabled": True,
+    "tool_initial_budget": 24,
+    "tool_max_per_turn": 32,
+    "tool_search_page_size": 8,
+    # Global raw-Entra per-tool kill switches. Caller permissions and custom-agent
+    # allowlists are applied independently.
+    "azure_mcp_disabled_tools": [],
+    "entra_mcp_disabled_tools": [],
+    "agent_skills_enabled": True,
+    # Optional direct-OpenAI Responses API path. Local routing remains the baseline.
+    "openai_native_tool_search_enabled": False,
     # Seconds to wait for a single LLM streaming request before timing out.
     "request_timeout_seconds": 180,
     # Shared DB-backed abuse/cost controls. Zero disables an individual limit.
@@ -223,11 +235,11 @@ DEFAULTS: dict[str, Any] = {
     # slow, so the dashboard serves a cached snapshot until it ages past this. Default 6h.
     "identity_cache_ttl_s": 21600,
     # Max privileged users scanned for MFA status per refresh (the scan is N Graph calls;
-    # results are labelled "sampled" when more privileged users exist than this cap).
+    # results are labeled "sampled" when more privileged users exist than this cap).
     "identity_mfa_scan_cap": 50,
-    # IP4 — max app registrations enumerated per refresh (each is several Graph calls for its
-    # credentials / API permissions / owners). The UI surfaces a "first N (capped)" notice when
-    # the live listing hits this. Raise for large tenants at the cost of a slower refresh.
+    # Normal app-registration refresh cap. Graph pages include credentials, requested API
+    # permissions and expanded owners; the UI offers a deliberate Full tenant mode when a
+    # complete enumeration is required. Raise the cap for large tenants at the cost of time.
     "app_registrations_limit": 500,
     # --- Entra ID Support Agent ----------------------------------------------------
     # Server-side cache TTL (seconds) for the per-domain Entra snapshot. Reads never
@@ -247,6 +259,24 @@ DEFAULTS: dict[str, Any] = {
     # Allow Microsoft Graph beta endpoints (CA what-if evaluate, risky workload identities,
     # workload-identity sign-ins). Turning this off keeps the product fully functional on v1.0.
     "entra_enable_beta_endpoints": True,
+    # Requests in flight during a collection. The slowest phases are `$batch` fan-outs that
+    # sit idle waiting on the gate; the client narrows itself on 429 and recovers, so this is
+    # a ceiling rather than a promise.
+    "entra_graph_concurrency": 12,
+    # Per-application sign-in outcomes. Each is one slow Graph call (~7s even when the app has
+    # no events), so the scope is bounded:
+    #   off     - aggregate report only; the failed-sign-in column reads "not measured"
+    #   visible - only applications the inventory grid renders (excludes first-party Microsoft)
+    #   all     - every service principal, including first-party
+    "entra_signin_outcome_scope": "visible",
+    # How stale a cached per-application outcome may get before it is read again.
+    "entra_signin_outcome_ttl_s": 86400,
+    # Ceiling on per-application reads in one pass. Apps beyond it are picked up next run,
+    # stalest first, so a large tenant degrades into slower freshness rather than a stalled job.
+    "entra_signin_outcome_max_per_run": 100,
+    # Wall-clock ceiling on that pass. Per-call latency varies by an order of magnitude between
+    # tenants, so a count alone does not bound the cost; whichever limit is hit first wins.
+    "entra_signin_outcome_max_seconds": 300,
     # --- AMBA Monitoring Coverage --------------------------------------------------
     # Server-side cache TTL (seconds) for coverage snapshots — the Resource Graph scans
     # are slow, so the dashboard serves a cached snapshot until it ages past this (6h).
@@ -264,7 +294,7 @@ DEFAULTS: dict[str, Any] = {
     # Restrict scoring to AMBA workload patterns (alz / hpc / avd / rag / avs). Empty = all.
     "amba_patterns": [],
     # Flag an existing rule whose severity differs from the baseline as misconfigured.
-    # Off by default because severity is commonly tuned per organisation.
+    # Off by default because severity is commonly tuned per organization.
     "amba_severity_counts_as_gap": False,
     # Honour the AMBA-ALZ `MonitorDisable=true` tag: excluded resources are listed
     # separately instead of being scored as coverage gaps.
@@ -319,6 +349,16 @@ DEFAULTS: dict[str, Any] = {
     "perfprofile_window": "P1D",
     "perfprofile_interval": "PT15M",
     "perfprofile_scan_cap": 200,
+    # Fleet work is durable and server-driven.  One workload at a time is intentionally
+    # conservative for the one-CPU production container; admins may raise it only after
+    # measuring their Azure Monitor quota and host capacity.
+    "perfprofile_fleet_concurrency": 1,
+    "perfprofile_fleet_start_delay_ms": 1000,
+    # Process-wide Azure Monitor gate shared by Fleet, single-scope runs, Mission Control,
+    # and the investigation tool.  This is NOT per workload.
+    "perfprofile_metric_concurrency": 2,
+    "perfprofile_metric_max_attempts": 3,
+    "perfprofile_workload_timeout_s": 1200,
     # --- IAM / Access Review (per-scope access scanner) ----------------------------
     # Server-side cache TTL (seconds) after which a scope's slice is badged stale. Default 6h.
     "iam_cache_ttl_s": 21600,
@@ -328,7 +368,7 @@ DEFAULTS: dict[str, Any] = {
     "iam_tools_enabled": True,
     # --- Entra identity agent tools (Investigate + Conditional Access) --------------
     # Master switch, then a per-tool map. Only the two that answer the questions people
-    # actually ask are on by default: the combined Azure + Graph catalogue is already large
+    # actually ask are on by default: the combined Azure + Graph catalog is already large
     # enough to be TRIMMED for request size, so every extra tool costs every turn.
     "entra_identity_tools_enabled": True,
     "entra_identity_tools": {
@@ -338,11 +378,26 @@ DEFAULTS: dict[str, Any] = {
         "ca_policies_for_app": False,
         "identity_findings": False,
     },
-    # Behavioural Graph reads (sign-in logs, directory audit) exposed by the EntraID MCP
+    # Behavioral Graph reads (sign-in logs, directory audit) exposed by the EntraID MCP
     # server. Gating `identity_investigate` behind `investigate.activity` is worthless while
     # these stay open to the same user — the agent simply calls them instead and assembles
     # the same answer with a thinner audit trail. They travel together or the split is theatre.
     "entra_mcp_behavioural_tools_enabled": False,
+    # --- Recovery Readiness agent tools (per-scenario RTO/RPO) ----------------------
+    # `recovery_breaches` is opt-in: it repeats what `recovery_posture` already carries and
+    # only earns its place for someone working an objectives review.
+    "resiliency_tools_enabled": True,
+    "resiliency_tools": {
+        "recovery_posture": True,
+        "recovery_gaps": True,
+        "recovery_breaches": False,
+    },
+    # Expose authoritative Cost Management spend to permitted chat users.
+    "cost_tools_enabled": True,
+    # Whether Recovery Readiness contributes controls to the Assessments Reliability pillar.
+    # OFF for existing tenants: enabling it changes scores that people track as a trend, so
+    # it is a change to announce rather than to ship silently.
+    "assessments_include_recovery": False,
     # --- Policy exemption manager (create/modify/remove policy exemptions) ----------
     # Guardrails enforced server-side before any exemption write (create/extend) so exemptions
     # stay a controlled, hygienic security exception rather than a permanent escape hatch.
@@ -433,8 +488,7 @@ def load_settings() -> dict[str, Any]:
     return data
 
 
-def save_settings(updates: dict[str, Any]) -> dict[str, Any]:
-    current = load_settings()
+def _apply_settings(current: dict[str, Any], updates: dict[str, Any]) -> dict[str, Any]:
     for k, v in updates.items():
         if k in DEFAULTS and v is not None:
             current[k] = v
@@ -444,6 +498,28 @@ def save_settings(updates: dict[str, Any]) -> dict[str, Any]:
     current["max_tool_iterations"] = max(1, min(50, int(current["max_tool_iterations"])))
     current["tool_result_limit"] = max(2000, min(200000, int(current["tool_result_limit"])))
     current["tool_discovery_limit"] = max(2000, min(400000, int(current["tool_discovery_limit"])))
+    current["tool_initial_budget"] = max(
+        4, min(96, int(current.get("tool_initial_budget", 24)))
+    )
+    current["tool_max_per_turn"] = max(
+        current["tool_initial_budget"],
+        min(128, int(current.get("tool_max_per_turn", 32))),
+    )
+    current["tool_search_page_size"] = max(
+        1, min(12, int(current.get("tool_search_page_size", 8)))
+    )
+    for disabled_key in ("azure_mcp_disabled_tools", "entra_mcp_disabled_tools"):
+        disabled_names = current.get(disabled_key) or []
+        if not isinstance(disabled_names, list):
+            disabled_names = []
+        current[disabled_key] = sorted({
+            str(name).strip() for name in disabled_names if str(name).strip()
+        })
+    current["tool_routing_enabled"] = bool(current.get("tool_routing_enabled", True))
+    current["agent_skills_enabled"] = bool(current.get("agent_skills_enabled", True))
+    current["openai_native_tool_search_enabled"] = bool(
+        current.get("openai_native_tool_search_enabled", False)
+    )
     current["request_timeout_seconds"] = max(30, min(600, int(current["request_timeout_seconds"])))
     current["expensive_requests_per_user_hour"] = max(
         0, min(100000, int(current["expensive_requests_per_user_hour"]))
@@ -537,6 +613,18 @@ def save_settings(updates: dict[str, Any]) -> dict[str, Any]:
     current["entra_signin_lookback_days"] = max(1, min(90, int(current.get("entra_signin_lookback_days", 30) or 30)))
     current["entra_max_users"] = max(100, min(2000000, int(current.get("entra_max_users", 250000) or 250000)))
     current["entra_enable_beta_endpoints"] = bool(current.get("entra_enable_beta_endpoints", True))
+    current["entra_graph_concurrency"] = max(
+        1, min(24, int(current.get("entra_graph_concurrency", 12) or 12)))
+    if str(current.get("entra_signin_outcome_scope") or "").lower() not in ("off", "visible", "all"):
+        current["entra_signin_outcome_scope"] = "visible"
+    else:
+        current["entra_signin_outcome_scope"] = str(current["entra_signin_outcome_scope"]).lower()
+    current["entra_signin_outcome_ttl_s"] = max(
+        0, min(604800, int(current.get("entra_signin_outcome_ttl_s", 86400) or 86400)))
+    current["entra_signin_outcome_max_per_run"] = max(
+        1, min(5000, int(current.get("entra_signin_outcome_max_per_run", 100) or 100)))
+    current["entra_signin_outcome_max_seconds"] = max(
+        0, min(3600, int(current.get("entra_signin_outcome_max_seconds", 300) or 300)))
     # AMBA: clamp cache TTL + tolerance; coerce the misconfig flag.
     current["amba_cache_ttl_s"] = max(0, min(604800, int(current.get("amba_cache_ttl_s", 21600) or 21600)))
     current["amba_misconfig_counts_as_gap"] = bool(current.get("amba_misconfig_counts_as_gap", True))
@@ -595,6 +683,11 @@ def save_settings(updates: dict[str, Any]) -> dict[str, Any]:
     _pi = str(current.get("perfprofile_interval", "PT15M") or "PT15M").strip().upper()
     current["perfprofile_interval"] = _pi if re.match(r"^PT\d+[MH]$", _pi) else "PT15M"
     current["perfprofile_scan_cap"] = max(1, min(2000, int(current.get("perfprofile_scan_cap", 200) or 200)))
+    current["perfprofile_fleet_concurrency"] = max(1, min(3, int(current.get("perfprofile_fleet_concurrency", 1) or 1)))
+    current["perfprofile_fleet_start_delay_ms"] = max(0, min(30000, int(current.get("perfprofile_fleet_start_delay_ms", 1000) or 0)))
+    current["perfprofile_metric_concurrency"] = max(1, min(12, int(current.get("perfprofile_metric_concurrency", 2) or 2)))
+    current["perfprofile_metric_max_attempts"] = max(1, min(6, int(current.get("perfprofile_metric_max_attempts", 3) or 3)))
+    current["perfprofile_workload_timeout_s"] = max(60, min(7200, int(current.get("perfprofile_workload_timeout_s", 1200) or 1200)))
     # IAM / Access Review: clamp cache TTL + row cap. (The pre-rename `rbac_*` keys are
     # adopted on load — see LEGACY_SETTING_KEYS — so only the current keys exist here.)
     current["iam_cache_ttl_s"] = max(0, min(604800, int(current.get("iam_cache_ttl_s", 21600) or 21600)))
@@ -644,10 +737,20 @@ def save_settings(updates: dict[str, Any]) -> dict[str, Any]:
         current["autopilot_autosave_confidence"] = 0.0
     current["autopilot_auto_assess"] = bool(current.get("autopilot_auto_assess", False))
     current["autopilot_auto_architecture"] = bool(current.get("autopilot_auto_architecture", False))
+    return current
+
+
+def save_settings(updates: dict[str, Any]) -> dict[str, Any]:
     from app.core import jsonstore
 
-    jsonstore.write_json(_PATH, current)
-    return current
+    def _mutate(saved: Any) -> dict[str, Any]:
+        current = dict(DEFAULTS)
+        if isinstance(saved, dict):
+            current.update({k: v for k, v in saved.items() if k in DEFAULTS})
+            _carry_legacy_keys(current, saved)
+        return _apply_settings(current, updates)
+
+    return jsonstore.mutate_json(_PATH, {}, _mutate)
 
 
 def system_prompt_additions() -> str:
@@ -679,6 +782,14 @@ def agent_runtime_params() -> dict[str, Any]:
         "max_tool_iterations": int(s.get("max_tool_iterations", 16)),
         "tool_result_limit": int(s.get("tool_result_limit", 20000)),
         "tool_discovery_limit": int(s.get("tool_discovery_limit", 60000)),
+        "tool_initial_budget": int(s.get("tool_initial_budget", 24)),
+        "tool_max_per_turn": int(s.get("tool_max_per_turn", 32)),
+        "tool_search_page_size": int(s.get("tool_search_page_size", 8)),
+        "tool_routing_enabled": bool(s.get("tool_routing_enabled", True)),
+        "agent_skills_enabled": bool(s.get("agent_skills_enabled", True)),
+        "openai_native_tool_search_enabled": bool(
+            s.get("openai_native_tool_search_enabled", False)
+        ),
         "request_timeout_seconds": int(s.get("request_timeout_seconds", 180)),
     }
 

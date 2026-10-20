@@ -4,11 +4,13 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import uuid
 import re
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException
+from fastapi.responses import FileResponse
 from pydantic import BaseModel
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -19,14 +21,18 @@ from app.agent.orchestrator import Orchestrator
 from app.core.ai_prompts import get_full_prompt, get_list
 from app.core.config import get_settings
 from app.core.db import SessionLocal, get_db
-from app.core.security import Principal, get_principal, require_admin
+from app.core.security import Principal, get_principal, require_admin, require_permission
 from app.core.utils import format_error, safe_json_parse
 from app.mcp.client import build_mcp_client
 from app.models import AuditLog, Chat, Message, ToolCall, Usage
 from app.schemas import ChatCreate, ChatOut, MessageCreate, MessageOut
 
 logger = logging.getLogger("app.chats")
-router = APIRouter(prefix="/chats", tags=["chats"])
+router = APIRouter(
+    prefix="/chats",
+    tags=["chats"],
+    dependencies=[Depends(require_permission("chat.use"))],
+)
 settings = get_settings()
 
 # Bulk workload reviews create every durable chat immediately, but only this many reviews
@@ -135,7 +141,7 @@ async def active_turns(
     """
     from app.agent.turn_runner import registry
 
-    active = registry.active_chat_ids()
+    active = await registry.active_chat_ids(tenant_id=principal.tenant_id)
     if not active:
         return {"active": []}
     rows = (
@@ -168,6 +174,7 @@ async def list_investigations(
             .join(Chat, Chat.id == Message.chat_id)
             .where(
                 Chat.tenant_id == principal.tenant_id,
+                Chat.user_id == principal.subject,
                 Message.investigation_json.is_not(None),
             )
             .order_by(Message.created_at.desc())
@@ -193,6 +200,29 @@ async def list_investigations(
     return {"investigations": out}
 
 
+@router.get("/investigations/stats")
+async def investigation_stats(
+    since_days: int = 7,
+    principal: Principal = Depends(get_principal),
+    db: AsyncSession = Depends(get_db),
+):
+    """Exact owner-scoped investigation count for dashboard time windows."""
+    since_days = max(1, min(since_days, 365))
+    cutoff = datetime.now(timezone.utc) - timedelta(days=since_days)
+    count = await db.scalar(
+        select(func.count(Message.id))
+        .join(Chat, Chat.id == Message.chat_id)
+        .where(
+            Chat.tenant_id == principal.tenant_id,
+            Chat.user_id == principal.subject,
+            Chat.archived.is_(False),
+            Message.investigation_json.is_not(None),
+            Message.created_at >= cutoff,
+        )
+    )
+    return {"count": int(count or 0), "since_days": since_days}
+
+
 class SaveRcaIn(BaseModel):
     # Optional explicit target. When omitted, the architecture is resolved from the chat's
     # linked workload (used when exactly one architecture with a Memory is linked).
@@ -203,7 +233,7 @@ class SaveRcaIn(BaseModel):
 async def save_investigation_rca(
     message_id: str,
     payload: SaveRcaIn,
-    principal: Principal = Depends(get_principal),
+    principal: Principal = Depends(require_permission("architectures.write")),
     db: AsyncSession = Depends(get_db),
 ):
     """Persist a deep investigation's root-cause analysis into the linked architecture's
@@ -216,7 +246,11 @@ async def save_investigation_rca(
         await db.execute(
             select(Message, Chat)
             .join(Chat, Chat.id == Message.chat_id)
-            .where(Message.id == message_id, Chat.tenant_id == principal.tenant_id)
+            .where(
+                Message.id == message_id,
+                Chat.tenant_id == principal.tenant_id,
+                Chat.user_id == principal.subject,
+            )
         )
     ).first()
     if row is None:
@@ -594,6 +628,9 @@ async def purge_chat(
     chat = await _get_owned_chat(db, principal, chat_id)
     await db.delete(chat)
     await db.commit()
+    from app.agent.file_artifacts import delete_chat as delete_chat_artifacts
+
+    await asyncio.to_thread(delete_chat_artifacts, chat_id)
     return {"ok": True}
 
 
@@ -623,7 +660,35 @@ async def empty_trash(
         )
     )
     await db.commit()
+    from app.agent.file_artifacts import delete_chat as delete_chat_artifacts
+
+    await asyncio.gather(
+        *(asyncio.to_thread(delete_chat_artifacts, chat.id) for chat in chats)
+    )
     return {"ok": True, "deleted": len(chats)}
+
+
+@router.get("/{chat_id}/artifacts/{artifact_id}")
+async def download_chat_artifact(
+    chat_id: str,
+    artifact_id: str,
+    principal: Principal = Depends(get_principal),
+    db: AsyncSession = Depends(get_db),
+):
+    """Download a generated tool artifact after verifying ownership of its chat."""
+    await _get_owned_chat(db, principal, chat_id)
+    from app.agent.file_artifacts import resolve
+
+    try:
+        path, metadata = await asyncio.to_thread(resolve, chat_id, artifact_id)
+    except (FileNotFoundError, ValueError) as exc:
+        raise HTTPException(status_code=404, detail="Artifact not found.") from exc
+    return FileResponse(
+        path,
+        media_type=metadata["content_type"],
+        filename=metadata["filename"],
+        headers={"Cache-Control": "private, no-store"},
+    )
 
 
 class ChatPatch(BaseModel):
@@ -873,6 +938,22 @@ async def _list_management_groups(connection: dict | None = None) -> list[dict]:
             continue
         groups.append({"id": gid, "name": g.get("displayName", gid)})
     return groups
+
+
+def _resolve_workload_bound_connection(
+    chosen_connection_id: str | None,
+    workload: dict | None,
+) -> dict | None:
+    """Resolve a chat turn's connection without allowing workload resources to cross tenants."""
+    from app.core.azure_connections import get_connection, resolve_connection
+
+    workload_connection_id = str((workload or {}).get("connection_id") or "")
+    if not workload_connection_id:
+        return resolve_connection(chosen_connection_id)
+    connection = get_connection(workload_connection_id)
+    if not connection or connection.get("disabled"):
+        raise ValueError("The selected workload's Azure connection is missing or disabled.")
+    return connection
 
 
 def _build_workload_scope_hint(workload: dict) -> str:
@@ -1195,8 +1276,8 @@ async def _start_message_turn(
 
     # Don't start a second turn while one is already running for this chat; just
     # attach to the in-flight one (defensive — the UI also guards against this).
-    if registry.is_active(chat_id):
-        run = registry.get(chat_id)
+    if await registry.is_active(chat_id, tenant_id=principal.tenant_id):
+        run = await registry.get(chat_id, tenant_id=principal.tenant_id)
         assert run is not None
         return run
 
@@ -1282,22 +1363,40 @@ async def _start_message_turn(
         await db.commit()
     turn_agent = _agents_registry.get_agent(turn_agent_id) if turn_agent_id else None
 
-    # Resolve the Azure connection (tenant) for this turn: explicit choice in the
-    # payload wins, else the agent's tenant, else the chat's saved tenant, else default.
-    from app.core.azure_connections import resolve_connection
+    # Resolve workload ownership BEFORE the tenant. A workload is bound to its canonical
+    # connection; stale picker/chat/agent state must not pair its resources with another tenant.
+    from app.workloads.registry import get_workload
+
+    turn_workload_id = chat.workload_id
+    if payload.workload_id is not None:
+        turn_workload_id = payload.workload_id or None
+    workload = get_workload(turn_workload_id) if turn_workload_id else None
+    if turn_workload_id and workload is None:
+        raise HTTPException(status_code=404, detail="The selected workload was not found.")
 
     chosen_connection_id = (
         payload.connection_id or (turn_agent or {}).get("connection_id") or chat.connection_id
     )
-    turn_connection = resolve_connection(chosen_connection_id)
-    if turn_connection and not turn_agent and chat.connection_id != turn_connection["id"]:
-        # Only persist tenant changes when NOT running as an agent (the agent's tenant
-        # shouldn't overwrite the chat's own saved tenant once the agent is cleared).
+    try:
+        turn_connection = _resolve_workload_bound_connection(chosen_connection_id, workload)
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+    chat_scope_changed = False
+    if chat.workload_id != turn_workload_id:
+        chat.workload_id = turn_workload_id
+        chat_scope_changed = True
+    workload_owns_connection = bool((workload or {}).get("connection_id"))
+    if turn_connection and (not turn_agent or workload_owns_connection) and chat.connection_id != turn_connection["id"]:
+        # Agent-specific tenant state remains ephemeral unless a user-selected workload owns
+        # the connection, in which case the visible chat tenant must match its scope.
         chat.connection_id = turn_connection["id"]
+        chat_scope_changed = True
+    if chat_scope_changed:
         await db.commit()
     if turn_connection:
         tenant_label = (
-            payload.tenant_name
+            (payload.tenant_name if not workload_owns_connection else None)
             or turn_connection.get("display_name")
             or turn_connection.get("tenant_id")
         )
@@ -1308,37 +1407,25 @@ async def _start_message_turn(
         )
         scope_hint = f"{tenant_line}\n\n{scope_hint}" if scope_hint else tenant_line
 
-    # Resolve an optional Azure Workload (hand-picked resource scope) for this turn.
-    # Explicit payload.workload_id wins ("" clears it), else the chat's saved workload.
-    turn_workload_id = chat.workload_id
-    if payload.workload_id is not None:
-        turn_workload_id = payload.workload_id or None
-    if chat.workload_id != turn_workload_id:
-        chat.workload_id = turn_workload_id
-        await db.commit()
-    if turn_workload_id:
-        from app.workloads.registry import get_workload
+    if workload and workload.get("nodes"):
+        workload_hint = _build_workload_scope_hint(workload)
+        scope_hint = f"{scope_hint}\n\n{workload_hint}" if scope_hint else workload_hint
+        # Backstop: if the workload lives in exactly one subscription and the connection
+        # has no default subscription, pin the MCP server's default to it for this turn.
+        # Otherwise a direct Azure tool called without an explicit subscription resolves
+        # to the wrong one and 404s on the resource group.
+        if turn_connection and not (turn_connection.get("default_subscription") or "").strip():
+            import re as _re
 
-        workload = get_workload(turn_workload_id)
-        if workload and workload.get("nodes"):
-            workload_hint = _build_workload_scope_hint(workload)
-            scope_hint = f"{scope_hint}\n\n{workload_hint}" if scope_hint else workload_hint
-            # Backstop: if the workload lives in exactly one subscription and the connection
-            # has no default subscription, pin the MCP server's default to it for this turn.
-            # Otherwise a direct Azure tool called without an explicit subscription resolves
-            # to the wrong one and 404s on the resource group.
-            if turn_connection and not (turn_connection.get("default_subscription") or "").strip():
-                import re as _re
-
-                _wl_subs: set[str] = set()
-                for _n in workload.get("nodes", []) or []:
-                    if _n.get("kind") == "subscription" and _n.get("id"):
-                        _wl_subs.add(str(_n["id"]).lower())
-                    _ms = _re.search(r"/subscriptions/([0-9a-fA-F-]{36})", str(_n.get("id", "")))
-                    if _ms:
-                        _wl_subs.add(_ms.group(1).lower())
-                if len(_wl_subs) == 1:
-                    turn_connection = {**turn_connection, "default_subscription": next(iter(_wl_subs))}
+            _wl_subs: set[str] = set()
+            for _n in workload.get("nodes", []) or []:
+                if _n.get("kind") == "subscription" and _n.get("id"):
+                    _wl_subs.add(str(_n["id"]).lower())
+                _ms = _re.search(r"/subscriptions/([0-9a-fA-F-]{36})", str(_n.get("id", "")))
+                if _ms:
+                    _wl_subs.add(_ms.group(1).lower())
+            if len(_wl_subs) == 1:
+                turn_connection = {**turn_connection, "default_subscription": next(iter(_wl_subs))}
 
     # Resolve sandbox troubleshooting VMs linked to this turn's workload. Their tools
     # (vm_exec/vm_list/vm_read_file) are registered below; here we tell the model they
@@ -1524,16 +1611,65 @@ async def _start_message_turn(
             connection=turn_connection,
         )
 
+    # Recovery Readiness: per-scenario RTO/RPO and the resources with no recovery path.
+    # Same contract as the Entra tools — the caller's principal, so chat is exactly as
+    # permissioned as clicking, and the answers carry their basis.
+    if turn_connector_toolset is not None:
+        from app.resiliency.agent_tool import register_recovery_tools
+
+        register_recovery_tools(
+            turn_connector_toolset,
+            tenant_id=_turn_tenant_id,
+            principal=principal,
+            connection=turn_connection,
+        )
+
+    if turn_connector_toolset is not None:
+        from app.cost.agent_tool import register_cost_tools
+
+        if payload.subscription_id:
+            tool_scope = f"sub:{payload.subscription_id}"
+        elif payload.management_group_id:
+            tool_scope = f"mg:{payload.management_group_id}"
+        elif payload.scope_all or workload:
+            tool_scope = ""
+        else:
+            default_subscription = str((turn_connection or {}).get("default_subscription") or "")
+            tool_scope = f"sub:{default_subscription}" if default_subscription else ""
+        register_cost_tools(
+            turn_connector_toolset,
+            tenant_id=_turn_tenant_id,
+            principal=principal,
+            connection=turn_connection,
+            scope=tool_scope,
+            workload=workload,
+        )
+        from app.advisor.agent_tool import register_advisor_tools
+
+        register_advisor_tools(
+            turn_connector_toolset,
+            tenant_id=_turn_tenant_id,
+            connection=turn_connection,
+            scope=tool_scope,
+            workload=workload,
+        )
+
     # EntraID (Microsoft Graph) tools: a custom agent opts in via allow_all_entra; the
     # default assistant gets them when the admin has enabled the global toggle.
     if turn_agent is not None:
-        turn_entra_enabled = bool(turn_agent.get("allow_all_entra", False))
+        turn_entra_enabled = bool(
+            turn_agent.get("allow_all_entra", False)
+            or turn_agent.get("entra_tools")
+            or turn_agent.get("entra_bundles")
+        )
+        turn_azure_enabled = bool(turn_agent.get("allow_all_azure", True))
     else:
         from app.core.app_settings import load_settings as _load_app_settings
 
         turn_entra_enabled = bool(_load_app_settings().get("entra_mcp_enabled", False))
+        turn_azure_enabled = True
 
-    # Behavioural Graph reads (sign-in logs, directory audit) are withheld from a caller who
+    # Behavioral Graph reads (sign-in logs, directory audit) are withheld from a caller who
     # does not hold `investigate.activity`. Without this the first-party gate is decorative:
     # the agent would simply call the raw Graph equivalents instead.
     from app.entra.agent_tool import behavioural_graph_tools_blocked
@@ -1575,6 +1711,10 @@ async def _start_message_turn(
                 connector_toolset=turn_connector_toolset,
                 focus=turn_deep_agents,
                 architecture_memory=turn_arch_memory or None,
+                azure_enabled=turn_azure_enabled,
+                azure_tools=(turn_agent or {}).get("azure_tools") or [],
+                azure_bundles=(turn_agent or {}).get("azure_bundles") or [],
+                chat_id=chat_id,
             )
         else:
             runner = Orchestrator(
@@ -1585,8 +1725,37 @@ async def _start_message_turn(
                 connector_toolset=turn_connector_toolset,
                 extra_instructions=turn_extra_instructions,
                 write_policy_override=turn_write_override,
+                azure_enabled=turn_azure_enabled,
                 entra_enabled=turn_entra_enabled,
                 entra_blocked_tools=turn_entra_blocked,
+                azure_tools=(turn_agent or {}).get("azure_tools") or [],
+                azure_bundles=(turn_agent or {}).get("azure_bundles") or [],
+                entra_tools=(turn_agent or {}).get("entra_tools") or [],
+                entra_bundles=(turn_agent or {}).get("entra_bundles") or [],
+                chat_id=chat_id,
+            )
+        if turn_connector_toolset is not None:
+            from app.agent.inventory_tool import register_inventory_tool
+            from app.advisor.agent_tool import subscription_ids_from_workload
+
+            inventory_subscriptions = (
+                [payload.subscription_id]
+                if payload.subscription_id
+                else subscription_ids_from_workload(workload)
+            )
+
+            register_inventory_tool(
+                turn_connector_toolset,
+                mcp_client=runner._mcp,
+                scope_hint=scope_hint or "",
+                allowed_subscription_ids=inventory_subscriptions or None,
+            )
+            from app.agent.public_exposure_tool import register_public_exposure_tool
+
+            register_public_exposure_tool(
+                turn_connector_toolset,
+                connection=turn_connection,
+                allowed_subscription_ids=inventory_subscriptions or None,
             )
         orchestrator = runner
         async with SessionLocal() as task_db:
@@ -1596,6 +1765,7 @@ async def _start_message_turn(
 
             assistant_text = ""
             usage = {"prompt_tokens": 0, "completion_tokens": 0}
+            tool_routing: dict[str, Any] = {}
             activity: list[dict[str, Any]] = []
             reasoning_buf = ""
             tokens_since_save = 0
@@ -1637,6 +1807,10 @@ async def _start_message_turn(
                             # Keep the live event-accumulated tree; just fold in the
                             # research summary the runner reports at the end.
                             investigation["research"] = ev.data["investigation"].get("research")
+                        if ev.data.get("tool_routing"):
+                            tool_routing = dict(ev.data["tool_routing"])
+                    elif ev.type == "routing":
+                        tool_routing = dict(ev.data)
 
                     # Accumulate the deep-investigation structure for persistence.
                     if ev.type == "phase":
@@ -1666,6 +1840,7 @@ async def _start_message_turn(
                         activity.append(
                             {
                                 "kind": "tool",
+                                "tool_call_id": ev.data.get("tool_call_id"),
                                 "name": ev.data["tool_name"],
                                 "args": ev.data.get("arguments", {}),
                                 "status": "awaiting_approval"
@@ -1704,10 +1879,21 @@ async def _start_message_turn(
                     if ev.type == "tool_result":
                         is_tool_error = bool(ev.data.get("is_error"))
                         for step in reversed(activity):
-                            if step.get("kind") == "tool" and step.get("status") == "running":
+                            same_call = (
+                                ev.data.get("tool_call_id")
+                                and step.get("tool_call_id") == ev.data.get("tool_call_id")
+                            )
+                            legacy_match = (
+                                not ev.data.get("tool_call_id")
+                                and step.get("name") == ev.data.get("tool_name")
+                                and step.get("status") == "running"
+                            )
+                            if step.get("kind") == "tool" and (same_call or legacy_match):
                                 step["status"] = "error" if is_tool_error else "done"
                                 step["summary"] = ev.data.get("summary")
                                 step["duration"] = ev.data.get("duration_ms")
+                                if ev.data.get("artifacts"):
+                                    step["artifacts"] = ev.data["artifacts"]
                                 break
                         task_db.add(
                             AuditLog(
@@ -1766,6 +1952,7 @@ async def _start_message_turn(
                             "chat_id": chat_id,
                             "prompt_tokens": usage["prompt_tokens"],
                             "completion_tokens": usage["completion_tokens"],
+                            "tool_routing": tool_routing,
                         },
                     )
                 )
@@ -1837,7 +2024,9 @@ async def _start_message_turn(
     else:
         turn_worker = worker
 
-    run = registry.start(chat_id, assistant_id, turn_worker)
+    run = await registry.start(
+        chat_id, assistant_id, turn_worker, tenant_id=principal.tenant_id
+    )
     return run
 
 
@@ -1882,95 +2071,151 @@ def _resolve_deep_review_workloads(workload_ids: list[str]) -> list[dict[str, An
     return workloads
 
 
+async def run_deep_review_workload(
+    *, workload_id: str, principal: Principal, chat_id: str,
+) -> dict[str, Any]:
+    """Run one durable-batch deep review and wait for its background turn to finish.
+
+    ``chat_id`` is the batch item id. Re-running an interrupted item therefore reuses the same
+    chat and regenerates its unfinished assistant turn instead of creating duplicate chats.
+    """
+    from app.agent.deep_agents import public_catalog
+    from app.core.azure_connections import connection_for_workload
+    from app.core.db import SessionLocal
+    from app.workloads import registry as workload_registry
+
+    workload = workload_registry.get_workload(workload_id)
+    if workload is None:
+        return {"ok": False, "chat_id": chat_id, "error": "Workload not found."}
+    agent_ids = [agent["id"] for agent in public_catalog()]
+    if len(agent_ids) != 8:
+        return {"ok": False, "chat_id": chat_id, "error": "The eight-agent deep-review roster is unavailable."}
+    connection = connection_for_workload(workload)
+    connection_id = str(connection.get("id")) if connection and connection.get("id") else None
+
+    async with SessionLocal() as db:
+        chat = await db.get(Chat, chat_id)
+        regenerate = False
+        if chat is not None and (chat.tenant_id != principal.tenant_id or chat.user_id != principal.subject):
+            return {"ok": False, "chat_id": chat_id, "error": "Deep-review chat ownership mismatch."}
+        if chat is None:
+            workload_name = str(workload.get("name") or workload_id)
+            chat = Chat(
+                id=chat_id,
+                tenant_id=principal.tenant_id,
+                user_id=principal.subject,
+                title=f"Deep review: {workload_name}"[:256],
+                provider=_active_provider(),
+                model=active_model() or settings.llm_model,
+                connection_id=connection_id,
+                thinking_level="deep",
+                workload_id=workload_id,
+            )
+            db.add(chat)
+            await db.commit()
+        else:
+            existing_user = (
+                await db.execute(
+                    select(Message.id)
+                    .where(Message.chat_id == chat.id, Message.role == "user")
+                    .limit(1)
+                )
+            ).scalar_one_or_none()
+            regenerate = existing_user is not None
+        run = await _start_message_turn(
+            chat.id,
+            MessageCreate(
+                content=DEEP_RELIABILITY_REVIEW_PROMPT,
+                thinking_level="deep",
+                deep_agents=agent_ids,
+                workload_id=workload_id,
+                connection_id=connection_id,
+                regenerate=regenerate,
+            ),
+            principal,
+            db,
+            worker_gate=_deep_review_fleet_gate,
+        )
+        await run.wait()
+        assistant = (
+            await db.execute(
+                select(Message)
+                .where(Message.chat_id == chat.id, Message.role == "assistant")
+                .order_by(Message.created_at.desc())
+                .limit(1)
+            )
+        ).scalar_one_or_none()
+        if assistant is None or not (assistant.content or "").strip():
+            return {"ok": False, "chat_id": chat.id, "error": "Deep review produced no assistant result."}
+        return {"ok": True, "chat_id": chat.id, "error": ""}
+
+
 @router.post("/deep-reviews/fleet")
 async def launch_deep_review_fleet(
     payload: DeepReviewFleetRequest,
     principal: Principal = Depends(get_principal),
     db: AsyncSession = Depends(get_db),
 ):
-    """Create and start one all-specialist deep review per selected workload."""
-    from app.agent.deep_agents import public_catalog
-    from app.core.azure_connections import connection_for_workload
+    """Queue one durable all-specialist deep review per selected workload."""
+    from app.core import work_batches
 
     workloads = _resolve_deep_review_workloads(payload.workload_ids)
-    agent_ids = [agent["id"] for agent in public_catalog()]
-    if len(agent_ids) != 8:  # Guard the product contract if the catalog changes later.
-        raise HTTPException(status_code=500, detail="The eight-agent deep-review roster is unavailable.")
+    items = [
+        {
+            "item_key": str(workload["id"]),
+            "workload_id": str(workload["id"]),
+            "workload_name": str(workload.get("name") or workload["id"]),
+            "connection_id": str(workload.get("connection_id") or ""),
+        }
+        for workload in workloads
+    ]
+    batch, _ = await work_batches.create_batch(
+        tenant_id=principal.tenant_id,
+        feature="deep_review",
+        actor=principal.subject,
+        idempotency_key=f"deep-review:{uuid.uuid4()}",
+        items=items,
+        config={},
+        trigger="fleet",
+        start_worker=False,
+    )
 
-    launches: list[tuple[Chat, dict[str, Any], str | None]] = []
-    for workload in workloads:
-        workload_name = str(workload.get("name") or workload.get("id") or "Workload")
-        connection = connection_for_workload(workload)
-        connection_id = str(connection.get("id")) if connection and connection.get("id") else None
-        chat = Chat(
+    workloads_by_id = {str(workload["id"]): workload for workload in workloads}
+    for item in batch["items"]:
+        workload = workloads_by_id[item["workload_id"]]
+        db.add(Chat(
+            id=item["id"],
             tenant_id=principal.tenant_id,
             user_id=principal.subject,
-            title=f"Deep review: {workload_name}"[:256],
+            title=f"Deep review: {item['workload_name']}"[:256],
             provider=_active_provider(),
             model=active_model() or settings.llm_model,
-            connection_id=connection_id,
+            connection_id=item["connection_id"] or None,
             thinking_level="deep",
             workload_id=str(workload["id"]),
-        )
-        db.add(chat)
-        launches.append((chat, workload, connection_id))
+        ))
 
     db.add(
         AuditLog(
             tenant_id=principal.tenant_id,
             actor_id=principal.subject,
             action="chats.deep_review_fleet",
-            target=None,
+            target=batch["id"],
             metadata_json={"workload_ids": [str(w["id"]) for w in workloads], "agent_count": 8},
         )
     )
     await db.commit()
-    for chat, _, _ in launches:
-        await db.refresh(chat)
-
-    results: list[dict[str, Any]] = []
-    launched = 0
-    for chat, workload, connection_id in launches:
-        status = "running"
-        error = ""
-        try:
-            await _start_message_turn(
-                chat.id,
-                MessageCreate(
-                    content=DEEP_RELIABILITY_REVIEW_PROMPT,
-                    thinking_level="deep",
-                    deep_agents=agent_ids,
-                    workload_id=str(workload["id"]),
-                    connection_id=connection_id,
-                ),
-                principal,
-                db,
-                worker_gate=_deep_review_fleet_gate,
-            )
-            launched += 1
-        except Exception as exc:  # noqa: BLE001 - preserve other fleet launches
-            status = "error"
-            error = format_error(exc, max_len=500)
-            db.add(
-                Message(
-                    chat_id=chat.id,
-                    role="assistant",
-                    content=f"⚠️ The deep review could not start: {error}",
-                )
-            )
-            await db.commit()
-        results.append(
-            {
-                "chat_id": chat.id,
-                "workload_id": str(workload["id"]),
-                "workload_name": str(workload.get("name") or workload["id"]),
-                "title": chat.title,
-                "status": status,
-                "error": error or None,
-            }
-        )
-
-    return {"launched": launched, "agent_count": len(agent_ids), "chats": results}
+    await work_batches.worker.ensure_running()
+    results = [
+        {
+            "chat_id": item["id"], "workload_id": item["workload_id"],
+            "workload_name": item["workload_name"],
+            "title": f"Deep review: {item['workload_name']}"[:256],
+            "status": "queued", "error": None,
+        }
+        for item in batch["items"]
+    ]
+    return {"launched": len(results), "agent_count": 8, "chats": results, "batch_id": batch["id"]}
 
 
 async def _sse_from_run(run) -> Any:
@@ -1989,7 +2234,7 @@ async def turn_active(
     from app.agent.turn_runner import registry
 
     await _get_owned_chat(db, principal, chat_id)
-    return {"active": registry.is_active(chat_id)}
+    return {"active": await registry.is_active(chat_id, tenant_id=principal.tenant_id)}
 
 
 @router.post("/{chat_id}/stop")
@@ -2007,7 +2252,7 @@ async def stop_turn(
     from app.agent.turn_runner import registry
 
     await _get_owned_chat(db, principal, chat_id)
-    stopped = registry.cancel(chat_id)
+    stopped = await registry.cancel(chat_id, tenant_id=principal.tenant_id)
     return {"stopped": stopped}
 
 
@@ -2024,7 +2269,7 @@ async def reconnect_stream(
     from app.agent.turn_runner import registry
 
     await _get_owned_chat(db, principal, chat_id)
-    run = registry.get(chat_id)
+    run = await registry.get(chat_id, tenant_id=principal.tenant_id)
     if run is None:
         async def _empty():
             if False:  # pragma: no cover - generator with no yields

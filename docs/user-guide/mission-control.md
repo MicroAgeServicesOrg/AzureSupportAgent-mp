@@ -5,6 +5,7 @@ parent: User guide
 nav_order: 3
 description: Run coordinated multi-system workload sweeps and interpret the go, warning, or no-go posture board.
 permalink: /user-guide/mission-control/
+feature_ids: [ROUTE:mission-control]
 ---
 
 # Mission Control
@@ -14,7 +15,8 @@ permalink: /user-guide/mission-control/
 ## Purpose
 
 Mission Control runs a coordinated set of workload analyses and presents their latest states on one posture board. Use it for release readiness, operational reviews, incident handoff, or a repeatable check across several systems without opening every feature manually.
-![Mission Control readiness board with workload rings and system status]({{ site.baseurl }}/assets/mission-control.png)
+
+{% include screenshot.html file="core-mission-fleet.png" title="Mission Control readiness across workloads" caption="Compare workload readiness before opening an individual board. These saved-state displays are synthetic browser responses, not evidence that a fleet mission or its Azure and AI analyses actually ran." %}
 
 ### When to use it
 
@@ -51,6 +53,14 @@ Mission Control uses a central FIFO admission queue with per-tenant/connection l
 
 If a mission remains queued, another mission for the same connection may be active. Check queue position rather than repeatedly submitting duplicates.
 
+### Large workloads
+
+Mission Control automatically pages and batches workload inventory queries. It does not require an operator-selected “large” threshold. Architecture, Memory, Tag Intelligence, and Inventory reuse one light inventory collection during a mission, reducing repeated Azure Resource Graph calls.
+
+For a large or highly repetitive estate, AI Architecture switches to a bounded summarized context. Topology-bearing resources are prioritized and repeated resources are represented as stable aggregates. The architecture records total, represented, aggregated, and property-enriched counts. Narrow the workload when a resource-by-resource diagram is required.
+
+If a collector reaches a safe retained-row or context limit, the tile reports **Partial** with retained-versus-known counts. A partial result is never described as complete.
+
 ## Workflow overview
 
 ### Run a mission
@@ -72,6 +82,8 @@ Fleet missions use the same principles but can queue multiple workloads. Keep th
 
 ### Interpret the board
 
+{% include screenshot.html file="core-mission-board.png" title="Mission Control systems, attention, saved log, and history" caption="Inspect system status, attention, and the selected history entry together. The board and log illustrate saved-result presentation only; no mission execution or backend persistence is implied." %}
+
 ### Mission readiness
 
 | State | Meaning |
@@ -86,6 +98,7 @@ Fleet missions use the same principles but can queue multiple workloads. Keep th
 
 - **Queued/running**: execution has not produced a final state.
 - **Done**: the system completed; inspect its headline and attention flag.
+- **Partial**: the system produced a useful result with known omissions or an unavailable independent source. Review its coverage detail and warning before relying on it.
 - **Skipped**: a sufficiently fresh result was reused, or a dependency/condition prevented execution. Read the detail.
 - **Fail/error**: the system could not produce a normal result or found a hard failure. Open the system and logs.
 - **Freshness age**: how old the underlying result is. A completed mission can still include reused data unless forced.
@@ -95,7 +108,11 @@ A readiness ring measures completed systems, not an Azure SLA or probability of 
 
 ## Exports, history, scheduling, and integrations
 
-No dedicated export, history, scheduling, or integration controls are documented for this feature page.
+Mission history stores each run's status, systems, and activity log. Opening a history entry
+loads its full saved record and restores the Mission Log; a queued or running entry also
+reattaches to live progress. Losing the browser stream does not cancel orchestration. The page
+makes bounded reconnect attempts and checks persisted status between attempts, so a completed
+mission can be recovered even when its terminal stream event was missed.
 
 ## Safety and limitations
 
@@ -105,6 +122,7 @@ No dedicated export, history, scheduling, or integration controls are documented
 - Confirm workload membership before launch; every system inherits that boundary.
 - Force refresh can increase Azure requests, model usage, runtime, and rate-limit exposure.
 - Cancel stops remaining orchestration but cannot undo completed external reads or generated artifacts.
+- A failed Architecture or Radar refresh does not replace a previous usable artifact/snapshot with an empty failure.
 - Deleting mission history is permanent and does not delete source feature records.
 - Keep mission evidence and logs free of secrets when sharing or exporting them.
 
@@ -115,9 +133,12 @@ No dedicated export, history, scheduling, or integration controls are documented
 | --- | --- |
 | Mission stays queued | Check queue depth/position and active missions for the same connection; do not submit duplicates |
 | One system fails while others succeed | Open that system's detail and verify its feature permission, Azure/Graph access, provider, and dependency state |
+| A tile is Partial | Review retained-versus-known counts or source warnings. The usable result remains openable; narrow the workload if detailed architecture is required. |
+| Architecture says Summarized | The estate exceeded the bounded detailed context. The diagram represents repeated resources as aggregates; narrow workload membership for resource-level detail. |
+| Radar reports a source warning | Advisor, Service Health, and model lifecycle are collected independently. Review the source status; a total refresh failure preserves the last-good snapshot. |
 | Board shows old data | Review age labels and run a focused or forced refresh when justified |
 | Readiness remains unknown | Select contributing systems and resolve skipped/error states that left no usable result |
-| Streaming disconnects | Reopen the mission; durable mission state persists even when the browser stream drops |
+| Streaming disconnects | The page retries the stream and checks saved mission status. If recovery still fails, reopen the workload board and select the same history entry; its saved status and activity log persist. Do not launch a duplicate merely because the stream ended. |
 | Azure returns 429 | Let the queue/backoff complete, reduce fleet size, and avoid forced reruns |
 | Mission Memory is skipped | Ensure Architecture completed and a linked architecture exists |
 | Cancel appears slow | The current system must reach a cancellation point; already completed work remains recorded |

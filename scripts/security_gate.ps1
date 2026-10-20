@@ -90,7 +90,11 @@ function Add-Check {
 
 function Test-Tool { param([string]$Name) return [bool](Get-Command $Name -ErrorAction SilentlyContinue) }
 
-$dockerOk = Test-Tool docker
+$dockerOk = $false
+if (Test-Tool docker) {
+    $dockerServer = docker version --format '{{.Server.Version}}' 2>$null
+    $dockerOk = $LASTEXITCODE -eq 0 -and -not [string]::IsNullOrWhiteSpace(($dockerServer -join ''))
+}
 $py = Join-Path $repo 'backend\.venv\Scripts\python.exe'
 
 Write-Host ""
@@ -148,21 +152,22 @@ if ($Stage -in 'preflight', 'all') {
             ForEach-Object { ($_ -split '#')[0].Trim() } |
             Where-Object { $_ }
 
-        $idHits = @()
-        foreach ($gid in $liveIds) {
-            # --untracked matters: a file that is about to be `git add`ed is NOT tracked
-            # yet, so a plain `git grep` cannot see it. That blind spot let this very
-            # script ship with hardcoded identifiers on 2026-07-31.
-            $hit = git grep -nI --untracked --fixed-strings -i $gid -- `
-                ':!docs/improvement-plans' ':!.security' ':!*.lock' ':!*package-lock.json' 2>$null
-            if ($hit) { $idHits += $hit }
+        $identifierGuard = Join-Path $repo 'scripts\check_live_identifiers.py'
+        if (-not (Test-Path $identifierGuard) -or -not (Test-Path $py)) {
+            Add-Check 'no live tenant identifiers tracked' 'ERROR' 'identifier guard or Python environment missing'
+            Add-Finding -Id 'S1.2' -Severity 'BLOCKER' -Title 'Live identifier scan could not run' `
+                -Action 'Restore scripts/check_live_identifiers.py and the backend Python environment before publishing.'
         }
-        if ($idHits) {
-            Add-Check 'no live tenant identifiers tracked' 'FAIL' "$(($idHits | Measure-Object).Count) hit(s)"
-            Add-Finding -Id 'S1.2' -Severity 'HIGH' -Title 'Live tenant/connection/app identifier in source' `
-                -Detail (($idHits | Select-Object -First 8) -join "`n") `
-                -Action 'Replace with a placeholder or move to an ignored fixture. Not secret, but reconnaissance value on a public repo.'
-        } else { Add-Check 'no live tenant identifiers tracked' 'PASS' "$($liveIds.Count) identifier(s) checked" }
+        else {
+            $guardOutput = & $py $identifierGuard 2>&1
+            if ($LASTEXITCODE -ne 0) {
+                Add-Check 'no live tenant identifiers tracked' 'FAIL' 'identifier guard rejected publishable content'
+                Add-Finding -Id 'S1.2' -Severity 'HIGH' -Title 'Live tenant/connection/app identifier in source' `
+                    -Detail (($guardOutput | Select-Object -First 10) -join "`n") `
+                    -Action 'Replace with a placeholder or move to an ignored fixture. Not secret, but reconnaissance value on a public repo.'
+            }
+            else { Add-Check 'no live tenant identifiers tracked' 'PASS' "$($liveIds.Count) identifier(s) checked" }
+        }
     }
 
     Pop-Location
@@ -252,7 +257,9 @@ if ($Stage -in 'preflight', 'all') {
             -Action "backend\.venv\Scripts\python.exe -m pip install pip-audit"
     }
     else {
-        $pa = & $py -m pip_audit -r (Join-Path $repo 'backend\requirements.txt') --format json 2>$null
+        # Avoid inaccessible user-profile caches stalling pip-audit on Windows.
+        $pa = & $py -m pip_audit -r (Join-Path $repo 'backend\requirements.txt') `
+            --cache-dir (Join-Path $stateDir 'pip-audit-cache') --format json 2>$null
         if ($LASTEXITCODE -eq 0) { Add-Check 'pip-audit (backend)' 'PASS' }
         else {
             $vulns = try { ($pa | ConvertFrom-Json).dependencies | Where-Object { $_.vulns } } catch { $null }
@@ -285,9 +292,23 @@ if ($Stage -in 'preflight', 'all') {
     # Filter to security codes so ordinary lint (unused imports, etc.) is not reported
     # as a security finding.
     $ruff = & $py -m ruff check (Join-Path $repo 'backend\app') --output-format json 2>$null
-    $ruffAll = try { @($ruff | ConvertFrom-Json) } catch { $null }
-    $ruffSec = if ($null -ne $ruffAll) { @($ruffAll | Where-Object { $_.code -match '^(S|ASYNC)\d+$' }) } else { $null }
-    if ($null -eq $ruffAll) { Add-Check 'ruff security rules (S,ASYNC)' 'ERROR' 'could not parse' }
+    $ruffExit = $LASTEXITCODE
+    $ruffAll = @()
+    $ruffParsed = $false
+    try {
+        # Keep an empty JSON array as an array: pipeline enumeration otherwise turns
+        # a clean [] response into $null and incorrectly labels the scan an error.
+        $ruffResult = ConvertFrom-Json -InputObject ($ruff -join "`n") -NoEnumerate -ErrorAction Stop
+        if ($ruffResult -isnot [Array]) { throw 'Expected a Ruff JSON array' }
+        $ruffAll = @($ruffResult)
+        $ruffParsed = $ruffExit -in @(0, 1)
+    } catch { $ruffParsed = $false }
+    $ruffSec = @($ruffAll | Where-Object { $_.code -match '^(S|ASYNC)\d+$' })
+    if (-not $ruffParsed) {
+        Add-Check 'ruff security rules (S,ASYNC)' 'ERROR' 'scan failed or invalid JSON'
+        Add-Finding -Id 'S5.0-ruff' -Severity 'BLOCKER' -Title 'Ruff security scan could not be verified' `
+            -Action 'Resolve the scanner execution or output error before publishing.'
+    }
     elseif ($ruffSec.Count -eq 0) { Add-Check 'ruff security rules (S,ASYNC)' 'PASS' "$($ruffAll.Count) non-security lint" }
     else {
         Add-Check 'ruff security rules (S,ASYNC)' 'WARN' "$($ruffSec.Count) finding(s)"
@@ -297,9 +318,22 @@ if ($Stage -in 'preflight', 'all') {
     }
 
     $bandit = & $py -m bandit -r (Join-Path $repo 'backend\app') -ll -f json -q 2>$null
-    $banditN = try { @(($bandit | ConvertFrom-Json).results).Count } catch { -1 }
+    $banditExit = $LASTEXITCODE
+    $banditN = -1
+    try {
+        if ($banditExit -notin @(0, 1)) { throw 'Bandit execution failed' }
+        $banditReport = ConvertFrom-Json -InputObject ($bandit -join "`n") -ErrorAction Stop
+        if ($banditReport.PSObject.Properties.Name -notcontains 'results' -or
+            $banditReport.PSObject.Properties.Name -notcontains 'metrics' -or
+            @($banditReport.errors).Count -gt 0) { throw 'Incomplete Bandit report' }
+        $banditN = @($banditReport.results).Count
+    } catch { $banditN = -1 }
     if ($banditN -eq 0) { Add-Check 'bandit (medium+)' 'PASS' }
-    elseif ($banditN -lt 0) { Add-Check 'bandit (medium+)' 'ERROR' 'could not parse' }
+    elseif ($banditN -lt 0) {
+        Add-Check 'bandit (medium+)' 'ERROR' 'could not parse'
+        Add-Finding -Id 'S5.0-bandit' -Severity 'BLOCKER' -Title 'Bandit security scan could not be verified' `
+            -Action 'Resolve the scanner execution or output error before publishing.'
+    }
     else {
         Add-Check 'bandit (medium+)' 'WARN' "$banditN finding(s)"
         Add-Finding -Id 'S5.2' -Severity 'MEDIUM' -Title "bandit: $banditN medium+ finding(s)" `
@@ -444,11 +478,20 @@ if ($Stage -eq 'image') {
         }
 
         docker run --rm -v /var/run/docker.sock:/var/run/docker.sock aquasec/trivy:latest `
-            image --severity CRITICAL --quiet --format json $ImageRef 2>$null |
+            image --scanners vuln --quiet --format json $ImageRef 2>$null |
             Set-Variable trivyJson
-        $crit = try { @(($trivyJson | ConvertFrom-Json).Results.Vulnerabilities | Where-Object { $_.FixedVersion }).Count } catch { -1 }
-        if ($crit -eq 0) {
-            Add-Check 'image CRITICAL CVEs with fixes' 'PASS'
+        $trivyExit = $LASTEXITCODE
+        $fixable = -1
+        try {
+            if ($trivyExit -ne 0) { throw 'Trivy execution failed' }
+            $trivyReport = ConvertFrom-Json -InputObject ($trivyJson -join "`n") -ErrorAction Stop
+            if (-not $trivyReport.SchemaVersion -or -not $trivyReport.ArtifactName) {
+                throw 'Trivy did not return an image report'
+            }
+            $fixable = @($trivyReport.Results.Vulnerabilities | Where-Object { $_.FixedVersion }).Count
+        } catch { $fixable = -1 }
+        if ($fixable -eq 0) {
+            Add-Check 'image CVEs with fixes (all severities)' 'PASS'
             # A clean image CVE scan IS the 'container-cve' suite.
             $lp = Join-Path $repo '.security\deep-suite-ledger.json'
             if (Test-Path $lp) {
@@ -459,10 +502,14 @@ if ($Stage -eq 'image') {
                 }
             }
         }
-        elseif ($crit -lt 0) { Add-Check 'image CRITICAL CVEs with fixes' 'ERROR' }
+        elseif ($fixable -lt 0) {
+            Add-Check 'image CVEs with fixes (all severities)' 'ERROR'
+            Add-Finding -Id 'S9.0-cve' -Severity 'BLOCKER' -Title 'Image vulnerability scan could not be verified' `
+                -Action 'Resolve the Trivy execution or report error before publishing the image.'
+        }
         else {
-            Add-Check 'image CRITICAL CVEs with fixes' 'FAIL' "$crit fixable"
-            Add-Finding -Id 'S9.2' -Severity 'HIGH' -Title "$crit CRITICAL CVE(s) with an available upstream fix" `
+            Add-Check 'image CVEs with fixes (all severities)' 'FAIL' "$fixable fixable"
+            Add-Finding -Id 'S9.2' -Severity 'HIGH' -Title "$fixable CVE(s) with an available upstream fix" `
                 -Action 'Fixable CVEs are not acceptable to ship. Rebuild with updated packages.'
         }
     }

@@ -19,6 +19,8 @@ feature_ids: [PROACTIVE_NAV:iam, IAM_NAV:insights, IAM_NAV:scopes, IAM_NAV:roles
 
 These four are the reference and health tabs. **Insights** turns the access rows into counted pivots so a reviewer can see the shape of an estate before reading any of it. **Scopes** and **Roles** are the reference layers the rest of the screen is composed from. **Diagnostics** is where *we could not look* is distinguished from *there is nothing there* — the distinction every other tab depends on.
 
+**Screenshot notes:** These synthetic browser fixtures illustrate cached reference data and collector states, not live collection or backend analysis. Example roles, principals, counts and messages are not defaults or evidence about an actual tenant.
+
 ## Prerequisites and data sources
 
 - Product permission `iam.read`.
@@ -73,6 +75,8 @@ Each heading states `N of M` while a search is active, so a filtered list never 
 
 This is a reference view of what was collected. A role definition missing here is why an evaluation elsewhere returns `indeterminate`, and a principal missing here is why a grant elsewhere shows an unresolved object id.
 
+{% include screenshot.html file="fid2-iam-roles-principals.png" title="Roles reference: definitions beside the cached principal directory" caption="Use the role and principal lists to check whether the required reference data was collected. A missing definition does not mean a role has no permissions, and an unresolved principal does not prove deletion. This example uses an empty search rather than a filtered subset." %}
+
 ### Diagnostics
 
 Served by `GET /api/iam/diagnostics`, with the deny count read from `GET /api/iam/overview`.
@@ -91,9 +95,11 @@ Served by `GET /api/iam/diagnostics`, with the deny count read from `GET /api/ia
 | `Throttled` | Rate-limited — **no trustworthy rows** |
 | `Failed` | Errored — **no trustworthy rows** |
 
-The last three are the set that means *this scope produced nothing you can rely on*. `PartiallyCollected` is deliberately not in that set: a tenant without the licence for PIM endpoints is partial on every scope forever, and treating partial as untrustworthy would make every delta refresh re-collect the whole estate while still reporting that it had done a delta.
+The last three are the set that means *this scope produced nothing you can rely on*. `PartiallyCollected` is deliberately not in that set: a tenant without the license for PIM endpoints is partial on every scope forever, and treating partial as untrustworthy would make every delta refresh re-collect the whole estate while still reporting that it had done a delta.
 
 **Errors and warnings** lists every collected row carrying an attention status or an error message, with its collector, status and message.
+
+{% include screenshot.html file="fid2-iam-collector-diagnostics.png" title="IAM diagnostics: successful, unauthorized and throttled collectors" caption="Read status and message per collector and scope, not just row counts. Zero rows beside Unauthorized is unavailable evidence, not an empty access policy; rows beside Throttled do not establish complete coverage. The deny-assignment banner also limits how grants elsewhere can be interpreted." %}
 
 ## Freshness and scope behavior
 
@@ -143,7 +149,7 @@ The last three are the set that means *this scope produced nothing you can rely 
 | --- | --- |
 | A collector shows `Unauthorized` | The connection lacks read access at that scope. Nothing derived from that scope is trustworthy — fix the permission and re-collect before reading any other tab for it. |
 | A collector shows `Throttled` | Azure rate-limited the collection. Re-run the scope refresh; repeated throttling on a large estate is a reason to refresh scopes individually rather than all at once. |
-| A collector shows `PartiallyCollected` on every scope | Commonly a licensing gap — for example PIM endpoints refusing a tenant without the required licence. Read the message. Partial means rows arrived; it is not treated as untrustworthy. |
+| A collector shows `PartiallyCollected` on every scope | Commonly a licensing gap — for example PIM endpoints refusing a tenant without the required license. Read the message. Partial means rows arrived; it is not treated as untrustworthy. |
 | A scope shows a stale badge but was verified minutes ago | Staleness uses the more recent of collected and verified. If it is still marked stale, neither is inside the TTL. |
 | Insights is empty | No access scan has been loaded, or the filter excludes everything. Clear the filter by picking the tree root, then check Diagnostics. |
 | A pivot count does not match the Overview KPI | Pivots count every collected row including deny assignments; *Total grants* excludes denies because a deny removes access. |

@@ -5,12 +5,15 @@ parent: User guide
 nav_order: 1
 description: Use the Dashboard and conversational investigation experience.
 permalink: /user-guide/core/
+feature_ids: [SHELL_NAV:chat]
 has_children: true
 ---
 
 # Core experience
 
 The core experience connects estate posture with investigation. The Dashboard summarizes configured data and guides setup; Chat handles interactive questions; Deep Investigation coordinates specialist agents when a problem requires structured hypothesis testing.
+
+{% include screenshot.html file="core-dashboard.png" title="Core experience — orient in the Dashboard before investigating" caption="The selected connection and primary workload sit above readiness summaries, recent assessment/investigation links, and setup guidance. Use those entry points to reach the owning feature rather than treating the summary as source evidence. All activity, scores, and readiness indicators shown are synthetic; no live Azure or model run is demonstrated." %}
 
 ## Pages
 

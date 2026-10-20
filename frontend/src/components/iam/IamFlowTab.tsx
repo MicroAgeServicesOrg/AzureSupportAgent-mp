@@ -70,7 +70,7 @@ function PerspectiveBar({ current, onApply }: {
     <div className="flex flex-wrap items-center gap-1">
       <button type="button" onClick={save}
         title="Save the current columns, weighting and filters as a named view"
-        className="shrink-0 rounded border px-1.5 py-0.5 text-[11px] text-gray-600 hover:bg-gray-50">💾 Save view</button>
+        className="shrink-0 rounded-sm border px-1.5 py-0.5 text-[11px] text-gray-600 hover:bg-gray-50">💾 Save view</button>
       {/* One scrolling row rather than two wrapping ones. These are the feature's main
           signpost — hiding them in a menu would cost more than the row they occupy — but two
           rows of them pushed the diagram off the bottom of a laptop screen. */}
@@ -135,7 +135,7 @@ function Caveats({ notes, hiddenEligible, collapsed }: {
   ].filter(Boolean).join(" · ");
 
   return (
-    <div className="rounded border border-amber-200 bg-amber-50 text-xs text-amber-900">
+    <div className="rounded-sm border border-amber-200 bg-amber-50 text-xs text-amber-900">
       <button type="button" onClick={() => setOpen((v) => !v)} aria-expanded={open}
         className="flex w-full items-center gap-2 px-3 py-1.5 text-left">
         <span className="font-medium">
@@ -155,6 +155,7 @@ function Caveats({ notes, hiddenEligible, collapsed }: {
 
 export function IamFlowTab() {
   const connectionId = useIamConnectionId();
+  const fullscreenRef = useRef<HTMLDivElement | null>(null);
   const [scopeFilter, setScopeFilter] = useState<AccessFilter | null>(null);
   const [chain, setChain] = useState<FlowDimension[]>(DEFAULT_CHAIN);
   const [weight, setWeight] = useState<FlowWeight>("grants");
@@ -191,7 +192,7 @@ export function IamFlowTab() {
   );
   /** All columns except the last; the final column must label inward or it clips. */
   const labelRightKinds = useMemo(() => new Set(chain.slice(0, -1)), [chain]);
-  // The legend is built from the colour map, so passing all sixteen dimensions drew sixteen
+  // The legend is built from the color map, so passing all sixteen dimensions drew sixteen
   // swatches under a four-column diagram - most of them for columns that are not on screen.
   const colors = useMemo(
     () => Object.fromEntries(chain.map((d) => [d, NODE_COLORS[d]]).filter(([, c]) => !!c)),
@@ -247,8 +248,14 @@ export function IamFlowTab() {
     <div className="flex h-full min-h-0">
       {/* Scope and workload focus. "Who can reach this workload" is this rail plus a preset,
           not a separate screen. */}
-      <FilterRail filter={scopeFilter} onChange={setScopeFilter} />
-      <div className="min-w-0 flex-1 space-y-3 overflow-auto p-4">
+      <FilterRail
+        filter={scopeFilter}
+        onChange={setScopeFilter}
+        collapsible
+        storageKey="azsup.iam.accessMap.filterRail"
+      />
+      <div ref={fullscreenRef} className="flex min-w-0 flex-1 flex-col overflow-auto bg-gray-50 p-4">
+      <div className="shrink-0 space-y-3">
       {/* What the diagram is counting. Ribbon width is meaningless without it. */}
       <div className="flex flex-wrap items-center gap-2">
         <Chip label="Grants" value={graph.totals.grants.toLocaleString()}
@@ -281,7 +288,7 @@ export function IamFlowTab() {
             value={dimension}
             aria-label={`Column ${index + 1}`}
             onChange={(e) => setColumn(index, e.target.value as FlowDimension | "")}
-            className="rounded border px-1.5 py-0.5 text-[12px]"
+            className="rounded-sm border px-1.5 py-0.5 text-[12px]"
           >
             {ALL_DIMENSIONS.map((option) => (
               <option key={option} value={option}>{DIMENSION_LABELS[option]}</option>
@@ -292,13 +299,13 @@ export function IamFlowTab() {
         {chain.length < 6 && (
           <button type="button"
             onClick={() => setChain((c) => [...c, ALL_DIMENSIONS.find((d) => !c.includes(d)) ?? "role"])}
-            className="rounded border px-1.5 py-0.5 text-[12px] text-gray-600 hover:bg-gray-50">+ column</button>
+            className="rounded-sm border px-1.5 py-0.5 text-[12px] text-gray-600 hover:bg-gray-50">+ column</button>
         )}
 
         <span className="ml-3 text-[11px] font-medium uppercase tracking-wide text-gray-400">Width</span>
         <select value={weight} aria-label="Ribbon width"
           onChange={(e) => setWeight(e.target.value as FlowWeight)}
-          className="rounded border px-1.5 py-0.5 text-[12px]">
+          className="rounded-sm border px-1.5 py-0.5 text-[12px]">
           {(Object.keys(WEIGHT_LABELS) as FlowWeight[]).map((option) => (
             <option key={option} value={option}>{WEIGHT_LABELS[option]}</option>
           ))}
@@ -307,7 +314,7 @@ export function IamFlowTab() {
         <span className="ml-3 text-[11px] font-medium uppercase tracking-wide text-gray-400">Per column</span>
         <select value={maxPerColumn} aria-label="Values per column"
           onChange={(e) => setMaxPerColumn(Number(e.target.value))}
-          className="rounded border px-1.5 py-0.5 text-[12px]">
+          className="rounded-sm border px-1.5 py-0.5 text-[12px]">
           {[8, 12, 20, 40, 100].map((option) => (
             <option key={option} value={option}>Top {option}</option>
           ))}
@@ -326,13 +333,13 @@ export function IamFlowTab() {
 
         <select value={(filters.surfaces ?? [])[0] ?? ""} aria-label="Surface"
           onChange={(e) => setFilters((c) => ({ ...c, surfaces: e.target.value ? [e.target.value] : [] }))}
-          className="rounded border px-1.5 py-0.5 text-[12px]">
+          className="rounded-sm border px-1.5 py-0.5 text-[12px]">
           <option value="">All surfaces</option>
           {surfaces.map((s) => <option key={s} value={s}>{s}</option>)}
         </select>
         <select value={(filters.principalTypes ?? [])[0] ?? ""} aria-label="Principal type"
           onChange={(e) => setFilters((c) => ({ ...c, principalTypes: e.target.value ? [e.target.value] : [] }))}
-          className="rounded border px-1.5 py-0.5 text-[12px]">
+          className="rounded-sm border px-1.5 py-0.5 text-[12px]">
           <option value="">All principal types</option>
           {principalTypes.map((s) => <option key={s} value={s}>{s}</option>)}
         </select>
@@ -340,7 +347,7 @@ export function IamFlowTab() {
           onChange={(e) => setFilters((c) => ({ ...c, query: e.target.value }))}
           placeholder="Filter to a principal, role or scope…"
           title="Filters the underlying access BEFORE the top-N ranking, so it can find someone who is currently inside a folded bar. The search box on the chart only highlights what is already drawn."
-          className="w-64 rounded border px-1.5 py-0.5 text-[12px]" />
+          className="w-64 rounded-sm border px-1.5 py-0.5 text-[12px]" />
       </div>
 
       {/* Facts the diagram cannot draw. Rendering these as silence would be the lie; rendering
@@ -350,16 +357,16 @@ export function IamFlowTab() {
         hiddenEligible={eligibleShown ? 0 : eligibleAvailable}
         collapsed={graph.collapsedColumns}
       />
+      </div>
 
-      <div className="overflow-hidden rounded-lg border bg-white">
+      <div data-testid="accessmap-sankey-region" className="mt-3 min-h-[430px] flex-1">
         <SankeyExplorer
           storageKey="azsup.iam.accessMap"
           nodes={graph.nodes}
           links={graph.links}
-          // Sized so the whole diagram lands inside a 900px laptop viewport rather than
-          // trailing 200px below the fold. The explorer's own Full screen button is the
-          // escape hatch when someone actually wants to study it.
           heightPx={430}
+          fillHeight
+          fullscreenTargetRef={fullscreenRef}
           title="Access map"
           subtitle={
             weight === "grants"
@@ -381,7 +388,11 @@ export function IamFlowTab() {
         />
       </div>
 
-      {selected && <SelectionDetail node={selected} facts={facts} filters={filters} onClose={() => setSelected(null)} />}
+      {selected && (
+        <div className="mt-3 shrink-0">
+          <SelectionDetail node={selected} facts={facts} filters={filters} onClose={() => setSelected(null)} />
+        </div>
+      )}
       </div>
     </div>
   );
@@ -481,18 +492,18 @@ function SelectionDetail({ node, facts, filters, onClose }: {
       {/* The picture is a starting point; these are the screens that let you act. */}
       <div className="mt-2 flex flex-wrap gap-2">
         {scope && (
-          <a className="rounded border px-2 py-0.5 text-xs text-gray-700 hover:bg-gray-50"
+          <a className="rounded-sm border px-2 py-0.5 text-xs text-gray-700 hover:bg-gray-50"
              href={`/iam/evaluate?mode=who&scope=${encodeURIComponent(scope)}`}>
             Who can access this scope →
           </a>
         )}
         {principalId && (
-          <a className="rounded border px-2 py-0.5 text-xs text-gray-700 hover:bg-gray-50"
+          <a className="rounded-sm border px-2 py-0.5 text-xs text-gray-700 hover:bg-gray-50"
              href={`/iam/evaluate?mode=can&principal=${encodeURIComponent(principalId)}`}>
             What can this principal do →
           </a>
         )}
-        <a className="rounded border px-2 py-0.5 text-xs text-gray-700 hover:bg-gray-50"
+        <a className="rounded-sm border px-2 py-0.5 text-xs text-gray-700 hover:bg-gray-50"
            href={`/iam/effective?search=${encodeURIComponent(node.name)}`}>
           Open in the access grid →
         </a>

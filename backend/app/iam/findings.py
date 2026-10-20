@@ -75,7 +75,7 @@ def _scopes_with_directory(tenant_id: str) -> list[dict[str, Any]]:
     ``ServicePrincipalOwners``, ``GroupExpansion``, ``PrincipalDirectory``) was invisible to
     every signal, and any signal gated on one could never be measured.
 
-    Measured on the live `lu` tenant before this fix: **six signals were permanently unmeasured
+    Measured on a real tenant before this fix: **six signals were permanently unmeasured
     on every real tenant** — `esc.mi_privileged`, `esc.mi_shared`,
     `esc.identity_hijack_available`, `esc.fic_loose_subject`, `esc.fic_unknown_issuer` and
     `gov.drift_out_of_band`. Those are the managed-identity and federated-credential escalation
@@ -108,7 +108,7 @@ def evaluate(tenant_id: str, *, utc_offset_minutes: int = 0) -> list[sig.SignalR
     count, so on a tenant twice this size that is most of a second of pure duplication.
 
     Keyed on the cache version, so it expires exactly when the rows do rather than on a timer.
-    The offset is part of the key because after-hours judgement depends on it.
+    The offset is part of the key because after-hours judgment depends on it.
 
     Safe to memoise because NO signal reads wall-clock time: `ctx.now` is unused by every
     signal_def, and the one time-sensitive check compares the reader's offset against timestamps

@@ -10,15 +10,17 @@ has_children: true
 
 # Governance & Identity
 
-These views combine Azure Resource Manager, Policy Insights, and Microsoft Graph evidence. They are analysis-first: Policy simulation does not deploy, Identity does not rotate credentials, and RBAC does not alter assignments.
+These views combine Azure Resource Manager, Policy Insights, and Microsoft Graph evidence. They are analysis-first: Policy simulation does not deploy, Identity does not rotate credentials, and IAM does not alter assignments. Policy exemption apply/remove is an explicit Azure-write exception; legacy Identity ticket creation writes to its chosen connector.
+
+{% include screenshot.html file="identity-accessmap-grant-paths.png" title="Identity evidence example — distinguish direct and group-derived grant paths" caption="IAM Access Map connects synthetic principals through groups and roles to an offline subscription. Its warning strip preserves unreadable-group, deny, eligibility, and folded-tail limitations. This is a grant-path view, not the action-level Effective Access evaluator, an Azure Policy result, or evidence that a tenant was scanned or remediated." %}
 
 | Guide | Use it to |
 | --- | --- |
 | [Azure Policy]({{ site.baseurl }}/user-guide/governance-identity/azure-policy/) | Inventory definitions/assignments/exemptions, analyze compliance and effective policy, plan rollout, and assess drift. |
-| [Entra ID]({{ site.baseurl }}/user-guide/governance-identity/identity/) | Start here for tenant identity posture: the nine tabs, the snapshot model, and what the score does and does not mean. |
+| [Entra ID]({{ site.baseurl }}/user-guide/governance-identity/identity/) | Start here for tenant identity posture: the ten tabs, the snapshot model, and what the score does and does not mean. |
 | [IAM]({{ site.baseurl }}/user-guide/governance-identity/iam/) | Review effective Azure/Entra access, privileged and data-plane exposure, scopes, roles, and diagnostics. |
 
-### Entra ID deep dives
+## Entra ID deep dives
 
 | Guide | Use it to |
 | --- | --- |
@@ -29,11 +31,12 @@ These views combine Azure Resource Manager, Policy Insights, and Microsoft Graph
 | [Applications and consent]({{ site.baseurl }}/user-guide/governance-identity/entra-applications/) | Assess app risk, credential expiry, ownership, granted permissions, and tenant consent posture. |
 | [Risk and sign-ins]({{ site.baseurl }}/user-guide/governance-identity/entra-signals/) | Interpret MFA registration, legacy authentication, failure clusters, and Identity Protection risk. |
 | [Governance]({{ site.baseurl }}/user-guide/governance-identity/entra-governance/) | Review access reviews, entitlement expiry, lifecycle workflows, and governance coverage. |
-| [Guests (B2B)]({{ site.baseurl }}/user-guide/governance-identity/entra-guests/) | Review the external population as a lifecycle, roll it up per partner organisation, and see which partners no cross-tenant policy names. |
+| [Guests (B2B)]({{ site.baseurl }}/user-guide/governance-identity/entra-guests/) | Review the external population as a lifecycle, roll it up per partner organization, and see which partners no cross-tenant policy names. |
 | [Blast radius]({{ site.baseurl }}/user-guide/governance-identity/entra-blast-radius/) | Trace derived escalation paths from an entry point to tenant-level power. |
 | [Findings and scanners]({{ site.baseurl }}/user-guide/governance-identity/entra-findings-scanners/) | Work the inbox, run proactive scanners, and apply finding workflow state. |
+| [Investigate a principal]({{ site.baseurl }}/user-guide/governance-identity/entra-investigate/) | Correlate one identity's cached access and findings, inspect an explicit warning when an account is disabled, request audited activity, and export provenance. |
 
-### IAM deep dives
+## IAM deep dives
 
 | Guide | Use it to |
 | --- | --- |

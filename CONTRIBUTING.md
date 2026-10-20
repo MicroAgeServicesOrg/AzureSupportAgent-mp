@@ -24,6 +24,8 @@ deploy/     Infrastructure-as-Code for one-click Azure deploys (where present)
 - **Node.js 20+**
 - **Docker** (optional — for building/running the container image)
 - **Azure CLI** (`az`) — only needed to exercise live Azure features
+- **Azure Quick Review** (`winget install Microsoft.Azure.QuickReview`) — optional for native
+  development; the chat tool is withheld when absent, and the container image includes it
 
 ## Local Setup
 
@@ -41,10 +43,10 @@ Run the backend (uses SQLite locally; set `DATABASE_URL` for PostgreSQL):
 
 ```pwsh
 $env:DEV_AUTH = "true"   # local dev: bypass login with an admin principal
-python -m uvicorn app.main:app --app-dir backend --host 127.0.0.1 --port 8000
+python -m uvicorn app.main:app --app-dir backend --host 127.0.0.1 --port 35001
 ```
 
-Health check: <http://127.0.0.1:8000/healthz>
+Health check: <http://127.0.0.1:35001/healthz>
 
 ### Frontend
 
@@ -53,7 +55,7 @@ npm --prefix frontend install
 npm --prefix frontend run dev
 ```
 
-App: <http://localhost:5173>
+App: <http://localhost:35000>
 
 ### Full stack via Docker Compose
 
@@ -75,10 +77,27 @@ cd backend; .\.venv\Scripts\python.exe -m pytest tests/ -q
 
 # Frontend type-check (must be clean — the project treats TS errors as failures)
 cd ..\frontend; npx tsc -p tsconfig.json --noEmit
+
+# Bundle-budget script regression tests
+node --test scripts/bundle-budget.test.mjs
 ```
 
 > Note: the frontend build flags unused variables/imports (TS6133). Remove dead
 > code rather than suppressing it.
+
+Keep Boto3 and Botocore pins compatible, and update Tiptap packages together because
+their peers require matching versions. Do not bypass dependency conflicts with
+`--force` or `--legacy-peer-deps`.
+
+Styles use Tailwind 4 through `@tailwindcss/postcss`. Theme colors and animations
+live in `src/index.css`; its compatibility layer preserves the previous default
+border color. Validate the built UI after changing CSS tooling or utility names.
+An intentional dependency-size change may update the total bundle budget only
+after measuring it; entry-size and largest-chunk gates still apply.
+
+The XLSX scaling test retains a less-than-10x timing bound for 4x the rows. It
+collects prior test garbage before each sample and compares three-sample medians;
+the deterministic per-row scan guard remains independent of timing.
 
 ## Making Changes
 

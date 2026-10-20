@@ -5,6 +5,7 @@ parent: Connectors
 nav_order: 4
 description: Query a configured Grafana datasource, list alerts, and create annotations.
 permalink: /connectors/grafana/
+feature_ids: [CONNECTOR:grafana]
 ---
 
 # Grafana
@@ -13,6 +14,8 @@ permalink: /connectors/grafana/
 **Mode:** token
 
 Configure Grafana base URL, API/service-account token, and optional default datasource UID. The health test calls Grafana's health endpoint.
+
+{% include screenshot.html file="fconn-grafana-token.png" title="Grafana token mode — unsaved setup" caption="Native UNSAVED setup with Enabled off, an empty API token, a non-resolving example URL, and a fictional datasource UID. No connector was saved, authenticated, or tested; no datasource query or annotation was created. This wizard has no dashboard selector or query editor." %}
 
 Implemented tools:
 

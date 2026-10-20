@@ -145,10 +145,12 @@ export function HealthRadar({ health, size = 120 }: { health: WorkloadProfile["h
 export function ScoreBadge({ score, band, size = "md" }: { score: number | null; band: string; size?: "sm" | "md" | "lg" }) {
   const dim = size === "lg" ? "h-14 w-14 text-xl" : size === "sm" ? "h-8 w-8 text-xs" : "h-11 w-11 text-base";
   const color = bandColor(band);
+  // Keep the accent fill/ring, but use darker text on the tinted badge surface.
+  const textTone = band === "good" ? "text-green-800" : band === "warn" ? "text-amber-800" : band === "poor" ? "text-red-800" : "text-gray-600";
   return (
     <div
-      className={`flex ${dim} items-center justify-center rounded-full font-bold tabular-nums`}
-      style={{ color, backgroundColor: `${color}1a`, border: `2px solid ${color}55` }}
+      className={`flex ${dim} items-center justify-center rounded-full font-bold tabular-nums ${textTone}`}
+      style={{ backgroundColor: `${color}1a`, border: `2px solid ${color}55` }}
       title={score == null ? "Not analyzed yet" : `Health score ${score}/100`}
     >
       {score == null ? "—" : score}
@@ -261,13 +263,13 @@ export function ClassPills({ c }: { c: WorkloadProfile["classification"] }) {
   return (
     <div className="flex flex-wrap items-center gap-1">
       {c.environment && c.environment !== "unknown" && (
-        <span className={`rounded px-1.5 py-0.5 text-[10px] font-medium uppercase tracking-wide ring-1 ${ENV_STYLE[c.environment] ?? ENV_STYLE.unknown}`}>{c.environment}</span>
+        <span className={`rounded-sm px-1.5 py-0.5 text-[10px] font-medium uppercase tracking-wide ring-1 ${ENV_STYLE[c.environment] ?? ENV_STYLE.unknown}`}>{c.environment}</span>
       )}
       {c.criticality && (
-        <span className={`rounded px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-wide ${CRIT_STYLE[c.criticality] ?? CRIT_STYLE.low}`}>{c.criticality}</span>
+        <span className={`rounded-sm px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-wide ${CRIT_STYLE[c.criticality] ?? CRIT_STYLE.low}`}>{c.criticality}</span>
       )}
       {c.data_classification && c.data_classification !== "unknown" && (
-        <span className="rounded bg-slate-100 px-1.5 py-0.5 text-[10px] font-medium uppercase tracking-wide text-slate-600">{c.data_classification}</span>
+        <span className="rounded-sm bg-slate-100 px-1.5 py-0.5 text-[10px] font-medium uppercase tracking-wide text-slate-600">{c.data_classification}</span>
       )}
     </div>
   );

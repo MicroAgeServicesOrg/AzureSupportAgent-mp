@@ -11,7 +11,6 @@ from __future__ import annotations
 import asyncio
 import csv
 import io
-import json
 import logging
 import re
 from datetime import datetime, timezone
@@ -22,6 +21,7 @@ from pydantic import BaseModel
 from sse_starlette.sse import EventSourceResponse
 
 from app.architectures import registry as arch_registry
+from app.core.xlsx import cell_safe
 from app.core.genjob import JobRegistry
 from app.core.security import Principal, require_permission
 from app.fmea import compute
@@ -359,10 +359,11 @@ async def export_fmea_endpoint(fmea_id: str, format: str = "csv", principal: Pri
 
     buf = io.StringIO()
     writer = csv.writer(buf)
-    writer.writerow([doc.get("title") or f"FMEA — {wl_name}"])
+    writer.writerow([cell_safe(doc.get("title") or f"FMEA — {wl_name}")])
     for table in doc.get("tables", []) or []:
         writer.writerow([])
-        writer.writerow([table.get("name", "Table")] + ([table.get("scope_ref", "")] if table.get("scope_ref") else []))
+        writer.writerow([cell_safe(table.get("name", "Table"))]
+                        + ([cell_safe(table.get("scope_ref", ""))] if table.get("scope_ref") else []))
         writer.writerow([label for _key, label in _CSV_COLUMNS])
         for row in table.get("rows", []) or []:
             writer.writerow([_csv_cell(row.get(key)) for key, _label in _CSV_COLUMNS])
@@ -375,7 +376,7 @@ async def export_fmea_endpoint(fmea_id: str, format: str = "csv", principal: Pri
 def _csv_cell(value: Any) -> str:
     if value is None:
         return ""
-    return str(value)
+    return str(cell_safe(str(value)))
 
 
 # ------------------------------------------------------------------------- AI generation
@@ -509,8 +510,8 @@ async def generate_fmea_stream_endpoint(
             extra_context=extra_context, focus=focus, target_fmea_id=None,
         )
 
-    _fmea_jobs.start(key, _runner)
-    return EventSourceResponse(_fmea_jobs.stream(key))
+    await _fmea_jobs.start(key, _runner, tenant_id=principal.tenant_id)
+    return EventSourceResponse(_fmea_jobs.stream(key, tenant_id=principal.tenant_id))
 
 
 @router.post("/{fmea_id}/generate/stream")
@@ -534,14 +535,15 @@ async def regenerate_fmea_stream_endpoint(
             extra_context=extra_context, focus=focus, target_fmea_id=fmea_id,
         )
 
-    _fmea_jobs.start(key, _runner)
-    return EventSourceResponse(_fmea_jobs.stream(key))
+    await _fmea_jobs.start(key, _runner, tenant_id=principal.tenant_id)
+    return EventSourceResponse(_fmea_jobs.stream(key, tenant_id=principal.tenant_id))
 
 
 @router.get("/{fmea_id}/generate/job")
 async def fmea_generate_job_endpoint(fmea_id: str, principal: Principal = Depends(get_principal)):
     """Current generation-job status for an FMEA doc (for reconnect on page visit)."""
-    return {"job": _fmea_jobs.public_job(_fmea_jobs.get_job(f"fmea:{fmea_id}"))}
+    job = await _fmea_jobs.get_job(f"fmea:{fmea_id}", tenant_id=principal.tenant_id)
+    return {"job": _fmea_jobs.public_job(job)}
 
 
 @router.post("/{fmea_id}/tables/{table_id}/generate/stream")
@@ -568,7 +570,7 @@ async def regenerate_fmea_table_stream_endpoint(
             target_fmea_id=fmea_id, target_table_id=table_id,
         )
 
-    _fmea_jobs.start(key, _runner)
-    return EventSourceResponse(_fmea_jobs.stream(key))
+    await _fmea_jobs.start(key, _runner, tenant_id=principal.tenant_id)
+    return EventSourceResponse(_fmea_jobs.stream(key, tenant_id=principal.tenant_id))
 
 

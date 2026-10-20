@@ -1,6 +1,7 @@
 """Pytest bootstrap: make the `app` package importable when tests run from any CWD."""
 import os
 import sys
+import asyncio
 
 import pytest
 
@@ -40,7 +41,7 @@ _SLOW_TEST_FILES: set[str] = {
 
 
 # ------------------------------------------------------- tests that need a live Azure env
-# These assert behaviour that can only be exercised against a real Azure connection: they
+# These assert behavior that can only be exercised against a real Azure connection: they
 # shell out to `az` or resolve a configured connection, and fail with "Please run 'az login'"
 # or "No Azure connection is configured for this scope" when neither exists.
 #
@@ -104,11 +105,120 @@ def _ensure_test_schema():
     yield
 
 
+@pytest.fixture
+async def durable_job_registry_factory(tmp_path):
+    """Create JobRegistry instances on a per-test WAL database.
+
+    Durable registry tests must not share the application's SQLite file across xdist workers;
+    unlike the former in-memory implementation, progress and leases are real writes.
+    """
+    from sqlalchemy import event
+    from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
+
+    from app.core.db import Base
+    from app.core.genjob import JobRegistry
+
+    engine = create_async_engine(
+        f"sqlite+aiosqlite:///{tmp_path / 'route-durable-jobs.db'}",
+        connect_args={"timeout": 30},
+    )
+
+    @event.listens_for(engine.sync_engine, "connect")
+    def _sqlite_pragmas(dbapi_connection, _connection_record):  # noqa: ANN001
+        cursor = dbapi_connection.cursor()
+        cursor.execute("PRAGMA journal_mode=WAL")
+        cursor.execute("PRAGMA busy_timeout=30000")
+        cursor.execute("PRAGMA foreign_keys=ON")
+        cursor.close()
+
+    async with engine.begin() as connection:
+        await connection.run_sync(Base.metadata.create_all)
+    sessions = async_sessionmaker(engine, expire_on_commit=False)
+    registries = []
+
+    def create(name: str) -> JobRegistry:
+        registry = JobRegistry(name, session_factory=sessions, poll_seconds=0.01)
+        registries.append(registry)
+        return registry
+
+    yield create
+    tasks = [task for registry in registries for task in registry._tasks.values()]  # noqa: SLF001
+    for task in tasks:
+        if not task.done():
+            task.cancel()
+    if tasks:
+        await asyncio.gather(*tasks, return_exceptions=True)
+    await engine.dispose()
+
+
+@pytest.fixture
+async def durable_job_sessions(tmp_path):
+    """Per-test WAL database for feature adapters backed by DurableJobExecutor."""
+    from sqlalchemy import event
+    from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
+
+    from app.core.db import Base
+
+    engine = create_async_engine(
+        f"sqlite+aiosqlite:///{tmp_path / 'feature-durable-jobs.db'}",
+        connect_args={"timeout": 30},
+    )
+
+    @event.listens_for(engine.sync_engine, "connect")
+    def _sqlite_pragmas(dbapi_connection, _connection_record):  # noqa: ANN001
+        cursor = dbapi_connection.cursor()
+        cursor.execute("PRAGMA journal_mode=WAL")
+        cursor.execute("PRAGMA busy_timeout=30000")
+        cursor.execute("PRAGMA foreign_keys=ON")
+        cursor.close()
+
+    async with engine.begin() as connection:
+        await connection.run_sync(Base.metadata.create_all)
+    sessions = async_sessionmaker(engine, expire_on_commit=False)
+    yield sessions
+    from app.core.durable_jobs import shutdown_executors
+
+    await shutdown_executors()
+    await engine.dispose()
+
+
 @pytest.fixture(autouse=True)
 def _isolate_alerts_manager_cache():
     alerts_manager_cache.reset_for_tests()
     yield
     alerts_manager_cache.reset_for_tests()
+
+
+@pytest.fixture(autouse=True)
+def _isolate_membership_index():
+    """The reverse-membership memo is keyed on (tenant, snapshot stamp), and fixtures across
+    the suite share tenant "t" with no stamp. Without this, whichever test ran first decides
+    what every later one sees."""
+    from app.entra import investigate_members
+
+    investigate_members.reset_membership_index()
+    yield
+    investigate_members.reset_membership_index()
+
+
+@pytest.fixture(autouse=True)
+def _no_azure_cli(monkeypatch):
+    """Never let a unit test shell out to the Azure CLI.
+
+    `credentials._cli_token` is the last resort of the default credential chain, and it runs
+    `az account get-access-token` with a 40-second timeout. A test that forgets to stub its
+    token path does not fail — it *waits*, and on a host where process start is slow that is
+    40 seconds per occurrence. Measured on this suite: the ten slowest tests were every one of
+    them a multiple of that timeout, together ~650 seconds.
+
+    Tests that need a working token stub `get_arm_token` (or the connection) themselves.
+    """
+    from app.azure import credentials
+
+    async def _blocked(*_args, **_kwargs):
+        return None, "Azure CLI is unavailable to tests; stub the token instead."
+
+    monkeypatch.setattr(credentials, "_cli_token", _blocked)
 
 
 def pytest_collection_modifyitems(config, items):  # noqa: ARG001

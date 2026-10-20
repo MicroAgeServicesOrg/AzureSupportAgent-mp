@@ -5,10 +5,15 @@ import { useAuth } from "./components/AuthContext";
 import LoginPage, { ForcePasswordChange } from "./components/LoginPage";
 import { HelpMenu } from "./components/HelpMenu";
 import { CommandPalette } from "./components/CommandPalette";
+import { RecentItemTracker } from "./components/RecentItems";
 import { WelcomeModal } from "./components/WelcomeModal";
 import { ContextDocumentationHelp } from "./components/ContextDocumentationHelp";
 import { APP_VERSION, APP_VERSION_DISPLAY } from "./version";
 import { api } from "./api";
+import { NoAccessScreen } from "./components/NoAccessScreen";
+import { UserMenu } from "./components/UserMenu";
+import { adminRequirement } from "./components/routeAccess";
+import { canAccess, hasEffectiveAccess } from "./utils/accessControl";
 
 // Friendly labels for the active AI provider shown in the top bar.
 const PROVIDER_LABELS: Record<string, string> = {
@@ -41,12 +46,12 @@ function LegacyIamRedirect() {
 }
 
 export default function App() {
-  const { user, loading, logout } = useAuth();
+  const { user, loading, logout, refresh, has } = useAuth();
   const location = useLocation();
   const activeLlmQ = useQuery({
     queryKey: ["activeLlm"],
     queryFn: api.activeLlm,
-    enabled: !!user,
+    enabled: hasEffectiveAccess(user),
     staleTime: 60_000,
     retry: false,
   });
@@ -67,6 +72,16 @@ export default function App() {
     return <ForcePasswordChange />;
   }
 
+  if (!hasEffectiveAccess(user)) {
+    return (
+      <NoAccessScreen
+        user={user}
+        onLogout={() => void logout()}
+        onRefresh={refresh}
+      />
+    );
+  }
+
   const aiProvider = activeLlmQ.data?.provider ?? "";
   const aiModel = activeLlmQ.data?.model ?? "";
   const aiProviderLabel = PROVIDER_LABELS[aiProvider] ?? aiProvider;
@@ -80,7 +95,7 @@ export default function App() {
             Azure Support Agent
           </Link>
         </div>
-        <div className="flex items-center gap-3 text-sm">
+        <div className="min-w-0 flex items-center gap-3 text-sm">
           <button
             onClick={() => {
               // Synthesize the palette hotkey so the button mirrors Ctrl/⌘+K.
@@ -90,12 +105,12 @@ export default function App() {
             className="hidden items-center gap-2 rounded-lg border border-white/20 bg-white/10 px-2.5 py-1 text-xs text-white/80 hover:bg-white/20 sm:flex"
           >
             <span>⌕ Search</span>
-            <kbd className="rounded bg-white/20 px-1 text-[10px]">⌘K</kbd>
+            <kbd className="rounded-sm bg-white/20 px-1 text-[10px]">⌘K</kbd>
           </button>
           <HelpMenu />
           <ContextDocumentationHelp pathname={location.pathname} />
           {aiProvider ? (
-            user.role === "admin" ? (
+            has("settings.read") ? (
               <Link
                 to="/admin/providers"
                 title="Change AI provider"
@@ -103,8 +118,8 @@ export default function App() {
               >
                 <span>🧠</span>
                 <span className="font-medium text-white/90">{aiProviderLabel}</span>
-                {aiModel && <span className="text-white/50">· {aiModel}</span>}
-                <span className="text-white/60">⚙︎</span>
+                {aiModel && <span className="text-white/80">· {aiModel}</span>}
+                <span className="text-white/80">⚙︎</span>
               </Link>
             ) : (
               <span
@@ -113,38 +128,30 @@ export default function App() {
               >
                 <span>🧠</span>
                 <span className="font-medium text-white/90">{aiProviderLabel}</span>
-                {aiModel && <span className="text-white/50">· {aiModel}</span>}
+                {aiModel && <span className="text-white/80">· {aiModel}</span>}
               </span>
             )
           ) : null}
           <span
-            className="rounded bg-white/10 px-1.5 py-0.5 text-xs font-medium text-white/70"
+            className="rounded-sm bg-white/10 px-1.5 py-0.5 text-xs font-medium text-white/70"
             title={`Azure Support Agent ${APP_VERSION}`}
           >
             {APP_VERSION_DISPLAY}
           </span>
-          <Link to="/dashboard" className="rounded px-2 py-1 hover:bg-white/10">
+          <Link to="/dashboard" className="hidden rounded-sm px-2 py-1 hover:bg-white/10 lg:inline-block">
             Dashboard
           </Link>
-          {user.role === "admin" && (
-            <Link to="/admin" className="rounded px-2 py-1 hover:bg-white/10">
+          {canAccess(user, adminRequirement(undefined)) && (
+            <Link to="/admin" className="hidden rounded-sm px-2 py-1 hover:bg-white/10 lg:inline-block">
               Settings
             </Link>
           )}
-          <span className="rounded bg-white/10 px-2 py-1">
-            {`${user.email} (${user.role})`}
-          </span>
-          <button
-            onClick={() => void logout()}
-            className="rounded px-2 py-1 hover:bg-white/10"
-            title="Sign out"
-          >
-            Sign out
-          </button>
+          <UserMenu user={user} onLogout={() => void logout()} onRefresh={refresh} />
         </div>
       </header>
 
       <CommandPalette />
+      <RecentItemTracker />
       <WelcomeModal />
 
       <div className="min-h-0 flex-1">
@@ -214,6 +221,8 @@ export default function App() {
           <Route path="/backupdr" element={<ChatView />} />
           <Route path="/backup-manager" element={<ChatView />} />
           <Route path="/backup-manager/:tab" element={<ChatView />} />
+          <Route path="/resiliency" element={<ChatView />} />
+          <Route path="/resiliency/:tab" element={<ChatView />} />
           <Route path="/capability" element={<ChatView />} />
           <Route path="/evidence" element={<ChatView />} />
           <Route path="/cases" element={<ChatView />} />

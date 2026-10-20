@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useQuery } from "@tanstack/react-query";
 import { useNavigate } from "react-router-dom";
 import {
   ReactFlow,
@@ -32,6 +33,8 @@ import {
   type ArchGroup,
   type ArchitectureCatalog,
   type ArchitecturePaletteItem,
+  type ArchitectureNodePrice,
+  type ArchitecturePricing,
   type AssessmentFinding,
 } from "../api";
 import { AzureIcon, friendlyResourceType, friendlyLocation } from "./AzureIcon";
@@ -53,7 +56,7 @@ const EDGE_KINDS: { id: ArchEdgeKind; label: string; color: string }[] = [
 ];
 const edgeColor = (k: string) => EDGE_KINDS.find((e) => e.id === k)?.color ?? "#6b7280";
 
-// --- Azure semantics helpers (hosting model, reachability, cost, connectors) --------
+// --- Azure semantics helpers (hosting model, reachability, retail rates, connectors) -
 // Hosting model (shared-responsibility lens). "Net" = network plumbing, "" = concept/note.
 function hostingModel(type: string): "IaaS" | "PaaS" | "SaaS" | "Net" | "" {
   const t = (type || "").toLowerCase();
@@ -69,6 +72,7 @@ const HOSTING_META: Record<string, { label: string; cls: string }> = {
   SaaS: { label: "SaaS", cls: "bg-violet-100 text-violet-700" },
   Net: { label: "Net", cls: "bg-teal-100 text-teal-700" },
 };
+const PRICE_CURRENCIES = ["USD", "EUR", "GBP", "CAD", "AUD", "JPY", "CHF", "SEK", "NOK", "DKK", "INR", "BRL"];
 
 // Public vs private reachability from real config (meta.publicNetworkAccess, type, PE link).
 function isPublicType(t: string) { return /publicipaddresses|applicationgateways|frontdoors|trafficmanager|bastionhosts/.test((t || "").toLowerCase()); }
@@ -78,43 +82,36 @@ function isExposablePaaS(t: string) {
   return /storage\/storageaccounts|sql\/servers|documentdb|keyvault\/vaults|cache\/redis|servicebus\/namespaces|web\/sites|containerregistry|cognitiveservices|search\/searchservices|eventhub/.test((t || "").toLowerCase());
 }
 
-// Very rough indicative monthly cost (USD) by type + sku — for visibility, NOT billing.
-function estMonthlyCost(type: string, sku: string): number {
-  const t = (type || "").toLowerCase(), s = (sku || "").toLowerCase();
-  if (/virtualmachinescalesets/.test(t)) return 280;
-  if (/virtualmachines/.test(t)) { if (/e\d|m\d/.test(s)) return 350; if (/d.*s?_v|standard_d/.test(s)) return 140; if (/b1|b2|basic/.test(s)) return 40; return 120; }
-  if (/\/disks/.test(t)) return /premium/.test(s) ? 20 : 6;
-  if (/web\/serverfarms|serverfarm/.test(t)) { if (/p\dv|premium/.test(s)) return 220; if (/s\d|standard/.test(s)) return 75; if (/b\d|basic/.test(s)) return 13; return 55; }
-  if (/web\/sites|sites\b/.test(t)) return /y1|consumption/.test(s) ? 0 : 0; // billed via plan / consumption
-  if (/sql\/managedinstances/.test(t)) return /gp_gen5_8|generalpurpose/.test(s) ? 1500 : 1100; // SQL MI is pricey
-  if (/sql\/servers/.test(t)) return /gp_|generalpurpose/.test(s) ? 380 : 200;
-  if (/documentdb|cosmos/.test(t)) return 60;
-  if (/storage\/storageaccounts/.test(t)) return 25;
-  if (/cache\/redis/.test(t)) return /premium/.test(s) ? 410 : 55;
-  if (/azurefirewalls/.test(t)) return 950;
-  if (/applicationgateways/.test(t)) return /waf/.test(s) ? 330 : 180;
-  if (/frontdoors/.test(t)) return /premium/.test(s) ? 330 : 35;
-  if (/virtualnetworkgateways/.test(t)) return /vpngw[2-5]/.test(s) ? 380 : 140;
-  if (/bastionhosts/.test(t)) return 140;
-  if (/natgateways/.test(t)) return 45;
-  if (/loadbalancers/.test(t)) return /standard/.test(s) ? 22 : 0;
-  if (/publicipaddresses/.test(t)) return 4;
-  if (/managedclusters|kubernetes/.test(t)) return 220;
-  if (/containerapps|managedenvironments/.test(t)) return 40;
-  if (/containerregistry/.test(t)) return /premium/.test(s) ? 50 : /standard/.test(s) ? 20 : 5;
-  if (/servicebus/.test(t)) return /premium/.test(s) ? 680 : 10;
-  if (/eventhub/.test(t)) return /premium|dedicated/.test(s) ? 700 : 22;
-  if (/apimanagement/.test(t)) return /premium/.test(s) ? 2800 : /standard/.test(s) ? 670 : /developer/.test(s) ? 50 : 140;
-  if (/logic\/workflows/.test(t)) return 15;
-  if (/datafactory/.test(t)) return 80;
-  if (/synapse\/workspaces/.test(t)) return /dw\d/.test(s) ? 1080 : 200; // DW200c ~$1.5/hr
-  if (/powerbidedicated/.test(t)) return /a1|p1/.test(s) ? 750 : 1500;
-  if (/purview/.test(t)) return 400;
-  if (/recoveryservices/.test(t)) return 60;
-  if (/cognitiveservices|openai/.test(t)) return 100;
-  return 0;
+function formatMoney(currency: string, value: number): string {
+  try {
+    return new Intl.NumberFormat(undefined, { style: "currency", currency, maximumFractionDigits: value < 10 ? 2 : 0 }).format(value);
+  } catch {
+    return `${currency} ${value.toFixed(value < 10 ? 2 : 0)}`;
+  }
 }
-function fmtUsd(n: number): string { return n >= 1000 ? `$${(n / 1000).toFixed(1)}k` : `$${Math.round(n)}`; }
+
+function priceBadge(price: ArchitectureNodePrice): { text: string; cls: string } {
+  if (price.status === "priced_monthly" && price.monthly_estimate !== null) {
+    return { text: `~${formatMoney(price.currency, price.monthly_estimate)}/mo`, cls: "bg-emerald-50 text-emerald-700" };
+  }
+  if (price.status === "rate_only") {
+    const component = price.components[0];
+    return component
+      ? { text: `${price.currency} ${component.retail_price.toLocaleString()}/${component.unit_of_measure}`, cls: "bg-sky-50 text-sky-700" }
+      : { text: "Usage required", cls: "bg-sky-50 text-sky-700" };
+  }
+  if (price.status === "free") return { text: "Free meter", cls: "bg-emerald-50 text-emerald-700" };
+  if (price.status === "ambiguous") return { text: "Choose meter", cls: "bg-amber-50 text-amber-700" };
+  if (price.status === "not_applicable") return { text: "No direct meter", cls: "bg-gray-100 text-gray-500" };
+  if (price.status === "unmatched") return { text: "Not priced", cls: "bg-gray-100 text-gray-500" };
+  return { text: "Price unavailable", cls: "bg-red-50 text-red-600" };
+}
+
+function priceTitle(price: ArchitectureNodePrice, asOf: string): string {
+  const components = price.components.slice(0, 4).map((c) => `${c.meter_name}: ${price.currency} ${c.retail_price}/${c.unit_of_measure}`).join(" · ");
+  const source = asOf ? `Azure Retail Prices · as of ${new Date(asOf).toLocaleString()}` : "Azure Retail Prices";
+  return [source, price.reason, components].filter(Boolean).join("\n");
+}
 
 const isVNet = (t: string) => /virtualnetworks/.test((t || "").toLowerCase()) && !/subnets/.test((t || "").toLowerCase());
 const isGatewayType = (t: string) => /virtualnetworkgateways|expressroutecircuits|connections\b/.test((t || "").toLowerCase());
@@ -153,15 +150,15 @@ function AzureNodeCard({ data, selected }: NodeProps) {
     const dimN = Boolean(d._dim);
     return (
       <div
-        className={`relative min-w-[140px] max-w-[260px] rounded-md border px-3 py-2 text-[12px] leading-snug shadow-sm transition ${selected ? "ring-2 ring-amber-500" : ""}`}
+        className={`relative min-w-[140px] max-w-[260px] rounded-md border px-3 py-2 text-[12px] leading-snug shadow-xs transition ${selected ? "ring-2 ring-amber-500" : ""}`}
         style={{ background: "#fef9c3", borderColor: "#fde047", color: "#713f12", opacity: dimN ? 0.3 : 1, whiteSpace: "pre-wrap" }}
       >
         {["Left", "Right", "Top", "Bottom"].map((side) => {
           const pos = Position[side as keyof typeof Position];
           return (
             <span key={side}>
-              <Handle id={`t-${side}`} type="target" position={pos} className="!h-2 !w-2 !border !border-amber-300 !bg-amber-50" />
-              <Handle id={`s-${side}`} type="source" position={pos} className="!h-2 !w-2 !border !border-amber-300 !bg-amber-400" />
+              <Handle id={`t-${side}`} type="target" position={pos} className="h-2! w-2! border! border-amber-300! bg-amber-50!" />
+              <Handle id={`s-${side}`} type="source" position={pos} className="h-2! w-2! border! border-amber-300! bg-amber-400!" />
             </span>
           );
         })}
@@ -182,10 +179,12 @@ function AzureNodeCard({ data, selected }: NodeProps) {
   const pillarTint = (d._pillarTint as string) || "";
   const hosting = azureView ? hostingModel(d.type) : "";
   const reach = d._reach as string; // "public" | "private" | ""
-  const cost = Number(d._cost) || 0;
+  const price = d._pricing as ArchitectureNodePrice | undefined;
+  const pricingAsOf = String(d._pricingAsOf || "");
+  const badge = price ? priceBadge(price) : null;
   return (
     <div
-      className={`relative min-w-[170px] max-w-[230px] rounded-xl border bg-white shadow-sm transition ${selected ? "ring-2 ring-brand" : "border-gray-200"}`}
+      className={`relative min-w-[170px] max-w-[230px] rounded-xl border bg-white shadow-xs transition ${selected ? "ring-2 ring-brand" : "border-gray-200"}`}
       style={{ borderTopColor: d.color, borderTopWidth: 3, opacity: dim ? 0.2 : 1, boxShadow: pillarTint ? `0 0 0 2px ${pillarTint}, 0 0 14px ${pillarTint}77` : ring ? `0 0 0 2px ${ring}, 0 0 12px ${ring}66` : reach === "public" && azureView ? "0 0 0 2px #ef444466" : undefined }}
     >
       {assessCount > 0 && (
@@ -209,8 +208,8 @@ function AzureNodeCard({ data, selected }: NodeProps) {
         const pos = Position[side as keyof typeof Position];
         return (
           <span key={side}>
-            <Handle id={`t-${side}`} type="target" position={pos} className="!h-2 !w-2 !border !border-gray-300 !bg-white" />
-            <Handle id={`s-${side}`} type="source" position={pos} className="!h-2 !w-2 !border !border-gray-300 !bg-gray-400" />
+            <Handle id={`t-${side}`} type="target" position={pos} className="h-2! w-2! border! border-gray-300! bg-white!" />
+            <Handle id={`s-${side}`} type="source" position={pos} className="h-2! w-2! border! border-gray-300! bg-gray-400!" />
           </span>
         );
       })}
@@ -226,15 +225,15 @@ function AzureNodeCard({ data, selected }: NodeProps) {
           </div>
           <div className="truncate text-[10px] text-gray-400">{d.type ? friendlyResourceType(d.type) : "concept"}</div>
         </div>
-        {hosting && <span className={`shrink-0 rounded px-1 py-0.5 text-[8px] font-bold ${HOSTING_META[hosting].cls}`} title={`${HOSTING_META[hosting].label} (hosting model)`}>{HOSTING_META[hosting].label}</span>}
+        {hosting && <span className={`shrink-0 rounded-sm px-1 py-0.5 text-[8px] font-bold ${HOSTING_META[hosting].cls}`} title={`${HOSTING_META[hosting].label} (hosting model)`}>{HOSTING_META[hosting].label}</span>}
       </div>
-      {(d.sku || meta.length > 0 || (azureView && cost > 0)) && (
+      {(d.sku || meta.length > 0 || (azureView && badge)) && (
         <div className="flex flex-wrap items-center gap-1 border-t border-gray-100 px-2.5 py-1">
-          {d.sku && <span className="rounded bg-gray-100 px-1.5 py-0.5 text-[9px] text-gray-600">{d.sku}</span>}
+          {d.sku && <span className="rounded-sm bg-gray-100 px-1.5 py-0.5 text-[9px] text-gray-600">{d.sku}</span>}
           {meta.map(([k, v]) => (
-            <span key={k} className="rounded bg-gray-50 px-1.5 py-0.5 text-[9px] text-gray-500" title={`${k}: ${v}`}>{v}</span>
+            <span key={k} className="rounded-sm bg-gray-50 px-1.5 py-0.5 text-[9px] text-gray-500" title={`${k}: ${v}`}>{v}</span>
           ))}
-          {azureView && cost > 0 && <span className="ml-auto rounded bg-emerald-50 px-1.5 py-0.5 text-[9px] font-medium text-emerald-700" title="Rough indicative monthly cost (not billing)">{fmtUsd(cost)}/mo</span>}
+          {azureView && badge && <span data-testid={`architecture-price-${d.id}`} className={`ml-auto max-w-full truncate rounded-sm px-1.5 py-0.5 text-[9px] font-medium ${badge.cls}`} title={priceTitle(price!, pricingAsOf)}>{badge.text}</span>}
         </div>
       )}
     </div>
@@ -255,7 +254,7 @@ function BoundaryLayer({ boxes }: { boxes: { key: string; label: string; x: numb
           return (
             <div key={b.key} className="absolute rounded-xl border-2 border-dashed"
               style={{ left: b.x, top: b.y, width: b.w, height: b.h, borderColor: `${tone}b3`, background: `${tone}14` }}>
-              <span className="absolute left-2 top-1 rounded px-1.5 py-0.5 text-[11px] font-medium" style={{ background: `${tone}26`, color: tone }}>⬚ {b.label}</span>
+              <span className="absolute left-2 top-1 rounded-sm px-1.5 py-0.5 text-[11px] font-medium" style={{ background: `${tone}26`, color: tone }}>⬚ {b.label}</span>
             </div>
           );
         })}
@@ -554,7 +553,7 @@ function ArmTypeCombobox({ value, palette, onChange }: {
   return (
     <div className="relative" ref={ref}>
       <button type="button" onClick={() => { setOpen((v) => !v); setQuery(""); }}
-        className="flex w-full items-center gap-1.5 rounded border px-2 py-1 text-left text-[11px] hover:bg-gray-50">
+        className="flex w-full items-center gap-1.5 rounded-sm border px-2 py-1 text-left text-[11px] hover:bg-gray-50">
         <AzureIcon kind="resource" type={value} className="h-3.5 w-3.5 shrink-0" />
         <span className="min-w-0 flex-1 truncate">{value ? friendlyResourceType(value) : "Select type…"}</span>
         <span className="shrink-0 text-gray-400">▾</span>
@@ -563,7 +562,7 @@ function ArmTypeCombobox({ value, palette, onChange }: {
       {open && (
         <div className="absolute left-0 right-0 z-30 mt-1 rounded-lg border bg-white shadow-xl">
           <input autoFocus value={query} onChange={(e) => setQuery(e.target.value)} placeholder="Search or paste an ARM type…"
-            className="w-full rounded-t-lg border-b px-2 py-1.5 text-[11px] focus:outline-none"
+            className="w-full rounded-t-lg border-b px-2 py-1.5 text-[11px] focus:outline-hidden"
             onKeyDown={(e) => { if (e.key === "Enter" && custom && !exact) pick(custom.toLowerCase()); if (e.key === "Escape") setOpen(false); }} />
           <div className="max-h-56 overflow-y-auto py-1">
             {matches.map((p) => (
@@ -644,8 +643,16 @@ function CanvasInner({
   const [lintOpen, setLintOpen] = useState(true);
   const [boundaryMode, setBoundaryMode] = useState<"none" | "resource_group" | "subscription" | "vnet" | "subnet" | "region">("none");
   const [assessOn, setAssessOn] = useState(false);
-  // Azure-semantics view: reachability badges, hosting-model tags, indicative cost.
+  // Azure-semantics view: reachability badges, hosting-model tags, and live retail rates.
   const [azureView, setAzureView] = useState(true);
+  const [priceCurrency, setPriceCurrency] = useState(() => {
+    try { return localStorage.getItem("azsup.architecture.priceCurrency") || ""; }
+    catch { return ""; }
+  });
+  const [pricing, setPricing] = useState<ArchitecturePricing | null>(null);
+  const [pricingBusy, setPricingBusy] = useState(false);
+  const [pricingError, setPricingError] = useState("");
+  const pricingRequest = useRef(0);
   // Hosting-model filter ("" = all): IaaS | PaaS | SaaS | Net.
   const [hostingFilter, setHostingFilter] = useState("");
   // Well-Architected pillar overlay tint ("" = off).
@@ -669,6 +676,29 @@ function CanvasInner({
   // Live viewport (pan/zoom) so the inspector can be positioned next to the selected node.
   const viewport = useViewport();
   const navigate = useNavigate();
+
+  const loadPricing = useCallback(async (force = false) => {
+    const request = ++pricingRequest.current;
+    setPricingBusy(true); setPricingError("");
+    try {
+      const result = await api.architecturePricing(arch.id, priceCurrency, force);
+      if (request === pricingRequest.current) setPricing(result);
+    } catch (error) {
+      if (request === pricingRequest.current) { setPricing(null); setPricingError(formatError(error)); }
+    } finally {
+      if (request === pricingRequest.current) setPricingBusy(false);
+    }
+  }, [arch.id, priceCurrency]);
+
+  useEffect(() => {
+    if (!azureView) return;
+    void loadPricing(false);
+  }, [azureView, loadPricing]);
+
+  useEffect(() => {
+    try { localStorage.setItem("azsup.architecture.priceCurrency", priceCurrency); }
+    catch { /* storage can be disabled */ }
+  }, [priceCurrency]);
 
   // --- Undo / redo (declared early so the useCallback mutators below can call it) ------
   // History of model snapshots. A live ref mirror of state lets pushHistory stay stable
@@ -880,7 +910,12 @@ function CanvasInner({
     return () => { cancelled = true; };
   }, [arch.workload_id]);
 
+  const pricingByNode = useMemo(
+    () => new Map((pricing?.nodes ?? []).map((price) => [price.node_id, price])),
+    [pricing],
+  );
   const selectedNode = nodes.find((n) => n.id === selNode)?.data;
+  const selectedNodePrice = selectedNode ? pricingByNode.get(selectedNode.id) : undefined;
   const selectedEdge = edges.find((e) => e.id === selEdge);
 
   // Position the inspector panel next to the selected node/edge (in canvas-wrapper
@@ -978,7 +1013,7 @@ function CanvasInner({
   }, [pillarOverlay, assessMap]);
 
   // Rendered nodes: apply category + hosting-model filters (hide), blast-radius / path
-  // dimming, lint badges, and the Azure-semantics overlays (reachability, cost, pillar).
+  // dimming, lint badges, and the Azure-semantics overlays (reachability, pricing, pillar).
   const displayNodes = useMemo(() => nodes.map((n) => {
     const isHidden = hiddenCats.has(n.data.category) || (!!hostingFilter && hostingModel(n.data.type) !== hostingFilter && n.data.type !== "__note__");
     const activeSet = pathSet ? pathSet.nodes : (impactIds ?? null);
@@ -991,16 +1026,15 @@ function CanvasInner({
     let reach = "";
     if (peLinkedIds.has(n.id) || pna === "disabled" || isPrivateEndpointType(n.data.type)) reach = "private";
     else if (isPublicType(n.data.type) || pna === "enabled" || (isExposablePaaS(n.data.type) && pna !== "disabled" && !peLinkedIds.has(n.id))) reach = "public";
-    const cost = azureView ? estMonthlyCost(n.data.type, n.data.sku) : 0;
+    const nodePricing = azureView ? pricingByNode.get(n.id) : undefined;
     const pillarTint = pillarTintByArm.get((n.data.arm_id || "").toLowerCase()) || "";
     return {
       ...n,
       hidden: isHidden,
-      data: { ...n.data, _dim: dim, _lintCount: findings?.length ?? 0, _lintSev: findings?.some((f) => f.severity === "warning") ? "warning" : findings?.length ? "suggestion" : "", _assessSev: assess?.severity ?? "", _assessCount: assess?.findings.length ?? 0, _azureView: azureView, _reach: reach, _cost: cost, _pillarTint: pillarTint },
+      data: { ...n.data, _dim: dim, _lintCount: findings?.length ?? 0, _lintSev: findings?.some((f) => f.severity === "warning") ? "warning" : findings?.length ? "suggestion" : "", _assessSev: assess?.severity ?? "", _assessCount: assess?.findings.length ?? 0, _azureView: azureView, _reach: reach, _pricing: nodePricing, _pricingAsOf: pricing?.as_of ?? "", _pillarTint: pillarTint },
     } as Node<AzData>;
-  }), [nodes, hiddenCats, hostingFilter, impactIds, pathSet, lintByNode, assessOn, assessMap, azureView, peLinkedIds, pillarTintByArm]);
+  }), [nodes, hiddenCats, hostingFilter, impactIds, pathSet, lintByNode, assessOn, assessMap, azureView, peLinkedIds, pillarTintByArm, pricingByNode, pricing?.as_of]);
 
-  // Total indicative monthly cost across visible nodes (Azure view).
   const hiddenNodeIds = useMemo(() => new Set(nodes.filter((n) => hiddenCats.has(n.data.category) || (!!hostingFilter && hostingModel(n.data.type) !== hostingFilter && n.data.type !== "__note__")).map((n) => n.id)), [nodes, hiddenCats, hostingFilter]);
 
   // Highlight the selected edge with an animated dotted brand-colored line so the user
@@ -1479,7 +1513,7 @@ function CanvasInner({
       {!presentMode && (
       <div className="flex flex-wrap items-center gap-2 border-b bg-white px-3 py-2">
         <input value={name} onFocus={() => pushHistory()} onChange={(e) => { setName(e.target.value); setDirty(true); }}
-          className="w-64 rounded-lg border px-2.5 py-1.5 text-sm font-medium focus:outline-none focus:ring-2 focus:ring-brand" />
+          className="w-64 rounded-lg border px-2.5 py-1.5 text-sm font-medium focus:outline-hidden focus:ring-2 focus:ring-brand" />
         {arch.source === "ai" && <span className="rounded-full bg-violet-100 px-2 py-0.5 text-[10px] font-medium text-violet-700">✨ AI</span>}
         {dirty && <span className="text-[11px] text-amber-600">● unsaved</span>}
 
@@ -1491,7 +1525,7 @@ function CanvasInner({
             onFocus={() => setSearchFocus(true)}
             onKeyDown={(e) => { if (e.key === "Enter" && searchMatches[0]) focusNode(searchMatches[0].id); if (e.key === "Escape") { setSearch(""); setSearchFocus(false); } }}
             placeholder="🔍 Find resource…"
-            className="w-44 rounded-lg border px-2.5 py-1 text-xs focus:outline-none focus:ring-2 focus:ring-brand"
+            className="w-44 rounded-lg border px-2.5 py-1 text-xs focus:outline-hidden focus:ring-2 focus:ring-brand"
           />
           {searchFocus && searchMatches.length > 0 && (
             <div className="absolute left-0 z-30 mt-1 max-h-60 w-60 overflow-y-auto rounded-lg border bg-white py-1 shadow-xl">
@@ -1533,7 +1567,7 @@ function CanvasInner({
                     <button key={cid} onClick={() => setHiddenCats((s) => { const n = new Set(s); if (n.has(cid)) n.delete(cid); else n.add(cid); return n; })}
                       className="flex w-full items-center gap-2 px-3 py-1 text-left text-xs hover:bg-gray-50">
                       <input type="checkbox" checked={shown} readOnly className="pointer-events-none" />
-                      <span className="h-2.5 w-2.5 rounded-sm" style={{ background: colorOf(cid) }} />
+                      <span className="h-2.5 w-2.5 rounded-xs" style={{ background: colorOf(cid) }} />
                       <span className="flex-1 text-gray-700">{cat?.label ?? cid}</span>
                     </button>
                   );
@@ -1556,7 +1590,7 @@ function CanvasInner({
             value={boundaryMode}
             onChange={(e) => setBoundaryMode(e.target.value as typeof boundaryMode)}
             title="Group resources into boundary boxes"
-            className={`rounded-lg border px-1.5 py-1 text-xs focus:outline-none focus:ring-2 focus:ring-brand ${boundaryMode !== "none" ? "border-sky-300 bg-sky-50 text-sky-700" : "text-gray-600"}`}>
+            className={`rounded-lg border px-1.5 py-1 text-xs focus:outline-hidden focus:ring-2 focus:ring-brand ${boundaryMode !== "none" ? "border-sky-300 bg-sky-50 text-sky-700" : "text-gray-600"}`}>
             <option value="none">⬚ No boundaries</option>
             <option value="resource_group">⬚ By Resource Group</option>
             <option value="subscription">⬚ By Subscription</option>
@@ -1564,14 +1598,43 @@ function CanvasInner({
             <option value="subnet">⬚ By Subnet</option>
             <option value="region">⬚ By Region</option>
           </select>
-          {/* Azure semantics view: reachability, hosting model, cost */}
-          <button onClick={() => setAzureView((v) => !v)} title="Azure view: public/private reachability, PaaS/IaaS tags, peering & private-link edges, indicative cost"
+          {/* Azure semantics view: reachability, hosting model, and authoritative retail rates */}
+          <button onClick={() => setAzureView((v) => !v)} title="Azure view: reachability, hosting model, Azure Retail Prices, peering, and private-link edges"
             className={`rounded-lg border px-2.5 py-1 text-xs ${azureView ? "border-indigo-300 bg-indigo-50 text-indigo-700" : "text-gray-600 hover:bg-gray-50"}`}>
             ☁ Azure view
           </button>
+          {azureView && (
+            <div data-testid="architecture-pricing-controls" className="flex items-center gap-1 rounded-lg border border-emerald-200 bg-emerald-50/50 px-1.5 py-0.5">
+              <select
+                aria-label="Retail price currency"
+                value={priceCurrency}
+                onChange={(e) => setPriceCurrency(e.target.value)}
+                title="Azure Retail Prices currency"
+                className="bg-transparent text-[10px] font-medium text-emerald-800 focus:outline-hidden"
+              >
+                <option value="">Billing default</option>
+                {PRICE_CURRENCIES.map((currency) => <option key={currency} value={currency}>{currency}</option>)}
+              </select>
+              <button
+                aria-label="Refresh retail prices"
+                data-testid="architecture-pricing-refresh"
+                disabled={pricingBusy}
+                onClick={() => void loadPricing(true)}
+                title="Refresh rates from the public Azure Retail Prices API"
+                className="rounded-sm px-1 text-[10px] text-emerald-700 hover:bg-emerald-100 disabled:opacity-50"
+              >
+                {pricingBusy ? "↻" : "⟳"}
+              </button>
+              <span data-testid="architecture-pricing-summary" className={`max-w-72 truncate text-[10px] ${pricingError ? "text-red-600" : "text-emerald-800"}`} title="Public Azure retail/list prices, not negotiated rates or actual billed spend.">
+                {pricingBusy && !pricing ? "Loading retail prices…" : pricingError ? "Retail prices unavailable" : pricing
+                  ? `${pricing.summary.known_fixed_monthly > 0 ? `Known baseline ${formatMoney(pricing.currency, pricing.summary.known_fixed_monthly)}/mo` : "No fixed baseline"} · ${pricing.summary.covered_count}/${pricing.summary.node_count} covered${pricing.stale ? " · stale" : ""}`
+                  : "Retail prices not loaded"}
+              </span>
+            </div>
+          )}
           {/* Hosting-model filter */}
           <select value={hostingFilter} onChange={(e) => setHostingFilter(e.target.value)} title="Filter by hosting model"
-            className="rounded-lg border px-1.5 py-1 text-xs text-gray-600 focus:outline-none focus:ring-2 focus:ring-brand">
+            className="rounded-lg border px-1.5 py-1 text-xs text-gray-600 focus:outline-hidden focus:ring-2 focus:ring-brand">
             <option value="">All hosting</option>
             <option value="IaaS">IaaS</option>
             <option value="PaaS">PaaS</option>
@@ -1581,7 +1644,7 @@ function CanvasInner({
           {/* Well-Architected pillar overlay */}
           {assessReady && assessScore !== null && (
             <select value={pillarOverlay} onChange={(e) => setPillarOverlay(e.target.value)} title="Tint resources failing a Well-Architected (WAF) assessment pillar"
-              className="rounded-lg border px-1.5 py-1 text-xs text-gray-600 focus:outline-none focus:ring-2 focus:ring-brand">
+              className="rounded-lg border px-1.5 py-1 text-xs text-gray-600 focus:outline-hidden focus:ring-2 focus:ring-brand">
               <option value="">WAF Tint</option>
               <option value="security">🛡 Security</option>
               <option value="reliability">🔄 Reliability</option>
@@ -1608,7 +1671,7 @@ function CanvasInner({
             # Grid
           </button>
           <select value={routing} onChange={(e) => setRouting(e.target.value as typeof routing)} title="Connector routing style"
-            className="rounded-lg border px-1.5 py-1 text-xs text-gray-600 focus:outline-none focus:ring-2 focus:ring-brand">
+            className="rounded-lg border px-1.5 py-1 text-xs text-gray-600 focus:outline-hidden focus:ring-2 focus:ring-brand">
             <option value="bezier">↝ Curved</option>
             <option value="smoothstep">⌐ Orthogonal</option>
             <option value="step">⌐ Right-angle</option>
@@ -1621,17 +1684,17 @@ function CanvasInner({
               <div className="absolute right-0 z-20 mt-1 w-52 rounded-lg border bg-white p-2 shadow-lg">
                 <div className="mb-1 px-1 text-[10px] font-semibold uppercase tracking-wide text-gray-400">Align (select 2+)</div>
                 <div className="grid grid-cols-3 gap-1">
-                  <button onClick={() => alignNodes("left")} title="Align left" className="rounded border px-1 py-1.5 text-xs hover:bg-gray-50">⬅</button>
-                  <button onClick={() => alignNodes("hcenter")} title="Center horizontally" className="rounded border px-1 py-1.5 text-xs hover:bg-gray-50">↔</button>
-                  <button onClick={() => alignNodes("right")} title="Align right" className="rounded border px-1 py-1.5 text-xs hover:bg-gray-50">➡</button>
-                  <button onClick={() => alignNodes("top")} title="Align top" className="rounded border px-1 py-1.5 text-xs hover:bg-gray-50">⬆</button>
-                  <button onClick={() => alignNodes("vcenter")} title="Center vertically" className="rounded border px-1 py-1.5 text-xs hover:bg-gray-50">↕</button>
-                  <button onClick={() => alignNodes("bottom")} title="Align bottom" className="rounded border px-1 py-1.5 text-xs hover:bg-gray-50">⬇</button>
+                  <button onClick={() => alignNodes("left")} title="Align left" className="rounded-sm border px-1 py-1.5 text-xs hover:bg-gray-50">⬅</button>
+                  <button onClick={() => alignNodes("hcenter")} title="Center horizontally" className="rounded-sm border px-1 py-1.5 text-xs hover:bg-gray-50">↔</button>
+                  <button onClick={() => alignNodes("right")} title="Align right" className="rounded-sm border px-1 py-1.5 text-xs hover:bg-gray-50">➡</button>
+                  <button onClick={() => alignNodes("top")} title="Align top" className="rounded-sm border px-1 py-1.5 text-xs hover:bg-gray-50">⬆</button>
+                  <button onClick={() => alignNodes("vcenter")} title="Center vertically" className="rounded-sm border px-1 py-1.5 text-xs hover:bg-gray-50">↕</button>
+                  <button onClick={() => alignNodes("bottom")} title="Align bottom" className="rounded-sm border px-1 py-1.5 text-xs hover:bg-gray-50">⬇</button>
                 </div>
                 <div className="mb-1 mt-2 px-1 text-[10px] font-semibold uppercase tracking-wide text-gray-400">Distribute (select 3+)</div>
                 <div className="grid grid-cols-2 gap-1">
-                  <button onClick={() => alignNodes("dist-h")} className="rounded border px-1 py-1.5 text-xs hover:bg-gray-50">↔ Horizontal</button>
-                  <button onClick={() => alignNodes("dist-v")} className="rounded border px-1 py-1.5 text-xs hover:bg-gray-50">↕ Vertical</button>
+                  <button onClick={() => alignNodes("dist-h")} className="rounded-sm border px-1 py-1.5 text-xs hover:bg-gray-50">↔ Horizontal</button>
+                  <button onClick={() => alignNodes("dist-v")} className="rounded-sm border px-1 py-1.5 text-xs hover:bg-gray-50">↕ Vertical</button>
                 </div>
               </div>
             )}
@@ -1707,13 +1770,13 @@ function CanvasInner({
       </div>
       )}
       {presentMode && (
-        <button onClick={togglePresent} className="absolute right-3 top-3 z-30 rounded-lg border bg-white/90 px-3 py-1.5 text-xs font-medium text-gray-700 shadow hover:bg-white">✕ Exit present</button>
+        <button onClick={togglePresent} className="absolute right-3 top-3 z-30 rounded-lg border bg-white/90 px-3 py-1.5 text-xs font-medium text-gray-700 shadow-sm hover:bg-white">✕ Exit present</button>
       )}
       {aiOpen && (
         <div className="flex items-center gap-2 border-b bg-violet-50/60 px-3 py-2">
           <span className="text-xs text-violet-700">✨ Refine with AI:</span>
           <input value={aiGoal} onChange={(e) => setAiGoal(e.target.value)} placeholder="e.g. group by tier and add the data flows to the database"
-            className="flex-1 rounded-lg border px-2.5 py-1.5 text-xs focus:outline-none focus:ring-2 focus:ring-brand"
+            className="flex-1 rounded-lg border px-2.5 py-1.5 text-xs focus:outline-hidden focus:ring-2 focus:ring-brand"
             onKeyDown={(e) => { if (e.key === "Enter") void runEnhance(); }} />
           <button onClick={() => void runEnhance()} disabled={aiBusy || !aiGoal.trim()} className="rounded-lg bg-brand px-3 py-1.5 text-xs font-medium text-white disabled:opacity-60">{aiBusy ? "Thinking…" : "Apply"}</button>
           <button onClick={() => setAiOpen(false)} className="text-xs text-gray-400 hover:text-gray-600">✕</button>
@@ -1724,7 +1787,7 @@ function CanvasInner({
           <div className="flex items-center gap-2">
             <span className="text-xs text-violet-700">💬 Ask about this architecture:</span>
             <input value={askQ} onChange={(e) => setAskQ(e.target.value)} placeholder="e.g. Where are my single points of failure? Is this zone-redundant?"
-              className="flex-1 rounded-lg border px-2.5 py-1.5 text-xs focus:outline-none focus:ring-2 focus:ring-brand"
+              className="flex-1 rounded-lg border px-2.5 py-1.5 text-xs focus:outline-hidden focus:ring-2 focus:ring-brand"
               onKeyDown={(e) => { if (e.key === "Enter") void runAsk(); }} />
             <button onClick={() => void runAsk()} disabled={askBusy || !askQ.trim()} className="rounded-lg bg-violet-600 px-3 py-1.5 text-xs font-medium text-white disabled:opacity-60">{askBusy ? "Thinking…" : "Ask"}</button>
             <button onClick={() => { setAskOpen(false); setAskA(""); }} className="text-xs text-gray-400 hover:text-gray-600">✕</button>
@@ -1746,7 +1809,7 @@ function CanvasInner({
               <button
                 onClick={() => setPaletteCollapsed(false)}
                 title="Show resources palette"
-                className="rounded p-1 text-gray-400 hover:bg-gray-200 hover:text-gray-700"
+                className="rounded-sm p-1 text-gray-400 hover:bg-gray-200 hover:text-gray-700"
               >
                 »
               </button>
@@ -1761,12 +1824,12 @@ function CanvasInner({
             <button
               onClick={() => setPaletteCollapsed(true)}
               title="Collapse palette"
-              className="rounded p-0.5 text-gray-400 hover:bg-gray-200 hover:text-gray-700"
+              className="rounded-sm p-0.5 text-gray-400 hover:bg-gray-200 hover:text-gray-700"
             >
               «
             </button>
           </div>
-          <input value={paletteQuery} onChange={(e) => setPaletteQuery(e.target.value)} placeholder="Filter…" className="mb-1.5 w-full rounded border px-2 py-1 text-[11px]" />
+          <input value={paletteQuery} onChange={(e) => setPaletteQuery(e.target.value)} placeholder="Filter…" className="mb-1.5 w-full rounded-sm border px-2 py-1 text-[11px]" />
           {paletteGroups.length > 0 && (
             <div className="mb-1.5 flex items-center justify-end gap-2 text-[10px] text-gray-400">
               <button
@@ -1793,18 +1856,18 @@ function CanvasInner({
             <div key={cat} className="mb-2">
               <button
                 onClick={() => setCollapsedCats((prev) => { const n = new Set(prev); if (n.has(cat)) n.delete(cat); else n.add(cat); return n; })}
-                className="mb-0.5 flex w-full items-center gap-1 rounded px-0.5 text-[10px] font-medium uppercase text-gray-400 hover:bg-gray-100/70 hover:text-gray-600"
+                className="mb-0.5 flex w-full items-center gap-1 rounded-sm px-0.5 text-[10px] font-medium uppercase text-gray-400 hover:bg-gray-100/70 hover:text-gray-600"
                 title={collapsed ? "Expand" : "Collapse"}
               >
                 <span className={`text-[9px] transition-transform ${collapsed ? "" : "rotate-90"}`}>▶</span>
-                <span className="h-2 w-2 rounded-sm" style={{ background: colorOf(cat) }} />
+                <span className="h-2 w-2 rounded-xs" style={{ background: colorOf(cat) }} />
                 <span className="flex-1 truncate text-left">{catalog?.categories.find((c) => c.id === cat)?.label ?? cat}</span>
                 <span className="text-gray-300">{items.length}</span>
               </button>
               {!collapsed && items.map((item) => (
                 <div key={item.type} draggable
                   onDragStart={(e) => { e.dataTransfer.setData("application/architecture-node", JSON.stringify(item)); e.dataTransfer.effectAllowed = "move"; }}
-                  className="mb-0.5 flex cursor-grab items-center gap-1.5 rounded border border-transparent bg-white px-1.5 py-1 text-[11px] text-gray-700 hover:border-gray-200 hover:shadow-sm active:cursor-grabbing">
+                  className="mb-0.5 flex cursor-grab items-center gap-1.5 rounded-sm border border-transparent bg-white px-1.5 py-1 text-[11px] text-gray-700 hover:border-gray-200 hover:shadow-xs active:cursor-grabbing">
                   <AzureIcon kind="resource" type={item.type} className="h-3.5 w-3.5" />
                   <span className="truncate">{item.label}</span>
                 </div>
@@ -1846,7 +1909,7 @@ function CanvasInner({
             <BoundaryLayer boxes={boundaries} />
             <Background variant={snapEnabled ? BackgroundVariant.Lines : BackgroundVariant.Dots} gap={snapEnabled ? 16 : 18} size={1} color="#e2e8f0" />
             <Controls showInteractive={false} />
-            <MiniMap pannable zoomable nodeColor={(n) => ((n.data as AzData)?.color ?? "#cbd5e1")} className="!bg-white" />
+            <MiniMap pannable zoomable nodeColor={(n) => ((n.data as AzData)?.color ?? "#cbd5e1")} className="bg-white!" />
           </ReactFlow>
 
           {/* Right-click context menu (node) */}
@@ -1873,12 +1936,13 @@ function CanvasInner({
 
           {/* Azure-view legend */}
           {azureView && !presentMode && (
-            <div className="pointer-events-none absolute bottom-3 left-1/2 z-10 -translate-x-1/2 rounded-full border bg-white/95 px-3 py-1 text-[10px] text-gray-600 shadow">
+            <div className="pointer-events-none absolute bottom-3 left-1/2 z-10 -translate-x-1/2 rounded-full border bg-white/95 px-3 py-1 text-[10px] text-gray-600 shadow-sm">
               <span className="mr-2">🌐 public</span>
               <span className="mr-2">🔒 private</span>
               <span className="mr-2"><span className="inline-block h-1.5 w-3 align-middle" style={{ background: "#0d9488" }} /> peering</span>
               <span className="mr-2"><span className="inline-block h-1.5 w-3 align-middle" style={{ background: "#6366f1", borderTop: "1px dashed #6366f1" }} /> private link</span>
-              <span><span className="inline-block h-1.5 w-3 align-middle" style={{ background: "#b91c1c" }} /> identity</span>
+              <span className="mr-2"><span className="inline-block h-1.5 w-3 align-middle" style={{ background: "#b91c1c" }} /> identity</span>
+              <span title="Azure Retail Prices list rate; not actual billed spend">💰 retail list price</span>
             </div>
           )}
 
@@ -1895,7 +1959,7 @@ function CanvasInner({
                     <button onClick={deleteSel} className="text-[11px] text-red-500 hover:underline">Delete</button>
                   </div>
                   <label className="block"><span className="mb-0.5 block text-[10px] text-gray-500">Text</span>
-                    <textarea rows={4} className="w-full resize-y rounded border px-2 py-1 text-xs" value={selectedNode.name}
+                    <textarea rows={4} className="w-full resize-y rounded-sm border px-2 py-1 text-xs" value={selectedNode.name}
                       onChange={(e) => updNode(selectedNode.id, { name: e.target.value })} /></label>
                 </>
               )}
@@ -1906,19 +1970,25 @@ function CanvasInner({
                     <button onClick={deleteSel} className="text-[11px] text-red-500 hover:underline">Delete</button>
                   </div>
                   <label className="mb-2 block"><span className="mb-0.5 block text-[10px] text-gray-500">Name</span>
-                    <input className="w-full rounded border px-2 py-1 text-xs" value={selectedNode.name} onChange={(e) => updNode(selectedNode.id, { name: e.target.value })} /></label>
+                    <input className="w-full rounded-sm border px-2 py-1 text-xs" value={selectedNode.name} onChange={(e) => updNode(selectedNode.id, { name: e.target.value })} /></label>
                   <div className="mb-2"><span className="mb-0.5 block text-[10px] text-gray-500">ARM type</span>
                     <ArmTypeCombobox value={selectedNode.type} palette={catalog?.palette ?? []}
                       onChange={(type, category) => updNode(selectedNode.id, category ? { type, category } : { type })} /></div>
                   <div className="grid grid-cols-2 gap-2">
                     <label className="block"><span className="mb-0.5 block text-[10px] text-gray-500">Category</span>
-                      <select className="w-full rounded border px-1.5 py-1 text-[11px]" value={selectedNode.category} onChange={(e) => updNode(selectedNode.id, { category: e.target.value })}>
+                      <select className="w-full rounded-sm border px-1.5 py-1 text-[11px]" value={selectedNode.category} onChange={(e) => updNode(selectedNode.id, { category: e.target.value })}>
                         {catalog?.categories.map((c) => <option key={c.id} value={c.id}>{c.label}</option>)}
                       </select></label>
                     <label className="block"><span className="mb-0.5 block text-[10px] text-gray-500">Tier</span>
-                      <select className="w-full rounded border px-1.5 py-1 text-[11px]" value={selectedNode.layer} onChange={(e) => updNode(selectedNode.id, { layer: e.target.value })}>
+                      <select className="w-full rounded-sm border px-1.5 py-1 text-[11px]" value={selectedNode.layer} onChange={(e) => updNode(selectedNode.id, { layer: e.target.value })}>
                         {LAYER_ORDER.map((l) => <option key={l} value={l}>{l}</option>)}
                       </select></label>
+                  </div>
+                  <div className="mt-2 grid grid-cols-2 gap-2">
+                    <label className="block"><span className="mb-0.5 block text-[10px] text-gray-500">Azure SKU</span>
+                      <input className="w-full rounded-sm border px-2 py-1 text-[11px]" value={selectedNode.sku || ""} placeholder="Standard_D2s_v5" onChange={(e) => updNode(selectedNode.id, { sku: e.target.value })} /></label>
+                    <label className="block"><span className="mb-0.5 block text-[10px] text-gray-500">Region</span>
+                      <input className="w-full rounded-sm border px-2 py-1 text-[11px]" value={selectedNode.location || ""} placeholder="eastus" onChange={(e) => updNode(selectedNode.id, { location: e.target.value })} /></label>
                   </div>
                   {selectedNode.arm_id && <div className="mt-2 truncate text-[9px] text-gray-400" title={selectedNode.arm_id}>{selectedNode.arm_id}</div>}
                   {selectedNode.arm_id && selectedNode.arm_id.startsWith("/subscriptions/") && (
@@ -1940,10 +2010,45 @@ function CanvasInner({
                   >
                     🧭 Debug resolution
                   </button>
+                  {azureView && selectedNodePrice && (
+                    <div data-testid="architecture-pricing-inspector" className="mt-2 rounded-lg border border-emerald-100 bg-emerald-50/40 p-2">
+                      <div className="flex items-center justify-between gap-2">
+                        <span className="text-[10px] font-semibold text-emerald-800">Azure Retail Prices</span>
+                        <span className={`rounded-sm px-1 py-0.5 text-[9px] ${priceBadge(selectedNodePrice).cls}`}>{priceBadge(selectedNodePrice).text}</span>
+                      </div>
+                      <p className="mt-1 text-[9px] leading-snug text-gray-600">{selectedNodePrice.reason}</p>
+                      {selectedNodePrice.components.length > 0 && (
+                        <div className="mt-1 space-y-1 border-t border-emerald-100 pt-1">
+                          {selectedNodePrice.components.slice(0, 5).map((component) => (
+                            <div key={component.meter_id || `${component.meter_name}:${component.unit_of_measure}`} className="text-[9px] text-gray-600">
+                              <div className="truncate font-medium" title={component.product_name}>{component.meter_name}</div>
+                              <div>{selectedNodePrice.currency} {component.retail_price.toLocaleString()} / {component.unit_of_measure}</div>
+                            </div>
+                          ))}
+                        </div>
+                      )}
+                      {selectedNodePrice.candidates.length > 1 && (
+                        <label className="mt-1 block border-t border-amber-100 pt-1">
+                          <span className="block text-[9px] font-medium text-amber-700">Meter/SKU group</span>
+                          <select
+                            aria-label="Retail meter selection"
+                            value={String(selectedNode.pricing_hint?.meter_id || "")}
+                            onChange={(e) => updNode(selectedNode.id, { pricing_hint: { ...(selectedNode.pricing_hint || {}), meter_id: e.target.value } })}
+                            className="mt-0.5 w-full rounded-sm border border-amber-200 bg-white px-1 py-1 text-[9px]"
+                          >
+                            <option value="">Choose a verified meter…</option>
+                            {selectedNodePrice.candidates.map((candidate) => <option key={candidate.meter_id} value={candidate.meter_id}>{candidate.product_name} · {candidate.sku_name}</option>)}
+                          </select>
+                          <span className="mt-0.5 block text-[8px] text-gray-400">Save, then refresh pricing to apply this selection.</span>
+                        </label>
+                      )}
+                      <div className="mt-1 text-[8px] text-gray-400">List price, not actual billed spend{pricing?.as_of ? ` · ${new Date(pricing.as_of).toLocaleDateString()}` : ""}</div>
+                    </div>
+                  )}
                   {Object.keys(selectedNode.meta || {}).length > 0 && (
                     <details className="mt-2">
                       <summary className="cursor-pointer text-[10px] font-medium text-gray-500">Properties ({Object.keys(selectedNode.meta).length})</summary>
-                      <div className="mt-1 max-h-40 space-y-0.5 overflow-y-auto rounded border bg-gray-50 p-1.5">
+                      <div className="mt-1 max-h-40 space-y-0.5 overflow-y-auto rounded-sm border bg-gray-50 p-1.5">
                         {Object.entries(selectedNode.meta).map(([k, v]) => (
                           <div key={k} className="flex justify-between gap-2 text-[9px]"><span className="shrink-0 text-gray-400">{k}</span><span className="truncate text-gray-700" title={String(v)}>{String(v)}</span></div>
                         ))}
@@ -1958,7 +2063,7 @@ function CanvasInner({
                     return (
                       <details className="mt-2" open>
                         <summary className="cursor-pointer text-[10px] font-medium text-red-600">🛡 Assessment findings ({findings.length})</summary>
-                        <div className="mt-1 max-h-40 space-y-1 overflow-y-auto rounded border border-red-100 bg-red-50/40 p-1.5">
+                        <div className="mt-1 max-h-40 space-y-1 overflow-y-auto rounded-sm border border-red-100 bg-red-50/40 p-1.5">
                           {findings.map((f, i) => (
                             <div key={i} className="flex items-start gap-1.5 text-[10px]">
                               <span className={`mt-0.5 inline-block h-2 w-2 shrink-0 rounded-full ${sevCls[f.severity] ?? "bg-gray-400"}`} />
@@ -1978,9 +2083,9 @@ function CanvasInner({
                     <button onClick={deleteSel} className="text-[11px] text-red-500 hover:underline">Delete</button>
                   </div>
                   <label className="mb-2 block"><span className="mb-0.5 block text-[10px] text-gray-500">Label</span>
-                    <input className="w-full rounded border px-2 py-1 text-xs" value={typeof selectedEdge.label === "string" ? selectedEdge.label : ""} onChange={(e) => updEdge(selectedEdge.id, { label: e.target.value })} /></label>
+                    <input className="w-full rounded-sm border px-2 py-1 text-xs" value={typeof selectedEdge.label === "string" ? selectedEdge.label : ""} onChange={(e) => updEdge(selectedEdge.id, { label: e.target.value })} /></label>
                   <label className="mb-2 block"><span className="mb-0.5 block text-[10px] text-gray-500">Kind</span>
-                    <select className="w-full rounded border px-1.5 py-1 text-[11px]" value={(selectedEdge.data?.kind as string) ?? "connects_to"} onChange={(e) => updEdge(selectedEdge.id, { kind: e.target.value as ArchEdgeKind })}>
+                    <select className="w-full rounded-sm border px-1.5 py-1 text-[11px]" value={(selectedEdge.data?.kind as string) ?? "connects_to"} onChange={(e) => updEdge(selectedEdge.id, { kind: e.target.value as ArchEdgeKind })}>
                       {EDGE_KINDS.map((k) => <option key={k.id} value={k.id}>{k.label}</option>)}
                     </select></label>
                   <label className="flex items-center gap-1.5 text-[11px] text-gray-600">
@@ -1996,7 +2101,7 @@ function CanvasInner({
             <div className="absolute bottom-3 left-3 z-10 max-h-[60%] w-80 overflow-hidden rounded-xl border bg-white shadow-xl">
               <div className="flex items-center justify-between border-b px-3 py-2">
                 <span className="text-xs font-semibold text-gray-700">✓ Best-practice review</span>
-                <button onClick={() => setLintOpen(false)} className="rounded p-0.5 text-gray-400 hover:bg-gray-100 hover:text-gray-700">✕</button>
+                <button onClick={() => setLintOpen(false)} className="rounded-sm p-0.5 text-gray-400 hover:bg-gray-100 hover:text-gray-700">✕</button>
               </div>
               <div className="max-h-80 space-y-1.5 overflow-y-auto p-2">
                 {lint.length === 0 && <div className="rounded-lg border border-dashed p-4 text-center text-xs text-green-600">✓ No issues found — looks well-architected.</div>}
@@ -2020,7 +2125,7 @@ function CanvasInner({
             <div className="absolute bottom-3 right-3 z-10 max-h-[60%] w-80 overflow-hidden rounded-xl border bg-white shadow-xl">
               <div className="flex items-center justify-between border-b px-3 py-2">
                 <span className="text-xs font-semibold text-gray-700">⟳ Drift vs. live Azure</span>
-                <button onClick={() => setDrift(null)} className="rounded p-0.5 text-gray-400 hover:bg-gray-100 hover:text-gray-700">✕</button>
+                <button onClick={() => setDrift(null)} className="rounded-sm p-0.5 text-gray-400 hover:bg-gray-100 hover:text-gray-700">✕</button>
               </div>
               <div className="border-b px-3 py-1.5 text-[11px] text-gray-500">
                 {drift.matched} of {drift.diagram_count} diagram resources match · {drift.live_count} live in Azure
@@ -2270,8 +2375,10 @@ function fromMermaid(text: string): { nodes: ArchNode[]; edges: ArchEdge[] } | n
 }
 
 export function ArchitectureCanvas({ arch, onSaved }: { arch: Architecture; onSaved: (a: Architecture) => void }) {
-  const [catalog, setCatalog] = useState<ArchitectureCatalog>();
-  useEffect(() => { api.architectureCatalog().then(setCatalog).catch(() => undefined); }, []);
+  const { data: catalog } = useQuery({
+    queryKey: ["architectureCatalog"],
+    queryFn: api.architectureCatalog,
+  });
   return (
     <ReactFlowProvider>
       <CanvasInner arch={arch} catalog={catalog} onSaved={onSaved} />
@@ -2301,15 +2408,17 @@ function PreviewInner({ arch, catalog }: { arch: Architecture; catalog: Architec
     >
       <Background variant={BackgroundVariant.Dots} gap={18} size={1} color="#e2e8f0" />
       <Controls showInteractive={false} />
-      <MiniMap pannable zoomable nodeColor={(n) => ((n.data as AzData)?.color ?? "#cbd5e1")} className="!bg-white" />
+      <MiniMap pannable zoomable nodeColor={(n) => ((n.data as AzData)?.color ?? "#cbd5e1")} className="bg-white!" />
     </ReactFlow>
   );
 }
 
 /** A non-editable rendering of an architecture (used to preview a past revision). */
 export function ArchitecturePreview({ arch }: { arch: Architecture }) {
-  const [catalog, setCatalog] = useState<ArchitectureCatalog>();
-  useEffect(() => { api.architectureCatalog().then(setCatalog).catch(() => undefined); }, []);
+  const { data: catalog } = useQuery({
+    queryKey: ["architectureCatalog"],
+    queryFn: api.architectureCatalog,
+  });
   return (
     <ReactFlowProvider>
       <PreviewInner arch={arch} catalog={catalog} />

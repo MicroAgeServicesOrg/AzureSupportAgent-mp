@@ -1,6 +1,6 @@
 """Identity Investigate — resolver, capabilities and provenance.
 
-The three behaviours these lock down are the ones the feature is built on:
+The three behaviors these lock down are the ones the feature is built on:
 
 * an unresolvable principal is a RESULT, not an error — deleted objects and Azure
   Lighthouse principals are often exactly what the reader clicked to ask about;
@@ -299,7 +299,7 @@ import pytest
 
 def _roles_data() -> dict[str, Any]:
     common = {
-        "principal_id": "u1", "principal_type": "User", "principal_name": "P - Zeeshan",
+        "principal_id": "u1", "principal_type": "User", "principal_name": "P - Alex",
         "role_privileged": True, "role_tier": "tier0",
     }
     return {
@@ -330,8 +330,8 @@ async def _access(monkeypatch) -> dict[str, Any]:
     monkeypatch.setattr(inv, "access_rows", _no_rows)
 
     async def _resolve(_data, _tenant, needle):
-        return {"id": "u1", "kind": "user", "display_name": "P - Zeeshan",
-                "resolution": "resolved", "upn": "p-zeeshan@example.com"}
+        return {"id": "u1", "kind": "user", "display_name": "P - Alex",
+            "resolution": "resolved", "upn": "p-alex@example.com"}
 
     monkeypatch.setattr(inv, "resolve", _resolve)
     snapshot = {"data": {"roles": _roles_data()}, "_analysis": {}, "domains": {}}
@@ -385,3 +385,26 @@ async def test_an_activated_pim_role_is_still_reported_as_held(monkeypatch):
     assert len(active_ga) == 1
     assert active_ga[0]["activated"] is True
     assert active_ga[0]["end"], "an activation must keep its expiry"
+
+
+@pytest.mark.asyncio
+async def test_every_directory_role_is_graded_for_the_reader(monkeypatch):
+    """The grid colours roles by tier, so every role it renders needs one — a missing entry
+    would silently paint a tenant-takeover role as ordinary."""
+    data = await _access(monkeypatch)
+    tiers = data["directory_role_tiers"]
+    assert set(tiers) == set(data["directory_roles"])
+    assert tiers["global administrator"] == "tier0"
+    assert tiers["sharepoint administrator"] == "tier1"
+    assert tiers["global reader"] == "tier2"
+
+
+@pytest.mark.asyncio
+async def test_the_grade_comes_from_the_shared_classifier(monkeypatch):
+    """Not a second list of role names in the dossier. If the collector's tiers move, this
+    moves with them; two independent definitions of "tenant takeover" would drift."""
+    from app.entra.collectors import roles as roles_mod
+
+    data = await _access(monkeypatch)
+    for name, tier in data["directory_role_tiers"].items():
+        assert tier == roles_mod.tier_of(name)

@@ -8,8 +8,25 @@ param location string = 'westus3'
 @maxLength(40)
 param appName string = 'azure-support-agent'
 
-@description('Container image to deploy. Defaults to the public Docker Hub image, :latest tag, so the one-click button always provisions the newest published release. Switch to GHCR after the GitHub package is made public.')
+@description('Mutable container image reference. Keep the application deployment on the latest tag; do not pin it to a manifest digest.')
 param containerImage string = 'docker.io/zmustafa/azure-support-agent:latest'
+
+@description('Unique Container Apps revision suffix. The timestamp default forces every template deployment to create a fresh revision and pull the current latest image.')
+@minLength(1)
+@maxLength(64)
+param containerRevisionSuffix string = format('latest-{0}', utcNow('yyyyMMddHHmmssfff'))
+
+@description('Optional Azure Container Registry login server, for example contoso.azurecr.io. Leave empty for public images. When set, containerRegistryIdentityResourceId must name an existing user-assigned identity with AcrPull on that registry.')
+param containerRegistryServer string = ''
+
+@description('Optional existing user-assigned identity resource ID used for private ACR pulls and Key Vault references. Grant AcrPull and/or Key Vault Secrets User before deployment. The app also always receives its own system-assigned runtime identity.')
+param containerRegistryIdentityResourceId string = ''
+
+@description('Shared tags merged onto all taggable resources. Supplied values override the built-in Application, Environment, and ManagedBy tags.')
+param tags object = {}
+
+@description('Value for the built-in Environment resource tag.')
+param deploymentEnvironment string = 'Production'
 
 @description('Bootstrap local admin username for first login.')
 @minLength(3)
@@ -61,10 +78,83 @@ param postgresAdminPassword string
 @maxLength(63)
 param postgresDatabaseName string = 'azsup'
 
-@description('PostgreSQL Flexible Server SKU. B1ms is the lowest-cost managed option for this template.')
+@description('PostgreSQL compute tier. Burstable keeps one-click cost low; use GeneralPurpose or MemoryOptimized before enabling high availability.')
+@allowed([
+  'Burstable'
+  'GeneralPurpose'
+  'MemoryOptimized'
+])
+param postgresSkuTier string = 'Burstable'
+
+@description('PostgreSQL Flexible Server SKU name. It must belong to postgresSkuTier and be offered in the selected region. B1ms is the balanced low-cost default; the production preset uses a General Purpose SKU.')
 param postgresSkuName string = 'Standard_B1ms'
 
-@description('Container CPU cores.')
+@description('PostgreSQL Premium SSD storage size in GiB. Storage can grow but cannot be reduced after deployment.')
+@minValue(32)
+@maxValue(32767)
+param postgresStorageSizeGB int = 32
+
+@description('Enable PostgreSQL storage autogrow. This prevents disk-full outages but has no configurable cost ceiling, so the one-click default is Disabled and the production preset opts in.')
+@allowed([
+  'Disabled'
+  'Enabled'
+])
+param postgresStorageAutoGrow string = 'Disabled'
+
+@description('PostgreSQL point-in-time backup retention in days (7-35). Fourteen days balances recoverability and retained-backup cost.')
+@minValue(7)
+@maxValue(35)
+param postgresBackupRetentionDays int = 14
+
+@description('Enable geo-redundant PostgreSQL backups. This is a create-time, region-dependent, higher-cost choice and is disabled by default.')
+@allowed([
+  'Disabled'
+  'Enabled'
+])
+param postgresGeoRedundantBackup string = 'Disabled'
+
+@description('PostgreSQL high-availability mode. SameZone and ZoneRedundant require a supported General Purpose or Memory Optimized SKU and approximately double compute cost.')
+@allowed([
+  'Disabled'
+  'SameZone'
+  'ZoneRedundant'
+])
+param postgresHighAvailabilityMode string = 'Disabled'
+
+@description('Optional primary PostgreSQL availability zone. Leave empty for Azure placement; availability varies by region.')
+param postgresAvailabilityZone string = ''
+
+@description('Optional PostgreSQL standby availability zone used only with high availability. Leave empty for Azure placement.')
+param postgresStandbyAvailabilityZone string = ''
+
+@description('Use a custom PostgreSQL maintenance window. Disabled uses the Azure-managed schedule; Enabled uses the day/hour/minute parameters below.')
+@allowed([
+  'Disabled'
+  'Enabled'
+])
+param postgresCustomMaintenanceWindow string = 'Disabled'
+
+@description('Custom maintenance day, where 0 is Sunday and 6 is Saturday. Used only when postgresCustomMaintenanceWindow is Enabled.')
+@minValue(0)
+@maxValue(6)
+param postgresMaintenanceDayOfWeek int = 0
+
+@description('Custom maintenance start hour in the server region local time. Used only when postgresCustomMaintenanceWindow is Enabled.')
+@minValue(0)
+@maxValue(23)
+param postgresMaintenanceStartHour int = 2
+
+@description('Custom maintenance start minute. PostgreSQL Flexible Server currently supports the top of the hour.')
+@allowed([0])
+param postgresMaintenanceStartMinute int = 0
+
+@description('Container CPU cores. Keep this paired with a supported memory value.')
+@allowed([
+  '0.5'
+  '1.0'
+  '2.0'
+  '4.0'
+])
 param containerCpu string = '1.0'
 
 @description('Container memory allocation. Chromium and Azure CLI need headroom, so 2Gi is the default.')
@@ -72,8 +162,93 @@ param containerCpu string = '1.0'
   '1Gi'
   '2Gi'
   '4Gi'
+  '8Gi'
 ])
 param containerMemory string = '2Gi'
+
+@description('Minimum always-running Container App replicas. One controls idle cost; the production preset uses two for replica-level resilience.')
+@minValue(1)
+@maxValue(10)
+param appMinReplicas int = 1
+
+@description('Maximum Container App replicas. The balanced default allows one additional replica while limiting database connections and cost.')
+@minValue(1)
+@maxValue(10)
+param appMaxReplicas int = 2
+
+@description('Concurrent HTTP requests per replica before the Container Apps HTTP scaler adds capacity.')
+@minValue(1)
+@maxValue(1000)
+param appHttpConcurrency int = 20
+
+@description('Make the Container Apps environment zone redundant. Disabled preserves regional compatibility and cost; enable only in a supported availability-zone region.')
+param containerEnvironmentZoneRedundant bool = false
+
+@description('Storage account redundancy for Azure Files. Standard_LRS is the low-cost default; production commonly chooses Standard_ZRS after confirming regional support.')
+@allowed([
+  'Standard_LRS'
+  'Standard_GRS'
+  'Standard_RAGRS'
+  'Standard_ZRS'
+  'Standard_GZRS'
+  'Standard_RAGZRS'
+])
+param storageRedundancy string = 'Standard_LRS'
+
+@description('Azure Files share quota in GiB.')
+@minValue(1)
+@maxValue(102400)
+param fileShareQuotaGB int = 32
+
+@description('Deleted Azure Files shares are recoverable for this many days (1-365).')
+@minValue(1)
+@maxValue(365)
+param fileShareSoftDeleteRetentionDays int = 14
+
+@description('Optional direct Fernet key for stored application secrets. Prefer secretsEncryptionKeySecretUri; leave both empty to retain the existing generated key on Azure Files.')
+@secure()
+param secretsEncryptionKey string = ''
+
+@description('Optional Key Vault secret URI containing DATABASE_URL. The selected managed identity needs Key Vault Secrets User; leave empty to use the template-created PostgreSQL password secret.')
+param databaseUrlSecretUri string = ''
+
+@description('Optional Key Vault secret URI containing the bootstrap admin password. The selected managed identity needs Key Vault Secrets User; leave empty to use adminPassword.')
+param adminPasswordSecretUri string = ''
+
+@description('Optional Key Vault secret URI containing SECRETS_ENCRYPTION_KEY. The selected managed identity needs Key Vault Secrets User.')
+param secretsEncryptionKeySecretUri string = ''
+
+@description('Log Analytics and diagnostic data retention in days (30-730).')
+@minValue(30)
+@maxValue(730)
+param logRetentionDays int = 30
+
+@description('Deploy PostgreSQL and Azure Files diagnostic settings to Log Analytics. Container App console/system logs are already connected through the managed environment and are not duplicated.')
+param enableDiagnosticSettings bool = true
+
+@description('Deploy the action group and supported platform metric alerts. Disabled by default to avoid notification and alert-rule costs in one-click/dev deployments.')
+param enableAlerts bool = false
+
+@description('Deploy scheduled-query alerts for event-loop stalls, database-pool exhaustion, probe failures, and platform restart logs. Enable on a later deployment after Container Apps log tables have received data.')
+param enableLogAlerts bool = false
+
+@description('Optional email receiver for the generated action group. Leave empty to create an action group without an email receiver and attach receivers later.')
+param alertEmailReceiver string = ''
+
+@description('PostgreSQL active-connection count that raises an alert. Set below the server max_connections value with room for maintenance and administration.')
+@minValue(1)
+param postgresConnectionsAlertThreshold int = 80
+
+@description('Container App average response-time alert threshold in milliseconds.')
+@minValue(1)
+param appResponseTimeAlertThresholdMs int = 3000
+
+@description('Optional deletion locks on PostgreSQL, storage, and the Container App. CanNotDelete protects data while still allowing updates; None keeps teardown one-click.')
+@allowed([
+  'None'
+  'CanNotDelete'
+])
+param resourceLock string = 'None'
 
 // ---------------------------------------------------------------------------------------------
 // Private networking (optional). Choosing "Yes" injects the Container Apps Environment into a
@@ -106,6 +281,61 @@ param acknowledgePublicDatabaseAccess string
 @description('VNet address space (CIDR) used only when Private networking = Yes. Pick a range that does not overlap your existing networks.')
 param vnetAddressSpace string = '10.42.0.0/22'
 
+// ---------------------------------------------------------------------------------------------
+// Network access control. TWO INDEPENDENT LAYERS — they are not alternatives:
+//
+//   1. ipSecurityRestrictions (below) is enforced by the Azure Container Apps INGRESS. A refused
+//      caller never completes a TLS handshake with the app, never reaches Python, and therefore
+//      cannot attempt authentication at all. This is the layer that actually stops brute force.
+//   2. allowlistSeed seeds the IN-APPLICATION allowlist, which an administrator then manages from
+//      the Network Access screen without redeploying. It runs inside the container, so a blocked
+//      request has already been accepted by the ingress. It is a management capability, NOT an
+//      edge defence, and must not be relied on as one.
+//
+// SAFETY: an Allow list that omits your own address makes the application unreachable from your
+// browser. It does NOT lock you out of Azure — recovery is a control-plane call that is entirely
+// unaffected by the block:
+//   az containerapp ingress access-restriction remove -n <app> -g <rg> --rule-name <name>
+@description('Optional. Client IP ranges (CIDR) permitted to reach the application, enforced at the Container Apps ingress before any traffic reaches the container. Leave empty to allow the whole internet. Each entry: { name, description, ipAddressRange }.')
+param allowedClientIpRanges array = []
+
+@description('How allowedClientIpRanges is applied. Allow = ONLY the listed ranges may connect (everything else is refused). Deny = the listed ranges are refused and everything else is permitted. All entries share this action; they cannot be mixed.')
+@allowed([
+  'Allow'
+  'Deny'
+])
+param ipRestrictionMode string = 'Allow'
+
+@description('Optional. Comma-separated IPs/CIDRs used to seed the IN-APP allowlist on first boot only, so a new deployment is not open to the internet while waiting for an administrator to configure it. Never overwrites what an admin later saves in the app. Example: 203.0.113.0/24,198.51.100.7')
+param allowlistSeed string = ''
+
+@description('Mode applied to the seeded in-app allowlist. Use monitor to observe what WOULD be blocked without blocking anything, then switch to enforce in the app once the ranges are proven correct. Ignored when allowlistSeed is empty.')
+@allowed([
+  'monitor'
+  'enforce'
+])
+param allowlistSeedMode string = 'enforce'
+
+// Ingress visibility. 'Internal' removes the public endpoint entirely — the app is then only
+// reachable from inside the VNet, which is the strongest possible answer to "restrict who can
+// reach it" because there is no public address to attack.
+//
+// REQUIREMENTS AND CONSEQUENCES — read before choosing 'Internal':
+//   * It requires a VNet-injected environment, i.e. Private networking = Yes. Choosing
+//     'Internal' without it fails the deployment with an Azure error rather than silently
+//     falling back, because a template that quietly ignored this would leave an operator
+//     believing they were private when they were not.
+//   * You must provide your own way in: a VPN, a Bastion/jump host, a private endpoint, or a
+//     subnet router (e.g. Tailscale) deployed inside the VNet. Nothing in this template does
+//     that for you, and after deployment the one-click URL will NOT be reachable from the
+//     internet — including from the machine that ran the deployment.
+@description('Whether the application has a public endpoint. External = reachable from the internet (default). Internal = no public endpoint; reachable only from inside the VNet, which REQUIRES Private networking = Yes and your own connectivity into that VNet (VPN, Bastion, private endpoint or a subnet router).')
+@allowed([
+  'External'
+  'Internal'
+])
+param ingressVisibility string = 'External'
+
 @description('Infrastructure subnet (CIDR) for the Container Apps Environment. Must be at least a /23 (Container Apps requirement) and inside the VNet address space. Used only when Private networking = Yes.')
 param infraSubnetPrefix string = '10.42.0.0/23'
 
@@ -113,6 +343,13 @@ param infraSubnetPrefix string = '10.42.0.0/23'
 param privateEndpointSubnetPrefix string = '10.42.2.0/27'
 
 var isPrivate = privateNetworking == 'Yes'
+var hasUserAssignedIdentity = !empty(containerRegistryIdentityResourceId)
+var keyVaultIdentity = hasUserAssignedIdentity ? containerRegistryIdentityResourceId : 'system'
+var resourceTags = union({
+  Application: appName
+  Environment: deploymentEnvironment
+  ManagedBy: 'Bicep'
+}, tags)
 
 // The public 0.0.0.0 firewall rule is deployed only in public mode AND only when the
 // operator has explicitly acknowledged the cross-tenant exposure it creates.
@@ -135,6 +372,56 @@ var postgresServerName = '${namePrefix}-pg-${unique}'
 // absorbed into the host name and the app dies at startup with
 // "socket.gaierror: [Errno -2] Name or service not known".
 var databaseUrl = 'postgresql+asyncpg://${uriComponent(postgresAdminLogin)}:${uriComponent(postgresAdminPassword)}@${postgres.properties.fullyQualifiedDomainName}:5432/${postgresDatabaseName}?ssl=require'
+var databaseUrlSecret = empty(databaseUrlSecretUri) ? {
+  name: 'database-url'
+  value: databaseUrl
+} : {
+  name: 'database-url'
+  keyVaultUrl: databaseUrlSecretUri
+  identity: keyVaultIdentity
+}
+var adminPasswordSecret = empty(adminPasswordSecretUri) ? {
+  name: 'admin-password'
+  value: adminPassword
+} : {
+  name: 'admin-password'
+  keyVaultUrl: adminPasswordSecretUri
+  identity: keyVaultIdentity
+}
+var hasSecretsEncryptionKey = !empty(secretsEncryptionKeySecretUri) || !empty(secretsEncryptionKey)
+var secretsEncryptionKeySecret = !empty(secretsEncryptionKeySecretUri) ? {
+  name: 'secrets-encryption-key'
+  keyVaultUrl: secretsEncryptionKeySecretUri
+  identity: keyVaultIdentity
+} : {
+  name: 'secrets-encryption-key'
+  value: secretsEncryptionKey
+}
+var containerSecrets = concat([
+  databaseUrlSecret
+  adminPasswordSecret
+  {
+    name: 'sso-oidc-client-secret'
+    value: ssoOidcClientSecret
+  }
+], hasSecretsEncryptionKey ? [secretsEncryptionKeySecret] : [])
+var registryCredentials = empty(containerRegistryServer) ? [] : [
+  {
+    server: containerRegistryServer
+    identity: containerRegistryIdentityResourceId
+  }
+]
+
+// Ingress-level client IP restrictions. Hoisted into a variable because Bicep does not allow a
+// for-expression inside a function call such as union().
+var ipSecurityRestrictions = [
+  for r in allowedClientIpRanges: {
+    name: r.name
+    description: r.?description ?? ''
+    ipAddressRange: r.ipAddressRange
+    action: ipRestrictionMode
+  }
+]
 
 // Private-networking resource names + subnet resource IDs (only materialised when isPrivate).
 var vnetName = '${namePrefix}-vnet-${unique}'
@@ -152,11 +439,12 @@ var postgresPeName = '${postgresServerName}-pe'
 resource logAnalytics 'Microsoft.OperationalInsights/workspaces@2023-09-01' = {
   name: workspaceName
   location: location
+  tags: resourceTags
   properties: {
     sku: {
       name: 'PerGB2018'
     }
-    retentionInDays: 30
+    retentionInDays: logRetentionDays
     features: {
       enableLogAccessUsingOnlyResourcePermissions: true
     }
@@ -171,6 +459,7 @@ resource logAnalytics 'Microsoft.OperationalInsights/workspaces@2023-09-01' = {
 resource vnet 'Microsoft.Network/virtualNetworks@2023-11-01' = if (isPrivate) {
   name: vnetName
   location: location
+  tags: resourceTags
   properties: {
     addressSpace: {
       addressPrefixes: [
@@ -206,7 +495,9 @@ resource vnet 'Microsoft.Network/virtualNetworks@2023-11-01' = if (isPrivate) {
 resource containerEnv 'Microsoft.App/managedEnvironments@2024-03-01' = {
   name: environmentName
   location: location
+  tags: resourceTags
   properties: {
+    zoneRedundant: containerEnvironmentZoneRedundant
     appLogsConfiguration: {
       destination: 'log-analytics'
       logAnalyticsConfiguration: {
@@ -228,8 +519,9 @@ resource containerEnv 'Microsoft.App/managedEnvironments@2024-03-01' = {
 resource storage 'Microsoft.Storage/storageAccounts@2023-05-01' = {
   name: storageAccountName
   location: location
+  tags: resourceTags
   sku: {
-    name: 'Standard_LRS'
+    name: storageRedundancy
   }
   kind: 'StorageV2'
   properties: {
@@ -256,13 +548,19 @@ resource storage 'Microsoft.Storage/storageAccounts@2023-05-01' = {
 resource fileService 'Microsoft.Storage/storageAccounts/fileServices@2023-05-01' = {
   parent: storage
   name: 'default'
+  properties: {
+    shareDeleteRetentionPolicy: {
+      enabled: true
+      days: fileShareSoftDeleteRetentionDays
+    }
+  }
 }
 
 resource fileShare 'Microsoft.Storage/storageAccounts/fileServices/shares@2023-05-01' = {
   parent: fileService
   name: fileShareName
   properties: {
-    shareQuota: 20
+    shareQuota: fileShareQuotaGB
     enabledProtocols: 'SMB'
   }
 }
@@ -286,6 +584,7 @@ resource envStorage 'Microsoft.App/managedEnvironments/storages@2024-03-01' = {
 resource fileDnsZone 'Microsoft.Network/privateDnsZones@2020-06-01' = if (isPrivate) {
   name: filePrivateDnsZoneName
   location: 'global'
+  tags: resourceTags
 }
 
 resource fileDnsZoneLink 'Microsoft.Network/privateDnsZones/virtualNetworkLinks@2020-06-01' = if (isPrivate) {
@@ -304,6 +603,7 @@ resource fileDnsZoneLink 'Microsoft.Network/privateDnsZones/virtualNetworkLinks@
 resource storageFilePe 'Microsoft.Network/privateEndpoints@2023-11-01' = if (isPrivate) {
   name: storageFilePeName
   location: location
+  tags: resourceTags
   properties: {
     subnet: {
       id: peSubnetId
@@ -343,30 +643,43 @@ resource storageFilePeDnsGroup 'Microsoft.Network/privateEndpoints/privateDnsZon
 resource postgres 'Microsoft.DBforPostgreSQL/flexibleServers@2024-08-01' = {
   name: postgresServerName
   location: location
+  tags: resourceTags
   sku: {
     name: postgresSkuName
-    tier: 'Burstable'
+    tier: postgresSkuTier
   }
-  properties: {
+  properties: union({
     version: '16'
     administratorLogin: postgresAdminLogin
     administratorLoginPassword: postgresAdminPassword
     storage: {
-      storageSizeGB: 32
+      storageSizeGB: postgresStorageSizeGB
+      autoGrow: postgresStorageAutoGrow
     }
     backup: {
-      backupRetentionDays: 7
-      geoRedundantBackup: 'Disabled'
+      backupRetentionDays: postgresBackupRetentionDays
+      geoRedundantBackup: postgresGeoRedundantBackup
     }
-    highAvailability: {
-      mode: 'Disabled'
-    }
+    highAvailability: union({
+      mode: postgresHighAvailabilityMode
+    }, empty(postgresStandbyAvailabilityZone) ? {} : {
+      standbyAvailabilityZone: postgresStandbyAvailabilityZone
+    })
+    maintenanceWindow: union({
+      customWindow: postgresCustomMaintenanceWindow
+    }, postgresCustomMaintenanceWindow == 'Enabled' ? {
+      dayOfWeek: postgresMaintenanceDayOfWeek
+      startHour: postgresMaintenanceStartHour
+      startMinute: postgresMaintenanceStartMinute
+    } : {})
     // In private mode the server is reachable ONLY through its Private Endpoint (public access
     // disabled); in public mode it keeps public/TLS access guarded by the AllowAzureServices rule.
     network: {
       publicNetworkAccess: isPrivate ? 'Disabled' : 'Enabled'
     }
-  }
+  }, empty(postgresAvailabilityZone) ? {} : {
+    availabilityZone: postgresAvailabilityZone
+  })
 }
 
 resource postgresDatabase 'Microsoft.DBforPostgreSQL/flexibleServers/databases@2024-08-01' = {
@@ -397,6 +710,7 @@ resource allowAzureServices 'Microsoft.DBforPostgreSQL/flexibleServers/firewallR
 resource postgresDnsZone 'Microsoft.Network/privateDnsZones@2020-06-01' = if (isPrivate) {
   name: postgresPrivateDnsZoneName
   location: 'global'
+  tags: resourceTags
 }
 
 resource postgresDnsZoneLink 'Microsoft.Network/privateDnsZones/virtualNetworkLinks@2020-06-01' = if (isPrivate) {
@@ -415,6 +729,7 @@ resource postgresDnsZoneLink 'Microsoft.Network/privateDnsZones/virtualNetworkLi
 resource postgresPe 'Microsoft.Network/privateEndpoints@2023-11-01' = if (isPrivate) {
   name: postgresPeName
   location: location
+  tags: resourceTags
   properties: {
     subnet: {
       id: peSubnetId
@@ -454,38 +769,42 @@ resource postgresPeDnsGroup 'Microsoft.Network/privateEndpoints/privateDnsZoneGr
 resource containerApp 'Microsoft.App/containerApps@2024-03-01' = {
   name: containerAppName
   location: location
+  tags: resourceTags
+  identity: hasUserAssignedIdentity ? {
+    type: 'SystemAssigned,UserAssigned'
+    userAssignedIdentities: {
+      '${containerRegistryIdentityResourceId}': {}
+    }
+  } : {
+    type: 'SystemAssigned'
+  }
   properties: {
     managedEnvironmentId: containerEnv.id
     configuration: {
       activeRevisionsMode: 'Single'
-      ingress: {
-        external: true
-        targetPort: 8000
-        transport: 'auto'
-        allowInsecure: false
-        traffic: [
-          {
-            latestRevision: true
-            weight: 100
-          }
-        ]
-      }
-      secrets: [
+      registries: registryCredentials
+      ingress: union(
         {
-          name: 'database-url'
-          value: databaseUrl
-        }
-        {
-          name: 'admin-password'
-          value: adminPassword
-        }
-        {
-          name: 'sso-oidc-client-secret'
-          value: ssoOidcClientSecret
-        }
-      ]
+          external: ingressVisibility == 'External'
+          targetPort: 8000
+          transport: 'auto'
+          allowInsecure: false
+          traffic: [
+            {
+              latestRevision: true
+              weight: 100
+            }
+          ]
+        },
+        // Only emit the property when ranges were supplied: an EMPTY ipSecurityRestrictions
+        // array is not the same as an absent one, and leaving the default deployment byte-identical
+        // to before matters more than template tidiness.
+        empty(allowedClientIpRanges) ? {} : { ipSecurityRestrictions: ipSecurityRestrictions }
+      )
+      secrets: containerSecrets
     }
     template: {
+      revisionSuffix: containerRevisionSuffix
       containers: [
         {
           name: 'azsupagent'
@@ -503,6 +822,12 @@ resource containerApp 'Microsoft.App/containerApps@2024-03-01' = {
               name: 'DATABASE_URL'
               secretRef: 'database-url'
             }
+            ...hasSecretsEncryptionKey ? [
+              {
+                name: 'SECRETS_ENCRYPTION_KEY'
+                secretRef: 'secrets-encryption-key'
+              }
+            ] : []
             {
               name: 'SSO_OIDC_ENABLED'
               value: string(ssoOidcEnabled)
@@ -536,10 +861,25 @@ resource containerApp 'Microsoft.App/containerApps@2024-03-01' = {
               value: 'true'
             }
             {
-              // ACA ingress owns and rewrites X-Forwarded-For; trusting it restores the
-              // real client IP for global login throttling and security audit records.
+              // ACA ingress APPENDS the address it observed to X-Forwarded-For (measured
+              // 2026-08-04 — it does NOT replace the header, contrary to what this comment
+              // previously claimed). Trusting it restores the real client IP for the global
+              // login throttle, the audit records and the network access allowlist. The app
+              // reads the header RIGHT-to-LEFT precisely because of that append behaviour:
+              // anything a caller injects sits to the LEFT of the address ACA vouches for.
+              // See backend/app/core/clientip.py.
               name: 'TRUST_FORWARDED_HEADERS'
               value: 'true'
+            }
+            {
+              // First-boot seed for the in-app allowlist (see the allowlistSeed parameter).
+              // Empty string = no seed, and the app starts unrestricted.
+              name: 'IP_ALLOWLIST_SEED'
+              value: allowlistSeed
+            }
+            {
+              name: 'IP_ALLOWLIST_SEED_MODE'
+              value: allowlistSeedMode
             }
             {
               name: 'DOTNET_SYSTEM_GLOBALIZATION_INVARIANT'
@@ -580,6 +920,47 @@ resource containerApp 'Microsoft.App/containerApps@2024-03-01' = {
             cpu: json(containerCpu)
             memory: containerMemory
           }
+          probes: [
+            {
+              type: 'Startup'
+              httpGet: {
+                path: '/healthz'
+                port: 8000
+                scheme: 'HTTP'
+              }
+              initialDelaySeconds: 5
+              periodSeconds: 10
+              timeoutSeconds: 3
+              failureThreshold: 10
+              successThreshold: 1
+            }
+            {
+              type: 'Liveness'
+              httpGet: {
+                path: '/healthz'
+                port: 8000
+                scheme: 'HTTP'
+              }
+              initialDelaySeconds: 10
+              periodSeconds: 30
+              timeoutSeconds: 3
+              failureThreshold: 3
+              successThreshold: 1
+            }
+            {
+              type: 'Readiness'
+              httpGet: {
+                path: '/readyz'
+                port: 8000
+                scheme: 'HTTP'
+              }
+              initialDelaySeconds: 5
+              periodSeconds: 10
+              timeoutSeconds: 3
+              failureThreshold: 3
+              successThreshold: 1
+            }
+          ]
           volumeMounts: [
             {
               volumeName: 'appdata'
@@ -589,8 +970,18 @@ resource containerApp 'Microsoft.App/containerApps@2024-03-01' = {
         }
       ]
       scale: {
-        minReplicas: 1
-        maxReplicas: 1
+        minReplicas: appMinReplicas
+        maxReplicas: appMaxReplicas
+        rules: [
+          {
+            name: 'http-concurrency'
+            http: {
+              metadata: {
+                concurrentRequests: string(appHttpConcurrency)
+              }
+            }
+          }
+        ]
       }
       volumes: [
         {
@@ -616,8 +1007,346 @@ resource containerApp 'Microsoft.App/containerApps@2024-03-01' = {
   ]
 }
 
+// Container App console and system logs already flow through containerEnv.appLogsConfiguration.
+// Adding a second diagnostic setting on the app would be unsupported duplication, so only the
+// data services receive diagnostic settings here.
+resource postgresDiagnostics 'Microsoft.Insights/diagnosticSettings@2021-05-01-preview' = if (enableDiagnosticSettings) {
+  name: 'send-to-${workspaceName}'
+  scope: postgres
+  properties: {
+    workspaceId: logAnalytics.id
+    logs: [
+      {
+        category: 'PostgreSQLLogs'
+        enabled: true
+      }
+    ]
+    metrics: [
+      {
+        category: 'AllMetrics'
+        enabled: true
+      }
+    ]
+  }
+}
+
+resource storageFileDiagnostics 'Microsoft.Insights/diagnosticSettings@2021-05-01-preview' = if (enableDiagnosticSettings) {
+  name: 'send-to-${workspaceName}'
+  scope: fileService
+  properties: {
+    workspaceId: logAnalytics.id
+    logAnalyticsDestinationType: 'Dedicated'
+    logs: [
+      {
+        category: 'StorageRead'
+        enabled: true
+      }
+      {
+        category: 'StorageWrite'
+        enabled: true
+      }
+      {
+        category: 'StorageDelete'
+        enabled: true
+      }
+    ]
+    metrics: [
+      {
+        category: 'AllMetrics'
+        enabled: true
+      }
+    ]
+  }
+}
+
+resource actionGroup 'Microsoft.Insights/actionGroups@2023-01-01' = if (enableAlerts || enableLogAlerts) {
+  name: '${namePrefix}-ag-${unique}'
+  location: 'global'
+  tags: resourceTags
+  properties: {
+    groupShortName: substring('${namePrefix}alerts', 0, min(length('${namePrefix}alerts'), 12))
+    enabled: true
+    emailReceivers: empty(alertEmailReceiver) ? [] : [
+      {
+        name: 'operations-email'
+        emailAddress: alertEmailReceiver
+        useCommonAlertSchema: true
+      }
+    ]
+  }
+}
+
+var platformMetricAlerts = [
+  {
+    name: 'PostgreSQL CPU high'
+    description: 'PostgreSQL average CPU exceeded 80 percent for five minutes.'
+    scope: postgres.id
+    metricNamespace: 'Microsoft.DBforPostgreSQL/flexibleServers'
+    metricName: 'cpu_percent'
+    operator: 'GreaterThan'
+    threshold: 80
+    timeAggregation: 'Average'
+    dimensions: []
+    severity: 2
+  }
+  {
+    name: 'PostgreSQL memory high'
+    description: 'PostgreSQL average memory exceeded 85 percent for five minutes.'
+    scope: postgres.id
+    metricNamespace: 'Microsoft.DBforPostgreSQL/flexibleServers'
+    metricName: 'memory_percent'
+    operator: 'GreaterThan'
+    threshold: 85
+    timeAggregation: 'Average'
+    dimensions: []
+    severity: 2
+  }
+  {
+    name: 'PostgreSQL connections high'
+    description: 'PostgreSQL active connections exceeded the configured threshold.'
+    scope: postgres.id
+    metricNamespace: 'Microsoft.DBforPostgreSQL/flexibleServers'
+    metricName: 'active_connections'
+    operator: 'GreaterThan'
+    threshold: postgresConnectionsAlertThreshold
+    timeAggregation: 'Maximum'
+    dimensions: []
+    severity: 2
+  }
+  {
+    name: 'PostgreSQL storage high'
+    description: 'PostgreSQL average storage use exceeded 80 percent for five minutes.'
+    scope: postgres.id
+    metricNamespace: 'Microsoft.DBforPostgreSQL/flexibleServers'
+    metricName: 'storage_percent'
+    operator: 'GreaterThan'
+    threshold: 80
+    timeAggregation: 'Average'
+    dimensions: []
+    severity: 1
+  }
+  {
+    name: 'PostgreSQL failed connections'
+    description: 'PostgreSQL reported more than five failed connections in five minutes.'
+    scope: postgres.id
+    metricNamespace: 'Microsoft.DBforPostgreSQL/flexibleServers'
+    metricName: 'connections_failed'
+    operator: 'GreaterThan'
+    threshold: 5
+    timeAggregation: 'Total'
+    dimensions: []
+    severity: 1
+  }
+  {
+    name: 'Container App HTTP 5xx'
+    description: 'The Container App returned one or more server-error responses in five minutes.'
+    scope: containerApp.id
+    metricNamespace: 'Microsoft.App/containerapps'
+    metricName: 'Requests'
+    operator: 'GreaterThan'
+    threshold: 0
+    timeAggregation: 'Total'
+    dimensions: [
+      {
+        name: 'statusCodeCategory'
+        operator: 'Include'
+        values: [
+          '5xx'
+        ]
+      }
+    ]
+    severity: 1
+  }
+  {
+    name: 'Container App replica restarts'
+    description: 'A replica cumulative restart counter exceeded three; investigate revision health.'
+    scope: containerApp.id
+    metricNamespace: 'Microsoft.App/containerapps'
+    metricName: 'RestartCount'
+    operator: 'GreaterThan'
+    threshold: 3
+    timeAggregation: 'Maximum'
+    dimensions: []
+    severity: 1
+  }
+  {
+    name: 'Container App replicas below minimum'
+    description: 'Available replicas fell below the configured minimum.'
+    scope: containerApp.id
+    metricNamespace: 'Microsoft.App/containerapps'
+    metricName: 'Replicas'
+    operator: 'LessThan'
+    threshold: appMinReplicas
+    timeAggregation: 'Maximum'
+    dimensions: []
+    severity: 1
+  }
+  {
+    name: 'Container App response time high'
+    description: 'Average ingress response time exceeded the configured threshold for five minutes.'
+    scope: containerApp.id
+    metricNamespace: 'Microsoft.App/containerapps'
+    metricName: 'ResponseTime'
+    operator: 'GreaterThan'
+    threshold: appResponseTimeAlertThresholdMs
+    timeAggregation: 'Average'
+    dimensions: []
+    severity: 2
+  }
+  {
+    name: 'Azure Files availability low'
+    description: 'Azure Files average availability fell below 99 percent for five minutes.'
+    scope: fileService.id
+    metricNamespace: 'Microsoft.Storage/storageAccounts/fileServices'
+    metricName: 'Availability'
+    operator: 'LessThan'
+    threshold: 99
+    timeAggregation: 'Average'
+    dimensions: []
+    severity: 1
+  }
+  {
+    name: 'Azure Files capacity high'
+    description: 'Azure Files capacity exceeded 80 percent of the configured share quota.'
+    scope: fileService.id
+    metricNamespace: 'Microsoft.Storage/storageAccounts/fileServices'
+    metricName: 'FileCapacity'
+    operator: 'GreaterThan'
+    threshold: fileShareQuotaGB * 1073741824 * 80 / 100
+    timeAggregation: 'Average'
+    dimensions: [
+      {
+        name: 'FileShare'
+        operator: 'Include'
+        values: [
+          fileShareName
+        ]
+      }
+    ]
+    severity: 2
+  }
+]
+
+resource platformMetricAlert 'Microsoft.Insights/metricAlerts@2018-03-01' = [for alert in platformMetricAlerts: if (enableAlerts) {
+  name: '${containerAppName}-${uniqueString(alert.name)}'
+  location: 'global'
+  tags: resourceTags
+  properties: {
+    description: alert.description
+    severity: alert.severity
+    enabled: true
+    scopes: [
+      alert.scope
+    ]
+    evaluationFrequency: alert.metricName == 'FileCapacity' ? 'PT15M' : 'PT1M'
+    windowSize: alert.metricName == 'FileCapacity' ? 'PT1H' : 'PT5M'
+    autoMitigate: true
+    criteria: {
+      'odata.type': 'Microsoft.Azure.Monitor.SingleResourceMultipleMetricCriteria'
+      allOf: [
+        {
+          name: 'condition'
+          criterionType: 'StaticThresholdCriterion'
+          metricNamespace: alert.metricNamespace
+          metricName: alert.metricName
+          operator: alert.operator
+          threshold: alert.threshold
+          timeAggregation: alert.timeAggregation
+          dimensions: alert.dimensions
+          skipMetricValidation: false
+        }
+      ]
+    }
+    actions: [
+      {
+        actionGroupId: actionGroup.id
+      }
+    ]
+  }
+}]
+
+var logAlertDefinitions = [
+  {
+    name: 'Application readiness and loop health'
+    description: 'Application logs reported an event-loop stall, database-pool exhaustion, or readiness failure.'
+    query: 'ContainerAppConsoleLogs | where ContainerAppName == \'${containerAppName}\' | where Log has_any (\'event loop blocked for\', \'QueuePool limit\', \'readiness probe failed\')'
+  }
+  {
+    name: 'Container App platform restart'
+    description: 'Container Apps system logs reported a restart event for this application.'
+    query: 'ContainerAppSystemLogs | where ContainerAppName == \'${containerAppName}\' | where Reason has \'Restart\' or Log has \'restart\''
+  }
+]
+
+resource logAlert 'Microsoft.Insights/scheduledQueryRules@2023-12-01' = [for alert in logAlertDefinitions: if (enableLogAlerts) {
+  name: '${containerAppName}-log-${uniqueString(alert.name)}'
+  location: location
+  kind: 'LogAlert'
+  tags: resourceTags
+  properties: {
+    displayName: alert.name
+    description: alert.description
+    enabled: true
+    severity: 1
+    scopes: [
+      logAnalytics.id
+    ]
+    evaluationFrequency: 'PT5M'
+    windowSize: 'PT5M'
+    skipQueryValidation: true
+    autoMitigate: true
+    criteria: {
+      allOf: [
+        {
+          query: alert.query
+          timeAggregation: 'Count'
+          operator: 'GreaterThan'
+          threshold: 0
+          failingPeriods: {
+            numberOfEvaluationPeriods: 1
+            minFailingPeriodsToAlert: 1
+          }
+        }
+      ]
+    }
+    actions: {
+      actionGroups: [
+        actionGroup.id
+      ]
+    }
+  }
+}]
+
+resource postgresLock 'Microsoft.Authorization/locks@2016-09-01' = if (resourceLock == 'CanNotDelete') {
+  name: 'prevent-accidental-delete'
+  scope: postgres
+  properties: {
+    level: 'CanNotDelete'
+    notes: 'Optional deployment lock. Remove deliberately before deleting PostgreSQL.'
+  }
+}
+
+resource storageLock 'Microsoft.Authorization/locks@2016-09-01' = if (resourceLock == 'CanNotDelete') {
+  name: 'prevent-accidental-delete'
+  scope: storage
+  properties: {
+    level: 'CanNotDelete'
+    notes: 'Optional deployment lock. Remove deliberately before deleting persistent Azure Files data.'
+  }
+}
+
+resource containerAppLock 'Microsoft.Authorization/locks@2016-09-01' = if (resourceLock == 'CanNotDelete') {
+  name: 'prevent-accidental-delete'
+  scope: containerApp
+  properties: {
+    level: 'CanNotDelete'
+    notes: 'Optional deployment lock. Remove deliberately before deleting the application.'
+  }
+}
+
 output applicationUrl string = 'https://${containerApp.properties.configuration.ingress.fqdn}'
 output containerAppName string = containerApp.name
+output containerAppPrincipalId string = containerApp.identity.principalId
 output postgresServerName string = postgres.name
 output storageAccountName string = storage.name
 output privateNetworking string = privateNetworking

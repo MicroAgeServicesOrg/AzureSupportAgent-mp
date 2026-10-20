@@ -40,11 +40,6 @@ from app.entra.ca_engine import (
     CTRL_SIGNIN_FREQUENCY,
 )
 from app.entra.collectors.ca import (
-    APP_ADMIN_PORTALS,
-    APP_ALL,
-    APP_AZURE_MANAGEMENT,
-    APP_OFFICE365,
-    LEGACY_CLIENT_APPS,
     STATE_DISABLED,
     STATE_ENABLED,
     STATE_REPORT_ONLY,
@@ -120,8 +115,8 @@ DEFAULT_CONTEXTS: tuple[SignInContext, ...] = (
     SignInContext("admin_portal", "Microsoft Admin Portals", app_class="admin_planes"),
     SignInContext("azure_mgmt", "Azure management", app_class="management_apis"),
     # The content surface. Without this, a change scoped to SharePoint/Exchange/Teams simulated
-    # as affecting nobody — the only classes modelled were the two admin ones, so the simulator
-    # was blind to changes on the applications where the organisation's data actually lives.
+    # as affecting nobody — the only classes modeled were the two admin ones, so the simulator
+    # was blind to changes on the applications where the organization's data actually lives.
     SignInContext("collab_content", "SharePoint, Exchange and Teams content",
                   app_class="collaboration_content"),
     SignInContext("office365", "Office 365 suite", app_class="office365_bundle"),
@@ -360,7 +355,7 @@ def apply_changes(
 ) -> tuple[list[dict[str, Any]], list[str]]:
     """Produce the proposed policy set. Never mutates the baseline, never writes to Graph.
 
-    A change that cannot be applied is an error, never a silent no-op: an unrecognised
+    A change that cannot be applied is an error, never a silent no-op: an unrecognized
     kind or an unknown policy id would otherwise produce a reassuring "nothing changes"
     diff, which is the worst possible answer for a security decision."""
     by_id = {p["id"]: dict(p) for p in policies}

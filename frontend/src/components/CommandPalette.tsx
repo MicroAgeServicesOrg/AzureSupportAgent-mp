@@ -2,6 +2,9 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { useAuth } from "./AuthContext";
 import { DESTINATIONS, type Destination } from "../help/content";
+import { canAccess } from "../utils/accessControl";
+import { routeRequirement } from "./routeAccess";
+import { recentItemIcon, useRecentItems } from "./RecentItems";
 
 /**
  * Command Palette — press Ctrl/⌘+K anywhere to fuzzily jump to any page or action. The single
@@ -10,12 +13,13 @@ import { DESTINATIONS, type Destination } from "../help/content";
  */
 export function CommandPalette() {
   const navigate = useNavigate();
-  const { isAdmin } = useAuth();
+  const { user } = useAuth();
   const [open, setOpen] = useState(false);
   const [query, setQuery] = useState("");
   const [active, setActive] = useState(0);
   const inputRef = useRef<HTMLInputElement>(null);
   const listRef = useRef<HTMLDivElement>(null);
+  const recentQ = useRecentItems(8);
 
   // Global hotkey: Ctrl/⌘+K toggles; "/" opens when nothing is focused.
   useEffect(() => {
@@ -41,7 +45,19 @@ export function CommandPalette() {
   }, [open]);
 
   const items = useMemo(() => {
-    const all = DESTINATIONS.filter((d) => isAdmin || !d.adminOnly);
+    const recent: Destination[] = (recentQ.data?.items ?? []).map((item) => ({
+      label: item.title,
+      path: item.route,
+      group: "Recently visited",
+      icon: recentItemIcon(item.kind),
+      keywords: `${item.subtitle} ${item.kind.replace(/_/g, " ")}`,
+    }));
+    const recentPaths = new Set(recent.map((item) => item.path));
+    const all = [
+      ...recent,
+      ...DESTINATIONS.filter((destination) =>
+        !recentPaths.has(destination.path) && canAccess(user, routeRequirement(destination.path))),
+    ];
     const q = query.trim().toLowerCase();
     if (!q) return all;
     const tokens = q.split(/\s+/);
@@ -49,7 +65,7 @@ export function CommandPalette() {
       const hay = `${d.label} ${d.group} ${d.keywords ?? ""}`.toLowerCase();
       return tokens.every((t) => hay.includes(t));
     });
-  }, [query, isAdmin]);
+  }, [query, recentQ.data?.items, user]);
 
   // Group while preserving order.
   const grouped = useMemo(() => {
@@ -98,7 +114,7 @@ export function CommandPalette() {
 
   return (
     <div
-      className="fixed inset-0 z-[60] flex items-start justify-center bg-black/40 px-4 pt-[12vh] backdrop-blur-[1px]"
+      className="fixed inset-0 z-60 flex items-start justify-center bg-black/40 px-4 pt-[12vh] backdrop-blur-[1px]"
       onClick={() => setOpen(false)}
     >
       <div
@@ -113,10 +129,10 @@ export function CommandPalette() {
             onChange={(e) => { setQuery(e.target.value); setActive(0); }}
             onKeyDown={onKeyDown}
             placeholder="Search pages and actions…"
-            className="w-full bg-transparent text-sm outline-none placeholder:text-gray-400"
+            className="w-full bg-transparent text-sm outline-hidden placeholder:text-gray-400"
             aria-label="Command palette search"
           />
-          <kbd className="rounded border bg-gray-50 px-1.5 py-0.5 text-[10px] text-gray-400">Esc</kbd>
+          <kbd className="rounded-sm border bg-gray-50 px-1.5 py-0.5 text-[10px] text-gray-400">Esc</kbd>
         </div>
         <div ref={listRef} className="max-h-[50vh] overflow-y-auto py-1">
           {items.length === 0 ? (
@@ -137,7 +153,7 @@ export function CommandPalette() {
                   >
                     <span className="text-base" aria-hidden>{d.icon}</span>
                     <span className="min-w-0 flex-1 truncate">{d.label}</span>
-                    {d.adminOnly && <span className="shrink-0 rounded bg-gray-100 px-1.5 py-0.5 text-[9px] uppercase text-gray-400">admin</span>}
+                    {d.adminOnly && <span className="shrink-0 rounded-sm bg-gray-100 px-1.5 py-0.5 text-[9px] uppercase text-gray-400">admin</span>}
                   </button>
                 ))}
               </div>
@@ -145,7 +161,7 @@ export function CommandPalette() {
           )}
         </div>
         <div className="flex items-center justify-between border-t bg-gray-50 px-4 py-2 text-[11px] text-gray-400">
-          <span><kbd className="rounded border bg-white px-1">↑</kbd> <kbd className="rounded border bg-white px-1">↓</kbd> to navigate · <kbd className="rounded border bg-white px-1">↵</kbd> to open</span>
+          <span><kbd className="rounded-sm border bg-white px-1">↑</kbd> <kbd className="rounded-sm border bg-white px-1">↓</kbd> to navigate · <kbd className="rounded-sm border bg-white px-1">↵</kbd> to open</span>
           <span>Command Palette</span>
         </div>
       </div>

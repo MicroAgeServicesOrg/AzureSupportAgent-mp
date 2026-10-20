@@ -10,6 +10,9 @@ permalink: /how-to/core-workloads/autopilot/
 
 # Discover workloads with Autopilot
 
+{: .note }
+**Screenshot note:** The native Autopilot screens use synthetic browser-only survey and candidate results. No Azure Resource Graph enumeration, AI inference, or probe occurred. Save was deliberately not clicked; no workload records or follow-on jobs were created, and the displayed estimates are not measured execution costs.
+
 ## Prerequisites
 
 - `workloads.read` to survey/discover and `workloads.write` to save candidates.
@@ -32,6 +35,8 @@ Open `/workloads` and select **✨ Autopilot**.
 
 **Verification:** Compare survey scope and counts with Resource Graph/inventory and confirm no unintended subscription is included.
 
+{% include screenshot.html file="fdesign-autopilot-survey.png" title="Inspect the survey before grouping resources" caption="Five supplied resources populate native facets and a zero-AI-call estimate. The survey response is synthetic rather than collected from Azure; use the controls to understand scope and sculpting without reading the counts as estate evidence." %}
+
 ## How to sculpt discovery inputs
 
 1. Choose **Fast**, **Balanced**, or **Thorough** as a starting preset.
@@ -40,7 +45,10 @@ Open `/workloads` and select **✨ Autopilot**.
 4. Apply hard filters for type, environment, region, subscription, or name only when omitted resources must not enter any candidate.
 5. Optionally seed groups with a reliable tag key or detected naming convention.
 6. Set a confidence floor and maximum AI-call budget.
-7. Recheck the estimate after every material change; save a discovery profile when the same configuration will be reused.
+7. Under Advanced, set **Minimum resources per proposed workload** when recurring discovery
+   should exclude undersized candidates during review. A value of `5` excludes candidates with
+   1–4 resources; a five-resource candidate remains eligible. The default `1` excludes nothing.
+8. Recheck the estimate after every material change; save a discovery profile when the same configuration will be reused. The minimum is stored in the profile.
 
 **Expected result:** The effective input is small enough to review and broad enough to preserve intended application members.
 
@@ -51,13 +59,23 @@ Open `/workloads` and select **✨ Autopilot**.
 1. Select AI, resource-group, subscription, or tag grouping.
 2. Start discovery and monitor enumeration, filtering, grouping, naming, and completion progress.
 3. Review each candidate's name, description, type, environment, criticality, members, confidence, evidence, and reasoning.
-4. Correct editable metadata/membership and reject weak or duplicate candidates.
-5. Pay special attention to shared services, resources reattached after noise filtering, and candidates produced after the AI-call cap.
-6. Save only accepted candidates.
+4. Adjust **Minimum resources per workload** in Review to hide fragmented candidates without
+   rerunning Azure discovery or AI. Select **Show excluded** to inspect them, and **Include
+   anyway** for a legitimate undersized workload.
+5. Correct editable metadata/membership and reject weak or duplicate candidates. Automatic
+   minimum-size exclusions are review policy and are not learned as AI grouping rejections.
+6. Compare **Grouped by discovery** with **Will be saved**. The latter reflects the current
+   minimum, manual selections, overrides, and unique resource IDs.
+7. Pay special attention to shared services, resources reattached after noise filtering, and candidates produced after the AI-call cap.
+8. Save only accepted candidates.
 
 **Expected result:** Approved candidates become active workload records; discovery itself does not change Azure.
 
 **Verification:** Open each saved workload, inspect membership, then run Groups suggestions and Overlaps.
+
+{% include screenshot.html file="fdesign-autopilot-candidate-evidence.png" title="Inspect a candidate's membership and reasoning" caption="Native confidence badges, member counts, tags, type chips, and expandable reasoning display synthetic candidate evidence. Follow-on Mission Control and diagram options are unchecked. No AI grouping or workload save is demonstrated." %}
+
+{% include screenshot.html file="fdesign-autopilot-review-needed.png" title="Hold uncertain shared services out of the selection" caption="The synthetic shared-service candidate is left unselected for human review using native selection controls. Review-needed is example evidence, not an added UI status. Save was not clicked, so this view is a review decision rather than a saved workload result." %}
 
 ## How to tune poor results
 
@@ -75,6 +93,9 @@ Open `/workloads` and select **✨ Autopilot**.
 - Survey and discovery are read-only against Azure.
 - AI grouping can expose resource metadata to the configured provider; use approved providers and narrow filters.
 - Confidence describes grouping certainty, not health.
+- The minimum-size policy is applied after grouping and child-resource reattachment. It reduces
+	review and save volume, not the AI calls already used to discover candidate boundaries.
+- Single-resource Seed mode ignores the minimum because the operator deliberately requested one workload.
 - Saving writes only workload records. Incorrect records can be edited or soft-deleted.
 - Never put secrets or personal data in naming hints or saved profiles.
 
@@ -87,6 +108,8 @@ Open `/workloads` and select **✨ Autopilot**.
 | Discovery stream fails | Check provider health/rate limits; rerun survey before retrying. |
 | Too many fallback groups | Raise the AI-call budget only after scope reduction, or use deterministic grouping deliberately. |
 | Candidates overlap | Save only reviewed candidates, then run deep overlap analysis. |
+| Small candidates are absent from the visible review list | Select **Show excluded**, lower the minimum, or choose **Include anyway** for an intentional exception. |
+| Save remains disabled | Select at least one eligible candidate, or override an undersized candidate. Search and sort do not change selection, but manual unselection does. |
 
 ## Related docs
 

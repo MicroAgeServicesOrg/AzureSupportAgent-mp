@@ -9,7 +9,7 @@ from __future__ import annotations
 import uuid
 from datetime import datetime, timezone
 
-from sqlalchemy import JSON, Boolean, DateTime, ForeignKey, Integer, String
+from sqlalchemy import JSON, Boolean, DateTime, ForeignKey, Index, Integer, String, UniqueConstraint
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.core.db import Base
@@ -61,7 +61,8 @@ class Role(Base):
     __tablename__ = "roles"
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=_uuid)
-    name: Mapped[str] = mapped_column(String(64), unique=True, index=True)
+    tenant_id: Mapped[str] = mapped_column(String(128), default="default", index=True)
+    name: Mapped[str] = mapped_column(String(64), index=True)
     description: Mapped[str] = mapped_column(String(512), default="")
     # System roles (admin/operator/auditor/user) cannot be deleted; their permissions
     # may still be viewed. Custom roles are fully editable.
@@ -70,16 +71,25 @@ class Role(Base):
     permissions_json: Mapped[list] = mapped_column(JSON, default=list)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
 
+    __table_args__ = (
+        UniqueConstraint("tenant_id", "name", name="uq_roles_tenant_name"),
+    )
+
 
 class Group(Base):
     __tablename__ = "groups"
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=_uuid)
-    name: Mapped[str] = mapped_column(String(128), unique=True, index=True)
+    tenant_id: Mapped[str] = mapped_column(String(128), default="default", index=True)
+    name: Mapped[str] = mapped_column(String(128), index=True)
     description: Mapped[str] = mapped_column(String(512), default="")
     # Role ids granted to every member of this group.
     role_ids_json: Mapped[list] = mapped_column(JSON, default=list)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
+
+    __table_args__ = (
+        UniqueConstraint("tenant_id", "name", name="uq_groups_tenant_name"),
+    )
 
 
 class UserRole(Base):
@@ -123,11 +133,20 @@ class Session(Base):
     # = the union of all assigned roles (normal behavior). Never grants a role the user lacks.
     active_role: Mapped[str | None] = mapped_column(String(64), nullable=True)
 
+    # Cleanup uses an OR across these three predicates, so separate indexes let the database
+    # use a bitmap/index-union plan instead of forcing one composite's leading column.
+    __table_args__ = (
+        Index("ix_sessions_revoked", "revoked"),
+        Index("ix_sessions_expires", "expires_at"),
+        Index("ix_sessions_last_seen", "last_seen_at"),
+    )
+
 
 class IdentityProvider(Base):
     __tablename__ = "identity_providers"
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=_uuid)
+    tenant_id: Mapped[str] = mapped_column(String(128), default="default", index=True)
     name: Mapped[str] = mapped_column(String(128))
     # oidc | saml
     type: Mapped[str] = mapped_column(String(16))

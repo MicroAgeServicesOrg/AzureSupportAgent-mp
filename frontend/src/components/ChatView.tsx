@@ -5,6 +5,7 @@ import { useNavigate, useParams, useLocation, Link } from "react-router-dom";
 import { Markdown } from "./LazyMarkdown";
 import {
   api,
+  API_BASE,
   streamMessage,
   reconnectStream,
   isTurnActive,
@@ -31,6 +32,7 @@ import {
   ACCESS_SUB_IDS,
   AUTOMATIONS_NAV,
   PROACTIVE_NAV,
+  PROACTIVE_PATHS,
   POLICY_TAB_IDS,
   INVENTORY_TAB_IDS,
   TAGINTEL_TAB_IDS,
@@ -49,7 +51,13 @@ import {
   type EntraTab,
 } from "./navConfig";
 import { useAuth } from "./AuthContext";
-import { formatDuration, formatTimestamp } from "../utils/format";
+import { useRecentItem } from "./RecentItems";
+import { formatDuration, formatError, formatTimestamp } from "../utils/format";
+import { canAccess, filterPermissionedGroups } from "../utils/accessControl";
+import {
+  automationWritePermission,
+  routeRequirement,
+} from "./routeAccess";
 import {
   ComposeIcon,
   SearchIcon,
@@ -75,6 +83,7 @@ import {
   CoverageIcon,
   TelemetryIcon,
   BackupIcon,
+  RecoveryIcon,
   EvidenceIcon,
   KnowMeIcon,
   FmeaIcon,
@@ -93,6 +102,7 @@ import {
 } from "./chat/icons";
 import { PanelErrorBoundary } from "./chat/PanelErrorBoundary";
 import { MermaidDiagram as SharedMermaidDiagram, useMermaidRender } from "./MermaidDiagram";
+import { MissionControlLoading } from "./MissionControlLoading";
 
 // Heavy, admin-only panels — lazy-loaded (code-split) so the initial chat bundle stays
 // small. They only download when the user first opens Settings/Automations/Monitor.
@@ -171,6 +181,9 @@ const BackupDrCoveragePanel = lazy(() =>
 const BackupManagerPanel = lazy(() =>
   import("./BackupManagerView").then((m) => ({ default: m.BackupManagerPanel })),
 );
+const ResiliencyPanel = lazy(() =>
+  import("./ResiliencyView").then((m) => ({ default: m.ResiliencyPanel })),
+);
 const EvidenceLockerPanel = lazy(() =>
   import("./EvidenceLockerView").then((m) => ({ default: m.EvidenceLockerPanel })),
 );
@@ -216,6 +229,32 @@ function PanelLoading() {
   return (
     <div className="flex h-full items-center justify-center text-sm text-gray-400">
       Loading…
+    </div>
+  );
+}
+
+function AccessDeniedPanel() {
+  return (
+    <main className="flex min-w-0 flex-1 items-center justify-center bg-gray-50 p-6">
+      <section className="max-w-md rounded-2xl border border-amber-200 bg-white p-7 text-center shadow-xs">
+        <div className="text-3xl" aria-hidden>🔒</div>
+        <h1 className="mt-3 text-lg font-semibold text-gray-900">Access not granted</h1>
+        <p className="mt-2 text-sm leading-6 text-gray-600">
+          The active role does not include the permission required for this page. Choose an
+          accessible item from the navigation or switch roles from the account menu.
+        </p>
+        <Link to="/dashboard" className="mt-4 inline-flex rounded-lg bg-brand-dark px-4 py-2 text-sm font-medium text-white hover:bg-brand-dark/90">
+          Return to Dashboard
+        </Link>
+      </section>
+    </main>
+  );
+}
+
+function ReadOnlyBanner() {
+  return (
+    <div className="mx-4 mt-3 rounded-lg border border-sky-200 bg-sky-50 px-3 py-2 text-xs text-sky-800">
+      Read-only access — the active role can view this section but cannot change it.
     </div>
   );
 }
@@ -294,10 +333,19 @@ const STARTER_CATEGORIES: PromptCategory[] = [
   },
 ];
 
+type ToolArtifact = {
+  artifact_id: string;
+  label: string;
+  filename: string;
+  url: string;
+  kind: string;
+};
+
 type Step =
   | { kind: "reasoning"; text: string }
   | {
       kind: "tool";
+      toolCallId?: string;
       name: string;
       args: unknown;
       status: "running" | "done" | "error";
@@ -306,6 +354,7 @@ type Step =
       // Internal two-phase "learn" discovery call (fetches a service's command list).
       // Rendered muted and excluded from the step count so it doesn't clutter the trace.
       discovery?: boolean;
+      artifacts?: ToolArtifact[];
     };
 
 // A single line in the live progress feed shown while the agent works.
@@ -314,6 +363,7 @@ type LogLine = {
   text: string;
   ts: number;
   pending?: boolean;
+  error?: boolean;
   detail?: string;
   // Transient "thinking" placeholder (Brainstorming…/Formulating…/etc.). Only the
   // newest one is kept while working, and all are removed once the turn finishes.
@@ -325,7 +375,12 @@ type LogLine = {
   // the feed reads e.g. "🌐 Networking · monitor · Found 2 workspaces".
   agentIcon?: string;
   agentName?: string;
+  artifacts?: ToolArtifact[];
 };
+
+function artifactHref(url: string): string {
+  return url.startsWith("/api/") ? `${API_BASE}${url.slice(4)}` : url;
+}
 
 // Lets fenced code blocks (rendered deep in markdown) know whether the host "Run"
 // button is enabled, which CLI binaries are allowed, and which chat to run against.
@@ -444,6 +499,10 @@ function argsPreview(args: unknown): string | undefined {
   return s.length > 600 ? s.slice(0, 600) + "…" : s;
 }
 
+function toolDisplayName(name: string): string {
+  return name === "extension_azqr" ? "Azure Quick Review" : name;
+}
+
 function loadActivities(): Record<string, Step[]> {
   try {
     return JSON.parse(localStorage.getItem(ACTIVITIES_KEY) || "{}");
@@ -501,9 +560,22 @@ type LiveStream = {
   abort?: AbortController;
 };
 
+type QueuedUserMessage = {
+  id: string;
+  chatId: string;
+  content: string;
+  images: string[];
+  thinking: "normal" | "deep";
+  queuedAt: number;
+};
+
+const MAX_QUEUED_MESSAGES_PER_CHAT = 20;
+
 export default function ChatView() {
   const qc = useQueryClient();
   const navigate = useNavigate();
+  const { user: me, has } = useAuth();
+  const canChat = has("chat.use");
   const { chatId: routeChatId } = useParams<{ chatId?: string }>();
   const location = useLocation();
   // Automations live inside this shell so the chat sidebar stays visible. The URL
@@ -605,6 +677,8 @@ export default function ChatView() {
   const inBackupDr = location.pathname.startsWith("/backupdr");
   // Backup Manager — the write/management plane for Azure Backup and Site Recovery.
   const inBackupManager = location.pathname.startsWith("/backup-manager");
+  // Recovery Readiness — recover from what, in how long, losing how much.
+  const inResiliency = location.pathname.startsWith("/resiliency");
   // Evidence Locker (investigation snapshots).
   const inEvidence = location.pathname.startsWith("/evidence");
   // Durable Case Files (the persistent incident spine).
@@ -677,20 +751,58 @@ export default function ChatView() {
   // Images captured at send time, read by runSend (survives the clarify detour).
   const pendingImagesRef = useRef<string[]>([]);
   const [suggestions, setSuggestions] = useState<string[]>([]);
+  const [suggestionsLoading, setSuggestionsLoading] = useState(false);
+  const [suggestionsError, setSuggestionsError] = useState("");
+  const suggestionsAbortRef = useRef<AbortController | null>(null);
+  useEffect(() => () => suggestionsAbortRef.current?.abort(), []);
   // Inline rename state for the sidebar.
   const [renamingId, setRenamingId] = useState<string | null>(null);
   // Sidebar chat search query.
   const [chatSearch, setChatSearch] = useState("");
-  // Sidebar: collapse to an icon-only rail (persisted).
-  const [railCollapsed, setRailCollapsed] = useState<boolean>(() => {
+  // Sidebar: collapse to an icon-only rail. The explicit desktop preference is
+  // persisted separately from the responsive state so resizing an open desktop
+  // session cannot leave a 256 px rail consuming most of a phone viewport.
+  const [railCollapsedPreference, setRailCollapsedPreference] = useState<boolean>(() => {
     try {
       return localStorage.getItem("azsup.railCollapsed.v1") === "1";
     } catch {
       return false;
     }
   });
+  const [narrowViewport, setNarrowViewport] = useState<boolean>(() => {
+    try {
+      return window.matchMedia("(max-width: 767px)").matches;
+    } catch {
+      return false;
+    }
+  });
+  const [mobileRailOpen, setMobileRailOpen] = useState(false);
+  useEffect(() => {
+    const media = window.matchMedia("(max-width: 767px)");
+    const updateNarrowViewport = () => {
+      setNarrowViewport(media.matches);
+      if (!media.matches) setMobileRailOpen(false);
+    };
+    updateNarrowViewport();
+    media.addEventListener("change", updateNarrowViewport);
+    // Chromium normally emits the MediaQueryList event on resize. The window
+    // listener is a harmless fallback for embedded browsers and E2E viewports.
+    window.addEventListener("resize", updateNarrowViewport);
+    return () => {
+      media.removeEventListener("change", updateNarrowViewport);
+      window.removeEventListener("resize", updateNarrowViewport);
+    };
+  }, []);
+  useEffect(() => {
+    if (narrowViewport) setMobileRailOpen(false);
+  }, [location.pathname, narrowViewport]);
+  const railCollapsed = narrowViewport ? !mobileRailOpen : railCollapsedPreference;
   function toggleRail() {
-    setRailCollapsed((v) => {
+    if (narrowViewport) {
+      setMobileRailOpen((open) => !open);
+      return;
+    }
+    setRailCollapsedPreference((v) => {
       const next = !v;
       try {
         localStorage.setItem("azsup.railCollapsed.v1", next ? "1" : "0");
@@ -717,10 +829,10 @@ export default function ChatView() {
   }, [inAutomations, inCustomAgents]);
   // Ownership, Architectures and Estate Graph now live UNDER Proactive Support, so opening
   // any of them (or the /proactive landing) keeps the group expanded.
-  const inAnyProactive = inInventory || inPolicy || inAssessments || inIam || inEntra
-    || inCoverage || inAlertsManager || inTelemetry || inBackupDr || inBackupManager || inEvidence || inRadar || inReservations
-    || inTeleIntel || inPerformance || inTagIntel || inChangeExplorer
-    || inOwnership || inArchitectures || inKnowMe || inFmea || inGraph || inProactive || inQuota || inCapability || inCases || inInsights;
+  // Derived from PROACTIVE_NAV rather than hand-listed: a hand-maintained list silently
+  // collapsed the whole menu when Recovery Readiness was added and nobody updated it.
+  const inAnyProactive = inProactive
+    || [...PROACTIVE_PATHS].some((path) => location.pathname.startsWith(path));
   useEffect(() => {
     setProactiveOpen(inAnyProactive);
   }, [inAnyProactive]);
@@ -836,6 +948,12 @@ export default function ChatView() {
   // entry here even when the user navigates away, so returning to the chat shows
   // the live progress again. A tick state forces re-render on mutation.
   const streamsRef = useRef<Map<string, LiveStream>>(new Map());
+  // Queues are per chat, like streams and drafts. They intentionally remain in memory:
+  // image attachments can exceed browser storage quotas and must not be persisted as base64.
+  const queuedMessagesRef = useRef<Map<string, QueuedUserMessage[]>>(new Map());
+  const [queuedMessagesVersion, setQueuedMessagesVersion] = useState(0);
+  const queueProcessingRef = useRef<Set<string>>(new Set());
+  const queueBlockedRef = useRef<Set<string>>(new Set());
   // The set of chat ids with an in-flight turn, kept in REAL state (not just the ref)
   // so the sidebar re-renders — and its "Working…" spinners update — whenever ANY
   // chat starts or finishes, regardless of which chat is currently being viewed.
@@ -851,6 +969,20 @@ export default function ChatView() {
       return next;
     });
   };
+
+  function queueFor(chatId: string): QueuedUserMessage[] {
+    return queuedMessagesRef.current.get(chatId) ?? [];
+  }
+
+  function replaceQueue(chatId: string, messages: QueuedUserMessage[]) {
+    if (messages.length) queuedMessagesRef.current.set(chatId, messages);
+    else queuedMessagesRef.current.delete(chatId);
+    setQueuedMessagesVersion((version) => version + 1);
+  }
+
+  function cancelQueuedMessage(chatId: string, messageId: string) {
+    replaceQueue(chatId, queueFor(chatId).filter((message) => message.id !== messageId));
+  }
   const [, setTick] = useState(0);
   const rerender = () => setTick((t) => t + 1);
   // Coalesce high-frequency repaints (one per streamed token) into at most one per
@@ -871,19 +1003,24 @@ export default function ChatView() {
     [],
   );
 
-  const { data: chats = [] } = useQuery({ queryKey: ["chats"], queryFn: api.listChats });
+  const { data: chats = [] } = useQuery({
+    queryKey: ["chats"],
+    queryFn: api.listChats,
+    enabled: canChat,
+  });
   // Architecture memories, used to offer a memory picker when launching a deep
   // investigation on a chat whose workload has one or more documented architectures.
   const { data: allMemories } = useQuery({
     queryKey: ["architectureMemories"],
     queryFn: api.architectureMemories,
+    enabled: has("architectures.read"),
   });
   // Trash (soft-deleted chats). Only fetched while the Trash panel is open.
   const [trashOpen, setTrashOpen] = useState(false);
   const { data: trashedChats = [] } = useQuery({
     queryKey: ["trashChats"],
     queryFn: api.trashChats,
-    enabled: trashOpen,
+    enabled: canChat && trashOpen,
   });
   const { data: activeLlm } = useQuery({
     queryKey: ["activeLlm"],
@@ -897,6 +1034,7 @@ export default function ChatView() {
   const { data: serverActive } = useQuery({
     queryKey: ["activeTurns"],
     queryFn: api.activeTurns,
+    enabled: canChat,
     // Adaptive polling: while any turn is running, poll fast (4s) so live "Working…"
     // spinners stay snappy across tabs; when nothing is active, back off to 15s to cut
     // idle load on the server (B1ms Postgres) and the client. Never polls in the
@@ -919,6 +1057,7 @@ export default function ChatView() {
   const { data: tenantData } = useQuery({
     queryKey: ["azureConnections"],
     queryFn: api.azureConnections,
+    enabled: canChat || has("connections.read"),
     staleTime: 30_000,
   });
   const tenants = tenantData?.connections ?? [];
@@ -926,20 +1065,18 @@ export default function ChatView() {
   const { data: agentsData } = useQuery({
     queryKey: ["customAgents"],
     queryFn: api.customAgents,
+    enabled: has("agents.read"),
     staleTime: 30_000,
   });
   const customAgents = agentsData?.agents ?? [];
   // Only enabled agents are surfaced in the sidebar quick-launch menu and the composer
   // agent picker (disabled agents are kept but hidden).
   const enabledAgents = customAgents.filter((a) => a.enabled !== false);
-  // Identity — used to gate the Admin Dashboard link in the sidebar footer. Read from the
-  // shared AuthContext (single source of truth) so an active-role switch re-renders the menu
-  // immediately, with no manual page refresh.
-  const { user: me } = useAuth();
   // Progress-feed verbosity, configured in the dashboard (compact/normal/detailed).
   const { data: appSettings } = useQuery({
     queryKey: ["appSettings"],
     queryFn: api.appSettings,
+    enabled: has("settings.read"),
     staleTime: 60_000,
   });
   const progressLevel: ProgressLevel =
@@ -948,8 +1085,12 @@ export default function ChatView() {
   // Live stream entry for the chat currently being viewed (if any).
   const live = activeId ? streamsRef.current.get(activeId) : undefined;
   const streaming = !!live?.streaming;
+  // The version state is read so ref-only queue mutations re-render this view.
+  void queuedMessagesVersion;
+  const queuedMessages = activeId ? queueFor(activeId) : [];
   const streamText = live?.streamText ?? "";
   const errorDetail = live?.error ?? "";
+  const displayError = formatChatProviderError(errorDetail);
   const liveLog = live?.log ?? [];
   const liveStartedAt = live?.startedAt ?? Date.now();
 
@@ -1004,7 +1145,10 @@ export default function ChatView() {
       setInputSynced(draftsRef.current.get(id) ?? "");
     }
     setActive(id);
+    suggestionsAbortRef.current?.abort();
     setSuggestions([]);
+    setSuggestionsLoading(false);
+    setSuggestionsError("");
     setPendingClarify(null);
     setPendingPropose(null);
     setPendingDeepAuth(null);
@@ -1028,8 +1172,7 @@ export default function ChatView() {
     if (streamsRef.current.get(id)?.streaming) {
       rerender();
     } else {
-      void reconnectIfActive(id);
-      void loadSuggestions(id);
+      void reconnectIfActive(id).then(() => processNextQueued(id));
     }
     return true;
   }
@@ -1088,8 +1231,11 @@ export default function ChatView() {
       setInputSynced(draftsRef.current.get("") ?? "");
     }
     setActive(null);
+    suggestionsAbortRef.current?.abort();
     setMessages([]);
     setSuggestions([]);
+    setSuggestionsLoading(false);
+    setSuggestionsError("");
     setPendingClarify(null);
     setPendingPropose(null);
     setPendingDeepAuth(null);
@@ -1117,12 +1263,25 @@ export default function ChatView() {
   }, [routeChatId]);
 
   async function loadSuggestions(id: string) {
+    suggestionsAbortRef.current?.abort();
+    const controller = new AbortController();
+    suggestionsAbortRef.current = controller;
+    setSuggestionsLoading(true);
+    setSuggestionsError("");
     try {
-      const res = await api.suggestions(id);
+      const res = await api.suggestions(id, controller.signal);
       if (viewRef.current !== id) return;
       setSuggestions(res.suggestions ?? []);
-    } catch {
-      if (viewRef.current === id) setSuggestions([]);
+    } catch (error) {
+      if ((error as Error)?.name !== "AbortError" && viewRef.current === id) {
+        setSuggestions([]);
+        setSuggestionsError(formatError(error));
+      }
+    } finally {
+      if (suggestionsAbortRef.current === controller) {
+        suggestionsAbortRef.current = null;
+        setSuggestionsLoading(false);
+      }
     }
   }
 
@@ -1200,9 +1359,36 @@ export default function ChatView() {
     // composer's Send button / Enter) sends the draft and therefore clears it.
     const usingDraft = text === undefined;
     const content = (text ?? input).trim();
-    // Block only if THIS chat is already streaming; other chats may stream too.
     if (!content && attachments.length === 0) return;
-    if (activeId && streamsRef.current.get(activeId)?.streaming) return;
+
+    // A running turn owns the server's one slot for this chat. Capture the next user
+    // message instead of dropping it; it will advance after the turn finishes.
+    if (activeId && streamsRef.current.get(activeId)?.streaming) {
+      const existing = queueFor(activeId);
+      if (existing.length >= MAX_QUEUED_MESSAGES_PER_CHAT) return;
+      const images = usingDraft ? [...attachments] : [];
+      const effectiveContent = content || "Please analyze the attached image(s).";
+      replaceQueue(activeId, [
+        ...existing,
+        {
+          id: crypto.randomUUID(),
+          chatId: activeId,
+          content: effectiveContent,
+          images,
+          thinking: thinkingLevel,
+          queuedAt: Date.now(),
+        },
+      ]);
+      if (usingDraft) {
+        setInputSynced("");
+        setAttachments([]);
+        draftsRef.current.delete(activeId);
+      }
+      atBottomRef.current = true;
+      setShowNewMessages(false);
+      requestAnimationFrame(() => bottomRef.current?.scrollIntoView({ behavior: "smooth" }));
+      return;
+    }
 
     // Sending pins the view to the bottom so the user follows their own message.
     atBottomRef.current = true;
@@ -1517,7 +1703,10 @@ export default function ChatView() {
     // Move this chat to the top of Recents now (on send/retry), not after the reply.
     bumpChatToTop(streamChatId);
     setInputSynced("");
+    suggestionsAbortRef.current?.abort();
     setSuggestions([]);
+    setSuggestionsLoading(false);
+    setSuggestionsError("");
     rerender();
 
     await consumeStream(streamChatId, stream, controller, (handlers, signal) =>
@@ -1542,6 +1731,49 @@ export default function ChatView() {
         signal,
       ),
     );
+  }
+
+  async function processNextQueued(chatId: string) {
+    if (viewRef.current !== chatId) return;
+    if (queueBlockedRef.current.has(chatId) || queueProcessingRef.current.has(chatId)) return;
+    if (streamsRef.current.get(chatId)?.streaming) return;
+    const next = queueFor(chatId)[0];
+    if (!next) return;
+    if (await isTurnActive(chatId)) return;
+
+    queueProcessingRef.current.add(chatId);
+    replaceQueue(chatId, queueFor(chatId).filter((message) => message.id !== next.id));
+    pendingImagesRef.current = [...next.images];
+    try {
+      if (next.thinking === "deep" && next.images.length === 0) {
+        setPendingDeepAuth({ chatId, content: next.content, hasImages: false });
+        setDeepAgentOptions(null);
+        setDeepAgentSel(new Set());
+        setAllHandsActive(false);
+        setDeepMemorySel("");
+        void (async () => {
+          try {
+            const res = await api.deepSuggestAgents(chatId, next.content);
+            if (viewRef.current !== chatId) return;
+            setDeepAgentOptions(res.agents);
+            setDeepAgentSel(new Set(res.agents.filter((agent) => agent.recommended).map((agent) => agent.id)));
+          } catch {
+            if (viewRef.current === chatId) setDeepAgentOptions([]);
+          }
+        })();
+        return;
+      }
+      await clarifyAndSend(
+        chatId,
+        next.content,
+        next.images.length > 0,
+        next.thinking,
+      );
+    } catch {
+      replaceQueue(chatId, [next, ...queueFor(chatId)]);
+    } finally {
+      queueProcessingRef.current.delete(chatId);
+    }
   }
 
   // Wire a LiveStream's handlers to an SSE source (initial POST or reconnect) and
@@ -1618,6 +1850,7 @@ export default function ChatView() {
           writingLogged = false;
           localSteps.push({
             kind: "tool",
+            toolCallId: d.tool_call_id,
             name: d.tool_name,
             args: d.arguments,
             status: "running",
@@ -1628,7 +1861,7 @@ export default function ChatView() {
           if (!d.discovery) {
             log({
               kind: "tool",
-              text: d.tool_name,
+              text: toolDisplayName(d.tool_name),
               pending: true,
               detail: argsPreview(d.arguments),
               agentIcon: d.agent_icon,
@@ -1651,12 +1884,15 @@ export default function ChatView() {
           const isErr = !!d.is_error;
           for (let i = localSteps.length - 1; i >= 0; i--) {
             const s = localSteps[i];
-            if (s.kind === "tool" && s.status === "running") {
+            const sameCall = d.tool_call_id && s.kind === "tool" && s.toolCallId === d.tool_call_id;
+            const legacyMatch = !d.tool_call_id && s.kind === "tool" && s.name === d.tool_name && s.status === "running";
+            if (s.kind === "tool" && (sameCall || legacyMatch)) {
               localSteps[i] = {
                 ...s,
                 status: isErr ? "error" : "done",
                 summary: d.summary,
                 duration: d.duration_ms,
+                artifacts: d.artifacts,
               };
               break;
             }
@@ -1668,10 +1904,12 @@ export default function ChatView() {
           } else {
             log({
               kind: "result",
-              text: isErr ? `⚠ ${d.tool_name} failed — ${d.summary || "error"}` : (d.summary || "Done"),
+              text: isErr ? `⚠ ${toolDisplayName(d.tool_name)} failed — ${d.summary || "error"}` : (d.summary || "Done"),
+              error: isErr,
               detail: formatDuration(d.duration_ms),
               agentIcon: d.agent_icon,
               agentName: d.agent_name,
+              artifacts: d.artifacts,
             });
           }
           // War room: tally the agent's completed tool call.
@@ -1801,7 +2039,7 @@ export default function ChatView() {
     }
     setMessages(refreshed);
     rerender();
-    void loadSuggestions(streamChatId);
+    window.setTimeout(() => void processNextQueued(streamChatId), 0);
   }
 
   // Stop the in-flight response for the active chat. The turn runs in a background
@@ -1809,21 +2047,26 @@ export default function ChatView() {
   // to cancel it — aborting only the local fetch would leave it running and the UI
   // would just reconnect to it. The backend persists partial output at checkpoints, so
   // the answer-so-far is kept and the user can continue by sending another message.
-  function stopStreaming() {
+  async function stopStreaming() {
     if (!activeId) return;
     const chatId = activeId;
-    // Ask the server to cancel the background turn first, then drop the local stream.
-    void api.stopTurn(chatId).catch(() => {});
+    queueBlockedRef.current.add(chatId);
+    const stopped = api.stopTurn(chatId).catch(() => ({ stopped: false }));
     streamsRef.current.get(chatId)?.abort?.abort();
     streamsRef.current.delete(chatId);
     markStreaming(chatId, false);
     // Refresh the transcript so the persisted partial answer shows, and clear the
     // server-active spinner state quickly.
     qc.invalidateQueries({ queryKey: ["activeTurns"] });
-    void api.listMessages(chatId).then((msgs) => {
+    await stopped;
+    try {
+      const msgs = await api.listMessages(chatId);
       if (viewRef.current === chatId) setMessages(msgs);
+    } finally {
+      queueBlockedRef.current.delete(chatId);
       rerender();
-    });
+      window.setTimeout(() => void processNextQueued(chatId), 0);
+    }
     rerender();
   }
 
@@ -1873,6 +2116,8 @@ export default function ChatView() {
       /* ignore */
     }
     streamsRef.current.delete(id);
+    queuedMessagesRef.current.delete(id);
+    setQueuedMessagesVersion((version) => version + 1);
     if (activeId === id) startNewChat();
     qc.invalidateQueries({ queryKey: ["chats"] });
     qc.invalidateQueries({ queryKey: ["trashChats"] });
@@ -2122,6 +2367,19 @@ export default function ChatView() {
   // fallback provider with the chat's model (that produces a mismatched pair like
   // "GitHub Copilot · <an OpenRouter model>" and can get persisted via "Try again").
   const activeChat = chats.find((c) => c.id === activeId);
+  useRecentItem(
+    location.pathname.startsWith("/c/") && activeChat
+      ? {
+          kind: "chat",
+          item_key: activeChat.id,
+          title: activeChat.title || "Chat",
+          subtitle: activeChat.workload_id ? "Workload-scoped chat" : "Chat",
+          route: `/c/${activeChat.id}`,
+          connection_id: activeChat.connection_id,
+          workload_id: activeChat.workload_id,
+        }
+      : null,
+  );
   const chatHasModel = !!(activeChat?.provider && activeChat?.model);
   const pickerProvider = chatHasModel ? activeChat?.provider : activeLlm?.provider;
   const pickerModel = chatHasModel ? activeChat?.model : activeLlm?.model;
@@ -2317,8 +2575,11 @@ export default function ChatView() {
     // doesn't immediately reset the picker back to "Default").
     syncedChatRef.current = null;
     setActive(null);
+    suggestionsAbortRef.current?.abort();
     setMessages([]);
     setSuggestions([]);
+    setSuggestionsLoading(false);
+    setSuggestionsError("");
     setSelectedAgentId(agentId);
     navigate("/chat", { replace: true });
     setTimeout(() => composerRef.current?.focus(), 0);
@@ -2406,7 +2667,7 @@ export default function ChatView() {
             if (e.key === "Enter") void commitRename(c.id, e.currentTarget.value);
             if (e.key === "Escape") setRenamingId(null);
           }}
-          className="m-1 w-full rounded border px-2 py-1 text-[13px] focus:outline-none focus:ring-1 focus:ring-gray-300"
+          className="m-1 w-full rounded-sm border px-2 py-1 text-[13px] focus:outline-hidden focus:ring-1 focus:ring-gray-300"
         />
       ) : (
         <>
@@ -2438,14 +2699,14 @@ export default function ChatView() {
             <button
               onClick={() => setRenamingId(c.id)}
               title="Rename"
-              className="rounded p-1 text-gray-400 hover:bg-gray-300/70 hover:text-gray-700"
+              className="rounded-sm p-1 text-gray-400 hover:bg-gray-300/70 hover:text-gray-700"
             >
               <PencilIcon className="h-3.5 w-3.5" />
             </button>
             <button
               onClick={() => void deleteOneChat(c.id)}
               title="Delete"
-              className="rounded p-1 text-gray-400 hover:bg-red-100 hover:text-red-600"
+              className="rounded-sm p-1 text-gray-400 hover:bg-red-100 hover:text-red-600"
             >
               <TrashIcon className="h-3.5 w-3.5" />
             </button>
@@ -2456,8 +2717,15 @@ export default function ChatView() {
     );
   };
 
+  const visibleProactiveNav = filterPermissionedGroups(PROACTIVE_NAV, me);
+  const visibleAdminNav = filterPermissionedGroups(ADMIN_NAV, me);
+  const visibleAutomationNav = AUTOMATIONS_NAV.filter((item) => has(item.permission));
+  const routeAllowed = canAccess(me, routeRequirement(location.pathname));
+  const automationWrite = automationWritePermission(automationsSection);
+  const automationReadOnly = !!automationWrite && !has(automationWrite);
+
   const execConfig: ExecConfig = {
-    enabled: me?.role === "admin" && !!appSettings?.settings.command_execution_enabled,
+    enabled: has("sandbox.exec") && !!appSettings?.settings.command_execution_enabled,
     allowlist: appSettings?.settings.command_allowlist ?? ["az"],
     chatId: activeId,
     openEditor: (command, mode) => setEditorState({ command, mode }),
@@ -2467,9 +2735,17 @@ export default function ChatView() {
   return (
     <ExecContext.Provider value={execConfig}>
     <div className="relative flex h-full">
+      {narrowViewport && mobileRailOpen && (
+        <button
+          type="button"
+          aria-label="Close sidebar"
+          onClick={() => setMobileRailOpen(false)}
+          className="absolute inset-0 z-30 bg-gray-900/25"
+        />
+      )}
       {/* Sidebar */}
       <aside
-        className={`flex flex-col border-r border-gray-200 bg-gray-50 transition-[width] duration-200 ${
+        className={`${narrowViewport && mobileRailOpen ? "absolute inset-y-0 left-0 shadow-xl" : "relative"} z-40 flex shrink-0 flex-col overflow-visible border-r border-gray-200 bg-gray-50 transition-[width] duration-200 ${
           railCollapsed ? "w-14" : "w-64"
         }`}
       >
@@ -2479,7 +2755,7 @@ export default function ChatView() {
             <span className="pl-1.5 text-sm font-semibold text-gray-800">Azure Agent</span>
           )}
           <div className="ml-auto flex items-center gap-1">
-            <NotificationBell collapsed={railCollapsed} />
+            {has("notifications.read") && <NotificationBell collapsed={railCollapsed} />}
             <button
               onClick={toggleRail}
               title={railCollapsed ? "Expand sidebar" : "Collapse sidebar"}
@@ -2491,7 +2767,7 @@ export default function ChatView() {
         </div>
 
         {/* New chat */}
-        <button
+        {canChat && <button
           onClick={startNewChat}
           title="New chat"
           className={`mx-2 mb-0.5 flex items-center rounded-lg text-sm text-gray-700 transition hover:bg-gray-200/60 ${
@@ -2500,9 +2776,9 @@ export default function ChatView() {
         >
           <ComposeIcon className="h-[18px] w-[18px] shrink-0 text-gray-500" />
           {!railCollapsed && <span>New chat</span>}
-        </button>
+        </button>}
 
-        {railCollapsed && (
+        {canChat && railCollapsed && (
           // Collapsed rail: a search affordance that expands back to the full list.
           <button
             onClick={toggleRail}
@@ -2550,7 +2826,7 @@ export default function ChatView() {
 
         {/* Mission Control: per-workload "run every analysis" cockpit. Top-level, right
             below Dashboard. Admin-only (the missions API is admin-gated). */}
-        {me?.role === "admin" &&
+        {has("missions.read") &&
           (railCollapsed ? (
             <Link
               to="/mission-control"
@@ -2580,7 +2856,7 @@ export default function ChatView() {
           ))}
 
         {/* Azure Workloads: hand-picked resource scopes. Available to all users. */}
-        {railCollapsed ? (
+        {has("workloads.read") && (railCollapsed ? (
           <Link
             to="/workloads"
             title="Azure Workloads"
@@ -2606,19 +2882,20 @@ export default function ChatView() {
               <span>Azure Workloads</span>
             </Link>
           </div>
-        )}
+        ))}
 
         {/* Proactive Support: design, posture, coverage, governance and forensic dashboards
             grouped under one expandable menu with category subheadings (mirrors Settings).
             Clicking the label opens the /proactive landing page. Ownership, Architectures and
             Estate Graph now live in here too. Admin-only. */}
-        {me?.role === "admin" && (() => {
+        {visibleProactiveNav.length > 0 && (() => {
           const PROACTIVE_ICONS: Record<string, typeof ProactiveIcon> = {
             insights: SparkleIcon,
             architectures: ArchitectureIcon, knowme: KnowMeIcon, fmea: FmeaIcon, ownership: OwnershipIcon, graph: GraphIcon,
             assessments: AssessmentIcon, performance: PerformanceIcon,
             coverage: CoverageIcon, "alerts-manager": CoverageIcon, telemetry: TelemetryIcon, backupdr: BackupIcon,
             "backup-manager": BackupIcon,
+            resiliency: RecoveryIcon,
             capability: CoverageIcon,
             inventory: InventoryIcon, tagintel: TagIcon, "change-explorer": ChangeIcon,
             policy: PolicyIcon, entra: IdentityIcon, iam: IamIcon,
@@ -2633,6 +2910,7 @@ export default function ChatView() {
             assessments: inAssessments, performance: inPerformance,
             coverage: inCoverage, "alerts-manager": inAlertsManager, telemetry: inTelemetry, backupdr: inBackupDr,
             "backup-manager": inBackupManager,
+            resiliency: inResiliency,
             capability: inCapability,
             inventory: inInventory, tagintel: inTagIntel, "change-explorer": inChangeExplorer,
             policy: inPolicy, entra: inEntra, iam: inIam,
@@ -2659,7 +2937,14 @@ export default function ChatView() {
               <div className="flex items-center">
                 <Link
                   to="/proactive"
-                  onClick={(e) => { if (proactiveOpen) { e.preventDefault(); setProactiveOpen(false); } }}
+                  onClick={(e) => {
+                    if (proactiveOpen) {
+                      e.preventDefault();
+                      setProactiveOpen(false);
+                    } else {
+                      setProactiveOpen(true);
+                    }
+                  }}
                   className={`flex flex-1 items-center gap-2.5 rounded-lg px-2.5 py-2 text-sm transition ${
                     anyActive ? "bg-gray-200 font-medium text-gray-900" : "text-gray-700 hover:bg-gray-200/60"
                   }`}
@@ -2670,20 +2955,20 @@ export default function ChatView() {
                 <button
                   onClick={() => setProactiveOpen((v) => !v)}
                   title={proactiveOpen ? "Collapse" : "Expand"}
-                  className="ml-1 rounded p-1 text-gray-400 transition hover:bg-gray-200/60 hover:text-gray-700"
+                  className="ml-1 rounded-sm p-1 text-gray-400 transition hover:bg-gray-200/60 hover:text-gray-700"
                 >
                   <ChevronRightIcon className={`h-4 w-4 transition-transform ${proactiveOpen ? "rotate-90" : ""}`} />
                 </button>
               </div>
               {proactiveOpen && (
                 <div className="mt-0.5 space-y-0.5 pl-3.5">
-                  {PROACTIVE_NAV.map((n) => {
+                  {visibleProactiveNav.map((n) => {
                     const Icon = PROACTIVE_ICONS[n.id];
                     const active = activeById[n.id];
                     return (
                       <div key={n.id}>
                         {n.group && (
-                          <div className="px-2.5 pb-0.5 pt-2 text-[10px] font-semibold uppercase tracking-wide text-gray-400">
+                          <div className="px-2.5 pb-0.5 pt-2 text-[10px] font-semibold uppercase tracking-wide text-gray-600">
                             {n.group}
                           </div>
                         )}
@@ -2709,7 +2994,7 @@ export default function ChatView() {
 
         {/* Settings: an expandable menu (mirrors Automations). URL-driven so a refresh
             restores the same panel. Admin-only. */}
-        {me?.role === "admin" &&
+        {visibleAdminNav.length > 0 &&
           (railCollapsed ? (
             <Link
               to="/admin"
@@ -2740,7 +3025,7 @@ export default function ChatView() {
                 <button
                   onClick={() => setAdminOpen((v) => !v)}
                   title={adminOpen ? "Collapse" : "Expand"}
-                  className="ml-1 rounded p-1 text-gray-400 transition hover:bg-gray-200/60 hover:text-gray-700"
+                  className="ml-1 rounded-sm p-1 text-gray-400 transition hover:bg-gray-200/60 hover:text-gray-700"
                 >
                   <ChevronRightIcon
                     className={`h-4 w-4 transition-transform ${
@@ -2751,7 +3036,7 @@ export default function ChatView() {
               </div>
               {adminOpen && (
                 <div className="mt-0.5 space-y-0.5 pl-3.5">
-                  {ADMIN_NAV.map((n) => {
+                  {visibleAdminNav.map((n) => {
                     const active =
                       inAdmin &&
                       (adminSection === n.id ||
@@ -2759,7 +3044,7 @@ export default function ChatView() {
                     return (
                       <div key={n.id}>
                         {n.group && (
-                          <div className="px-2.5 pb-0.5 pt-2 text-[10px] font-semibold uppercase tracking-wide text-gray-400">
+                          <div className="px-2.5 pb-0.5 pt-2 text-[10px] font-semibold uppercase tracking-wide text-gray-600">
                             {n.group}
                           </div>
                         )}
@@ -2784,7 +3069,7 @@ export default function ChatView() {
 
         {/* Automations: an expandable menu. URL-driven so a browser refresh restores the
             same panel. Admin-only. Placed below Settings. */}
-        {me?.role === "admin" &&
+        {visibleAutomationNav.length > 0 &&
           (railCollapsed ? (
             <Link
               to="/automations"
@@ -2814,7 +3099,7 @@ export default function ChatView() {
                 <button
                   onClick={() => setAutomationsOpen((v) => !v)}
                   title={automationsOpen ? "Collapse" : "Expand"}
-                  className="ml-1 rounded p-1 text-gray-400 transition hover:bg-gray-200/60 hover:text-gray-700"
+                  className="ml-1 rounded-sm p-1 text-gray-400 transition hover:bg-gray-200/60 hover:text-gray-700"
                 >
                   <ChevronRightIcon
                     className={`h-4 w-4 transition-transform ${
@@ -2825,7 +3110,7 @@ export default function ChatView() {
               </div>
               {automationsOpen && (
                 <div className="mt-0.5 space-y-0.5 pl-3.5">
-                  {AUTOMATIONS_NAV.map((n) => {
+                  {visibleAutomationNav.map((n) => {
                     const active = inAutomations && automationsSection === n.id;
                     return (
                       <Link
@@ -2849,7 +3134,7 @@ export default function ChatView() {
 
         {/* Sub Agents: a top-level link (next to Automations) to the management page.
             Admin-only. Clicking opens the management page; it does NOT expand a submenu. */}
-        {me?.role === "admin" &&
+        {has("agents.read") &&
           (railCollapsed ? (
             <Link
               to="/automations/agents"
@@ -2879,7 +3164,7 @@ export default function ChatView() {
           ))}
 
         {/* Monitor: a single link to the central dashboard. Admin-only. */}
-        {me?.role === "admin" &&
+        {has("monitor.view") &&
           (railCollapsed ? (
             <Link
               to="/monitor"
@@ -2909,7 +3194,7 @@ export default function ChatView() {
           ))}
 
         {/* Stats: a read-only at-a-glance metrics page. Admin-only. */}
-        {me?.role === "admin" &&
+        {has("monitor.view") &&
           (railCollapsed ? (
             <Link
               to="/stats"
@@ -2939,7 +3224,7 @@ export default function ChatView() {
           ))}
 
         {/* Search + quick filter — sit just above the chat list (Favorites / Recents). */}
-        {!railCollapsed && (
+        {canChat && !railCollapsed && (
           <>
             <div className="relative mx-2 mb-2 mt-1">
               <span className="pointer-events-none absolute left-2.5 top-1/2 -translate-y-1/2 text-gray-400">
@@ -2949,7 +3234,7 @@ export default function ChatView() {
                 value={chatSearch}
                 onChange={(e) => setChatSearch(e.target.value)}
                 placeholder="Search chats…"
-                className="w-full rounded-lg border border-gray-200 bg-white py-1.5 pl-8 pr-7 text-sm text-gray-700 placeholder:text-gray-400 focus:border-gray-300 focus:outline-none focus:ring-0"
+                className="w-full rounded-lg border border-gray-200 bg-white py-1.5 pl-8 pr-7 text-sm text-gray-700 placeholder:text-gray-500 focus:border-gray-300 focus:outline-hidden focus:ring-0"
               />
               {chatSearch && (
                 <button
@@ -2982,10 +3267,10 @@ export default function ChatView() {
         )}
 
         {/* Chat list (hidden when collapsed) */}
-        {!railCollapsed && (
+        {canChat && !railCollapsed && (
           <nav className="px-2 pb-2">
             {filteredChats.length === 0 && (
-              <div className="px-3 py-4 text-center text-xs text-gray-400">
+              <div className="px-3 py-4 text-center text-xs text-gray-600">
                 {q
                   ? "No threads match your search."
                   : chatFilter === "pinned"
@@ -2995,7 +3280,7 @@ export default function ChatView() {
             )}
             {pinnedChats.length > 0 && (
               <>
-                <div className="px-2.5 pb-1 pt-2 text-[11px] font-medium text-gray-400">
+                <div className="px-2.5 pb-1 pt-2 text-[11px] font-medium text-gray-600">
                   Favorites
                 </div>
                 {pinnedChats.map(renderChatRow)}
@@ -3003,7 +3288,7 @@ export default function ChatView() {
             )}
             {recentChats.length > 0 && (
               <>
-                <div className="px-2.5 pb-1 pt-3 text-[11px] font-medium text-gray-400">
+                <div className="px-2.5 pb-1 pt-3 text-[11px] font-medium text-gray-600">
                   {q ? "Results" : "Recents"}
                 </div>
                 {recentChats.map(renderChatRow)}
@@ -3015,7 +3300,7 @@ export default function ChatView() {
         </div>
 
         {/* Footer: Trash + delete unpinned + Admin Dashboard link */}
-        <div className="mt-auto border-t border-gray-200">
+        {canChat && <div className="mt-auto border-t border-gray-200">
           <button
             onClick={() => setTrashOpen(true)}
             title="Trash"
@@ -3046,11 +3331,11 @@ export default function ChatView() {
               Delete unpinned
             </button>
           )}
-        </div>
+        </div>}
       </aside>
 
       {/* Trash overlay: lists soft-deleted chats with restore / permanent-delete. */}
-      {trashOpen && (
+      {canChat && trashOpen && (
         <TrashPanel
           chats={trashedChats}
           onClose={() => setTrashOpen(false)}
@@ -3061,11 +3346,16 @@ export default function ChatView() {
       )}
 
       {/* Main */}
-      {inAutomations ? (
+      {!routeAllowed ? (
+        <AccessDeniedPanel />
+      ) : inAutomations ? (
         <main className="flex min-w-0 flex-1 flex-col overflow-hidden">
+          {automationReadOnly && <ReadOnlyBanner />}
           <PanelErrorBoundary name="Automations">
             <Suspense fallback={<PanelLoading />}>
-              <AutomationsPanel section={automationsSection} />
+              <fieldset disabled={automationReadOnly} className="contents">
+                <AutomationsPanel section={automationsSection} />
+              </fieldset>
             </Suspense>
           </PanelErrorBoundary>
         </main>
@@ -3104,7 +3394,7 @@ export default function ChatView() {
       ) : inMissionControl ? (
         <main className="flex min-w-0 flex-1 flex-col overflow-hidden">
           <PanelErrorBoundary name="Mission Control">
-            <Suspense fallback={<PanelLoading />}>
+            <Suspense fallback={<MissionControlLoading detail={location.pathname !== "/mission-control"} />}>
               <MissionControlPanel />
             </Suspense>
           </PanelErrorBoundary>
@@ -3253,6 +3543,14 @@ export default function ChatView() {
             </Suspense>
           </PanelErrorBoundary>
         </main>
+      ) : inResiliency ? (
+        <main className="flex min-w-0 flex-1 flex-col overflow-hidden">
+          <PanelErrorBoundary name="Recovery Readiness">
+            <Suspense fallback={<PanelLoading />}>
+              <ResiliencyPanel />
+            </Suspense>
+          </PanelErrorBoundary>
+        </main>
       ) : inGraph ? (
         <main className="flex min-w-0 flex-1 flex-col overflow-hidden">
           <PanelErrorBoundary name="Estate Graph">
@@ -3349,7 +3647,7 @@ export default function ChatView() {
             className={`mx-auto space-y-4 ${
               showWelcome
                 ? "max-w-3xl"
-                : "max-w-5xl xl:max-w-6xl 2xl:max-w-screen-2xl"
+                : "max-w-5xl xl:max-w-6xl 2xl:max-w-(--breakpoint-2xl)"
             }`}
           >
             {showWelcome && (
@@ -3359,7 +3657,7 @@ export default function ChatView() {
                 </div>
                 <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
                   {/* Quick checks — collapsible button menus */}
-                  <div className="rounded-xl border border-gray-200 bg-white p-2 shadow-sm">
+                  <div className="rounded-xl border border-gray-200 bg-white p-2 shadow-xs">
                     <div className="px-1.5 pb-1 pt-0.5 text-[11px] font-semibold uppercase tracking-wide text-gray-400">
                       Quick checks
                     </div>
@@ -3375,7 +3673,7 @@ export default function ChatView() {
                   </div>
 
                   {/* Browse by resource & problem */}
-                  <div className="rounded-xl border border-gray-200 bg-white p-2 shadow-sm">
+                  <div className="rounded-xl border border-gray-200 bg-white p-2 shadow-xs">
                     <div className="flex items-center justify-between px-1.5 pb-1 pt-0.5 text-[11px] font-semibold uppercase tracking-wide text-gray-400">
                       <span>Browse by resource &amp; problem</span>
                       <span className="font-normal normal-case text-gray-300">
@@ -3504,7 +3802,7 @@ export default function ChatView() {
               <div className="space-y-2">
                 {/* Deep investigation: a random animated agent icon at the top. */}
                 {live?.deepIcon && (
-                  <div className="flex items-center gap-3 rounded-lg border border-brand/20 bg-gradient-to-br from-brand/10 to-transparent px-4 py-3">
+                  <div className="flex items-center gap-3 rounded-lg border border-brand/20 bg-linear-to-br from-brand/10 to-transparent px-4 py-3">
                     <img
                       src={live.deepIcon}
                       alt=""
@@ -3536,11 +3834,11 @@ export default function ChatView() {
               <div className="flex justify-start">
                 <div className="max-w-full rounded-lg border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-700">
                   <div className="mb-1 font-medium">⚠️ The model failed to respond</div>
-                  <div className="whitespace-pre-wrap break-words text-xs text-red-600">
-                    {errorDetail}
+                  <div className="whitespace-pre-wrap wrap-break-word text-xs text-red-600">
+                    {displayError.message}
                   </div>
                   <div className="mt-2 text-xs text-red-500">
-                    Try again, or switch models with the picker below.
+                    {displayError.hint}
                   </div>
                 </div>
               </div>
@@ -3611,7 +3909,7 @@ export default function ChatView() {
                             }
                             className={`flex items-start gap-2 rounded-lg border p-2 text-left transition ${
                               on
-                                ? "border-brand/50 bg-white shadow-sm"
+                                ? "border-brand/50 bg-white shadow-xs"
                                 : "border-gray-200 bg-white/40 opacity-70 hover:opacity-100"
                             }`}
                           >
@@ -3663,7 +3961,7 @@ export default function ChatView() {
                         <select
                           value={deepMemorySel}
                           onChange={(e) => setDeepMemorySel(e.target.value)}
-                          className="w-full rounded-md border border-gray-200 px-2 py-1.5 text-[13px] text-gray-700 focus:border-brand focus:outline-none focus:ring-1 focus:ring-brand"
+                          className="w-full rounded-md border border-gray-200 px-2 py-1.5 text-[13px] text-gray-700 focus:border-brand focus:outline-hidden focus:ring-1 focus:ring-brand"
                         >
                           <option value="">
                             {candidates.length === 1 ? `Auto · ${candidates[0].architecture_name}` : "Auto (let the investigator decide)"}
@@ -3883,6 +4181,21 @@ export default function ChatView() {
             )}
 
             {/* Follow-up suggestions after an answer */}
+            {!streaming && !pendingClarify && activeId && suggestions.length === 0 && displayMessages.length > 0 && (
+              <div className="flex flex-wrap items-center gap-2 pt-1 text-xs">
+                <button
+                  onClick={() => void loadSuggestions(activeId)}
+                  disabled={suggestionsLoading}
+                  className="rounded-full border border-brand/30 bg-white px-3 py-1.5 text-brand transition hover:bg-brand/5 disabled:opacity-60"
+                >
+                  {suggestionsLoading ? "Generating follow-ups…" : "✨ Suggest follow-ups"}
+                </button>
+                {suggestionsLoading && (
+                  <button onClick={() => suggestionsAbortRef.current?.abort()} className="text-gray-500 hover:text-gray-800">Cancel</button>
+                )}
+                {suggestionsError && <span className="text-red-600" role="alert">Could not generate suggestions: {suggestionsError}</span>}
+              </div>
+            )}
             {!streaming && !pendingClarify && suggestions.length > 0 && displayMessages.length > 0 && (
               <div className="flex flex-wrap gap-2 pt-1">
                 {suggestions.map((s) => (
@@ -3913,7 +4226,7 @@ export default function ChatView() {
               </svg>
             </button>
           )}
-          <div className="mx-auto max-w-5xl xl:max-w-6xl 2xl:max-w-screen-2xl">
+          <div className="mx-auto max-w-5xl xl:max-w-6xl 2xl:max-w-(--breakpoint-2xl)">
             <input
               ref={fileInputRef}
               type="file"
@@ -3925,7 +4238,45 @@ export default function ChatView() {
                 e.target.value = "";
               }}
             />
-            <div className="rounded-3xl border border-gray-300 bg-white px-4 py-3 shadow-sm transition focus-within:border-gray-400 focus-within:shadow-md">
+            <div className="rounded-3xl border border-gray-300 bg-white px-4 py-3 shadow-xs transition focus-within:border-gray-400 focus-within:shadow-md">
+              {queuedMessages.length > 0 && activeId && (
+                <div
+                  className="mb-3 rounded-xl border border-blue-200 bg-blue-50/70 p-2.5"
+                  data-testid="chat-message-queue"
+                  aria-live="polite"
+                >
+                  <div className="mb-1.5 flex items-center justify-between text-xs font-medium text-blue-900">
+                    <span>Queued messages</span>
+                    <span className="rounded-full bg-blue-100 px-2 py-0.5">{queuedMessages.length}</span>
+                  </div>
+                  <div className="space-y-1.5">
+                    {queuedMessages.map((message, index) => (
+                      <div
+                        key={message.id}
+                        className="flex items-center gap-2 rounded-lg border border-blue-100 bg-white px-2.5 py-1.5 text-xs"
+                        data-testid="queued-message"
+                      >
+                        <span className="shrink-0 font-medium text-blue-700">#{index + 1}</span>
+                        <span className="min-w-0 flex-1 truncate text-gray-700" title={message.content}>
+                          {message.content}
+                        </span>
+                        {message.images.length > 0 && (
+                          <span className="shrink-0 text-gray-400">{message.images.length} image{message.images.length === 1 ? "" : "s"}</span>
+                        )}
+                        <button
+                          type="button"
+                          onClick={() => cancelQueuedMessage(activeId, message.id)}
+                          className="flex h-6 w-6 shrink-0 items-center justify-center rounded-full text-gray-400 hover:bg-red-50 hover:text-red-600"
+                          title="Cancel queued message"
+                          aria-label={`Cancel queued message ${index + 1}`}
+                        >
+                          ×
+                        </button>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              )}
               {attachments.length > 0 && (
                 <div className="mb-2 flex flex-wrap gap-2">
                   {attachments.map((src, i) => (
@@ -3960,7 +4311,7 @@ export default function ChatView() {
                 }}
                 rows={1}
                 placeholder="Write a message…"
-                className="block max-h-[200px] w-full resize-none overflow-y-hidden bg-transparent px-1 text-[15px] leading-6 text-gray-900 placeholder:text-gray-400 focus:outline-none"
+                className="block max-h-[200px] w-full resize-none overflow-y-hidden bg-transparent px-1 text-[15px] leading-6 text-gray-900 placeholder:text-gray-400 focus:outline-hidden"
               />
 
               <div className="mt-2 flex flex-wrap items-center justify-between gap-y-2">
@@ -4005,7 +4356,18 @@ export default function ChatView() {
                   )}
                   <WorkloadPicker
                     selectedId={selectedWorkloadId}
-                    onChange={setSelectedWorkloadId}
+                    activeConnectionId={selectedConnectionId}
+                    onChange={(workloadId, workloadConnectionId) => {
+                      setSelectedWorkloadId(workloadId);
+                      if (workloadConnectionId && workloadConnectionId !== selectedConnectionId) {
+                        setSelectedConnectionId(workloadConnectionId);
+                        if (activeId) {
+                          void api.setChatConnection(activeId, workloadConnectionId).then(() => {
+                            qc.invalidateQueries({ queryKey: ["chats"] });
+                          });
+                        }
+                      }
+                    }}
                   />
                   <ModelPicker
                     provider={pickerProvider}
@@ -4033,13 +4395,26 @@ export default function ChatView() {
                     }}
                   />
                   {streaming ? (
-                    <button
-                      onClick={stopStreaming}
-                      title="Stop generating"
-                      className="flex h-9 w-9 items-center justify-center rounded-full bg-gray-900 text-white transition hover:bg-black"
-                    >
-                      <span className="h-3 w-3 rounded-[2px] bg-white" />
-                    </button>
+                    <>
+                      <button
+                        onClick={() => void stopStreaming()}
+                        title="Stop generating"
+                        className="flex h-9 w-9 items-center justify-center rounded-full bg-gray-900 text-white transition hover:bg-black"
+                      >
+                        <span className="h-3 w-3 rounded-[2px] bg-white" />
+                      </button>
+                      <button
+                        onClick={() => void send()}
+                        disabled={!input.trim() && attachments.length === 0}
+                        title="Queue message"
+                        aria-label="Queue message"
+                        className="flex h-9 w-9 items-center justify-center rounded-full bg-blue-600 text-white transition hover:bg-blue-700 disabled:bg-gray-300"
+                      >
+                        <svg className="h-5 w-5" viewBox="0 0 20 20" fill="none" stroke="currentColor" strokeWidth="1.8">
+                          <path d="M10 16V5M5.5 9.5L10 5l4.5 4.5" strokeLinecap="round" strokeLinejoin="round" />
+                        </svg>
+                      </button>
+                    </>
                   ) : (
                     <button
                       onClick={() => void send()}
@@ -4184,6 +4559,32 @@ export default function ChatView() {
     </div>
     </ExecContext.Provider>
   );
+}
+
+function formatChatProviderError(detail: string): { message: string; hint: string } {
+  const lower = detail.toLowerCase();
+  if (lower.includes("array_above_max_length") || (lower.includes("tools") && lower.includes("maximum length"))) {
+    return {
+      message: "The selected model rejected an oversized tool catalog before generating a response.",
+      hint: "Progressive tool routing should prevent this. Retry once; if it persists, review Settings → Advanced agent tuning and EntraID MCP Tools.",
+    };
+  }
+  if (lower.includes("tool catalog exceeds the provider limit")) {
+    return {
+      message: detail.split("\n")[0],
+      hint: "Lower the initial or per-turn tool budget, then retry. No tools were executed.",
+    };
+  }
+  if (lower.includes("function tools with reasoning_effort are not supported")) {
+    return {
+      message: "This model requires a different API transport when function tools are enabled.",
+      hint: "The provider adapter should switch to Responses automatically. Retry once; if it persists, select another model and report the provider/model combination.",
+    };
+  }
+  return {
+    message: detail,
+    hint: "Try again, or switch models with the picker below.",
+  };
 }
 
 /** Trash overlay: lists soft-deleted (archived) chats. Each can be restored to the
@@ -4543,10 +4944,10 @@ function HypothesisTreeNode({
             </span>
           </span>
           {node.description && (
-            <span className="mt-0.5 block break-words text-[11px] text-gray-500">{node.description}</span>
+            <span className="mt-0.5 block wrap-break-word text-[11px] text-gray-500">{node.description}</span>
           )}
           {open && node.evidence && (
-            <span className="mt-1.5 block break-words rounded-md bg-gray-50 px-2 py-1.5 text-[11px] leading-relaxed text-gray-600">
+            <span className="mt-1.5 block wrap-break-word rounded-md bg-gray-50 px-2 py-1.5 text-[11px] leading-relaxed text-gray-600">
               <span className="font-medium text-gray-500">Evidence: </span>
               {node.evidence}
             </span>
@@ -5001,7 +5402,7 @@ function InvestigationPanel({
             <summary className="cursor-pointer text-[11px] font-semibold uppercase tracking-wide text-gray-400">
               Research findings
             </summary>
-            <p className="mt-1.5 whitespace-pre-wrap break-words text-[12px] leading-relaxed text-gray-600">
+            <p className="mt-1.5 whitespace-pre-wrap wrap-break-word text-[12px] leading-relaxed text-gray-600">
               {researchSummary}
             </p>
           </details>
@@ -5017,13 +5418,13 @@ function InvestigationPanel({
               <div className="flex items-center gap-1 text-[10px]">
                 <button
                   onClick={() => setTreeMode({ open: true, v: treeMode.v + 1 })}
-                  className="rounded px-1.5 py-0.5 text-gray-500 transition hover:bg-gray-100"
+                  className="rounded-sm px-1.5 py-0.5 text-gray-500 transition hover:bg-gray-100"
                 >
                   Expand all
                 </button>
                 <button
                   onClick={() => setTreeMode({ open: false, v: treeMode.v + 1 })}
-                  className="rounded px-1.5 py-0.5 text-gray-500 transition hover:bg-gray-100"
+                  className="rounded-sm px-1.5 py-0.5 text-gray-500 transition hover:bg-gray-100"
                 >
                   Collapse all
                 </button>
@@ -5062,14 +5463,14 @@ function InvestigationPanel({
                 );
               })()}
             </div>
-            <div className="text-sm font-semibold break-words text-gray-800">{conclusion.root_cause}</div>
+            <div className="text-sm font-semibold wrap-break-word text-gray-800">{conclusion.root_cause}</div>
             {conclusion.summary && (
-              <p className="mt-1 break-words text-[12px] leading-relaxed text-gray-600">{conclusion.summary}</p>
+              <p className="mt-1 wrap-break-word text-[12px] leading-relaxed text-gray-600">{conclusion.summary}</p>
             )}
             {conclusion.evidence?.length > 0 && (
               <div className="mt-2">
                 <div className="text-[11px] font-medium text-gray-500">Evidence</div>
-                <ul className="mt-0.5 list-disc break-words pl-4 text-[12px] text-gray-600">
+                <ul className="mt-0.5 list-disc wrap-break-word pl-4 text-[12px] text-gray-600">
                   {conclusion.evidence.map((e, i) => (
                     <li key={i}>{e}</li>
                   ))}
@@ -5079,7 +5480,7 @@ function InvestigationPanel({
             {conclusion.actions?.length > 0 && (
               <div className="mt-2">
                 <div className="text-[11px] font-medium text-gray-500">Recommended actions</div>
-                <ul className="mt-0.5 list-disc break-words pl-4 text-[12px] text-gray-600">
+                <ul className="mt-0.5 list-disc wrap-break-word pl-4 text-[12px] text-gray-600">
                   {conclusion.actions.map((a, i) => (
                     <li key={i}>{a}</li>
                   ))}
@@ -5108,16 +5509,26 @@ function InvestigationPanel({
  * connected Azure tenant a prompt runs against; the choice persists on the chat. */
 function WorkloadPicker({
   selectedId,
+  activeConnectionId,
   onChange,
 }: {
   selectedId: string | null;
-  onChange: (id: string | null) => void;
+  activeConnectionId: string | null;
+  onChange: (id: string | null, connectionId?: string) => void;
 }) {
   const [open, setOpen] = useState(false);
   const ref = useRef<HTMLDivElement>(null);
   const wlQ = useQuery({ queryKey: ["workloads"], queryFn: api.workloads });
   const workloads = wlQ.data?.workloads ?? [];
   const active = workloads.find((w) => w.id === selectedId);
+
+  useEffect(() => {
+    if (active?.connection_id && active.connection_id !== activeConnectionId) {
+      onChange(active.id, active.connection_id);
+    }
+    // `onChange` is an inline state synchronizer; connection/id changes are the triggers.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [active?.connection_id, active?.id, activeConnectionId]);
 
   useEffect(() => {
     function onDoc(e: MouseEvent) {
@@ -5166,7 +5577,7 @@ function WorkloadPicker({
               <button
                 key={w.id}
                 onClick={() => {
-                  onChange(w.id);
+                  onChange(w.id, w.connection_id ?? undefined);
                   setOpen(false);
                 }}
                 className={`flex w-full items-center justify-between gap-2 rounded-lg px-2 py-1.5 text-left text-sm transition hover:bg-gray-100 ${
@@ -5246,7 +5657,7 @@ function TenantPicker({
               </span>
               <span className="flex shrink-0 items-center gap-1">
                 {t.read_only && (
-                  <span className="rounded bg-green-100 px-1 py-0.5 text-[9px] text-green-700">
+                  <span className="rounded-sm bg-green-100 px-1 py-0.5 text-[9px] text-green-700">
                     RO
                   </span>
                 )}
@@ -5288,6 +5699,7 @@ const ActivityPane = memo(function ActivityPane({ steps, live }: { steps: Step[]
   const errorSteps = steps.filter(
     (s): s is Extract<Step, { kind: "tool" }> => s.kind === "tool" && s.status === "error",
   );
+  const artifacts = steps.flatMap((s) => s.kind === "tool" ? (s.artifacts ?? []) : []);
   const header = live
     ? "Working…"
     : `Thinking Process · ${toolCount} Step${toolCount === 1 ? "" : "s"}`;
@@ -5301,14 +5713,28 @@ const ActivityPane = memo(function ActivityPane({ steps, live }: { steps: Step[]
           <div className="flex items-center gap-1.5 font-semibold">
             <span aria-hidden>⚠️</span>
             {errorSteps.length === 1
-              ? `Tool failed: ${errorSteps[0].name}`
+              ? `Tool failed: ${toolDisplayName(errorSteps[0].name)}`
               : `${errorSteps.length} tools failed`}
           </div>
           {errorSteps.map((s, i) => (
-            <div key={i} className="mt-1 break-words text-[11px] leading-snug text-red-700">
-              <span className="font-mono font-medium">{s.name}</span>
+            <div key={i} className="mt-1 wrap-break-word text-[11px] leading-snug text-red-700">
+              <span className="font-mono font-medium">{toolDisplayName(s.name)}</span>
               {s.summary ? ` — ${s.summary.replace(/^Error:\s*/i, "")}` : ""}
             </div>
+          ))}
+        </div>
+      )}
+      {artifacts.length > 0 && (
+        <div className="m-2 flex flex-wrap gap-1.5 rounded-lg border border-blue-200 bg-blue-50/70 px-2.5 py-2">
+          {artifacts.map((artifact) => (
+            <a
+              key={artifact.artifact_id}
+              href={artifactHref(artifact.url)}
+              download={artifact.filename}
+              className="rounded-md border border-blue-200 bg-white px-2 py-1 text-[11px] font-medium text-blue-700 hover:bg-blue-100"
+            >
+              ↓ {artifact.label}
+            </a>
           ))}
         </div>
       )}
@@ -5337,12 +5763,12 @@ const ActivityPane = memo(function ActivityPane({ steps, live }: { steps: Step[]
           {steps.map((s, i) =>
             s.kind === "reasoning" ? (
               <div key={i} className="border-l-2 border-gray-200 pl-3 text-gray-500">
-                <div className="prose-chat !text-[11px] !leading-relaxed !text-gray-500">
+                <div className="prose-chat text-[11px]! leading-relaxed! text-gray-500!">
                   <Markdown>{s.text}</Markdown>
                 </div>
               </div>
             ) : (
-              <div key={i} className={`rounded border px-3 py-2 text-xs ${s.status === "error" ? "border-red-300 bg-red-50" : "border-gray-200 bg-white"}`}>
+              <div key={i} className={`rounded-sm border px-3 py-2 text-xs ${s.status === "error" ? "border-red-300 bg-red-50" : "border-gray-200 bg-white"}`}>
                 <div className="flex items-center gap-2">
                   {s.status === "running" && live ? (
                     <Spinner />
@@ -5353,16 +5779,16 @@ const ActivityPane = memo(function ActivityPane({ steps, live }: { steps: Step[]
                   ) : (
                     <span className="text-green-600">✓</span>
                   )}
-                  <span className="font-mono font-medium text-gray-800">{s.name}</span>
+                  <span className="font-mono font-medium text-gray-800">{toolDisplayName(s.name)}</span>
                   {s.status === "error" && (
-                    <span className="rounded bg-red-100 px-1.5 py-0.5 text-[10px] font-medium text-red-700">failed</span>
+                    <span className="rounded-sm bg-red-100 px-1.5 py-0.5 text-[10px] font-medium text-red-700">failed</span>
                   )}
                   {s.duration != null && (
                     <span className="text-gray-400">{formatDuration(s.duration)}</span>
                   )}
                 </div>
                 {s.args != null && !s.discovery && Object.keys(s.args as object).length > 0 && (
-                  <pre className="mt-1 overflow-x-auto rounded bg-gray-50 px-2 py-1 text-[11px] text-gray-500">
+                  <pre className="mt-1 overflow-x-auto rounded-sm bg-gray-50 px-2 py-1 text-[11px] text-gray-500">
                     {JSON.stringify(s.args)}
                   </pre>
                 )}
@@ -5541,7 +5967,7 @@ function ModelPicker({
       ) : variant === "bare" ? (
         <button
           onClick={() => setOpen((o) => !o)}
-          className="flex max-w-[14rem] items-center gap-1.5 rounded-md px-2 py-1 text-sm text-gray-700 transition hover:bg-gray-100"
+          className="flex max-w-56 items-center gap-1.5 rounded-md px-2 py-1 text-sm text-gray-700 transition hover:bg-gray-100"
           title={`Switch model${model ? ` (current: ${model})` : ""}`}
         >
           <span className="truncate font-medium text-gray-800">{model || label}</span>
@@ -5830,6 +6256,7 @@ function ProgressLines({
     // errored) — show a neutral marker instead of an eternal spinner.
     if (l.pending && live) return <Spinner />;
     if (l.pending) return <span className="text-gray-300">◦</span>;
+    if (l.error) return <span className="text-red-600">✗</span>;
     // Discovery ("learn") plumbing lines get a muted magnifier so they read as
     // background activity rather than a real diagnostic result.
     if (l.discovery) return <span className="text-gray-300">🔍</span>;
@@ -5850,7 +6277,7 @@ function ProgressLines({
               title={`${s.name}: ${s.count} tool call${s.count === 1 ? "" : "s"}`}
             >
               <span aria-hidden>{s.icon}</span>
-              <span className="max-w-[8rem] truncate">{s.name}</span>
+              <span className="max-w-32 truncate">{s.name}</span>
               <span className="text-gray-400">{s.count}</span>
             </span>
           ))}
@@ -5865,7 +6292,7 @@ function ProgressLines({
             <span className="mt-0.5 flex h-3.5 w-3.5 shrink-0 items-center justify-center">
               {icon(l)}
             </span>
-            <div className="prose-chat min-w-0 flex-1 border-l-2 border-gray-200 pl-2 !text-[11px] !leading-relaxed !text-gray-500">
+            <div className="prose-chat min-w-0 flex-1 border-l-2 border-gray-200 pl-2 text-[11px]! leading-relaxed! text-gray-500!">
               <TypedMarkdown text={l.text} live={animates(i)} />
             </div>
           </div>
@@ -5881,7 +6308,7 @@ function ProgressLines({
                   title={l.agentName ? `${l.agentName} agent` : undefined}
                 >
                   <span aria-hidden>{l.agentIcon}</span>
-                  {l.agentName && <span className="max-w-[7rem] truncate">{l.agentName}</span>}
+                  {l.agentName && <span className="max-w-28 truncate">{l.agentName}</span>}
                 </span>
               )}
               <span
@@ -5890,6 +6317,8 @@ function ProgressLines({
                     ? "text-[11px] text-gray-400"
                     : l.kind === "tool"
                       ? "font-mono text-gray-800"
+                        : l.error
+                          ? "text-red-700"
                       : l.pending
                         ? "text-gray-700"
                         : "text-gray-600"
@@ -5900,6 +6329,20 @@ function ProgressLines({
               {l.detail && (
                 <span className="ml-1.5 break-all text-[11px] text-gray-400">
                   <TypedText text={l.detail} live={animates(i)} />
+                </span>
+              )}
+              {l.artifacts && l.artifacts.length > 0 && (
+                <span className="ml-2 inline-flex flex-wrap gap-1.5 align-middle">
+                  {l.artifacts.map((artifact) => (
+                    <a
+                      key={artifact.artifact_id}
+                      href={artifactHref(artifact.url)}
+                      download={artifact.filename}
+                      className="rounded-sm border border-blue-200 bg-blue-50 px-1.5 py-0.5 text-[10px] font-medium text-blue-700 hover:bg-blue-100"
+                    >
+                      ↓ {artifact.kind.toUpperCase()}
+                    </a>
+                  ))}
                 </span>
               )}
             </div>
@@ -6116,7 +6559,7 @@ const TreeNode = memo(function TreeNode({
       <button
         onClick={() => onPick(prompt)}
         style={{ paddingLeft: `${depth * 14 + 24}px` }}
-        className="flex w-full items-center gap-2 rounded py-1 pr-2 text-left text-[13px] text-gray-600 transition hover:bg-brand/5 hover:text-brand"
+        className="flex w-full items-center gap-2 rounded-sm py-1 pr-2 text-left text-[13px] text-gray-600 transition hover:bg-brand/5 hover:text-brand"
         title={node.label}
       >
         <span className="truncate">{node.label}</span>
@@ -6169,7 +6612,7 @@ const StarterCategory = memo(function StarterCategory({
     <div>
       <button
         onClick={() => setOpen((o) => !o)}
-        className="flex w-full items-center gap-2 rounded py-1 pl-1.5 pr-2 text-left text-sm font-semibold text-gray-800 transition hover:bg-gray-50"
+        className="flex w-full items-center gap-2 rounded-sm py-1 pl-1.5 pr-2 text-left text-sm font-semibold text-gray-800 transition hover:bg-gray-50"
       >
         <span className="w-3 shrink-0 text-gray-400">{open ? "▾" : "▸"}</span>
         <span className="text-base leading-none">{category.icon}</span>
@@ -6182,7 +6625,7 @@ const StarterCategory = memo(function StarterCategory({
               key={p}
               onClick={() => onPick(p)}
               style={{ paddingLeft: "38px" }}
-              className="flex w-full items-center gap-2 rounded py-1 pr-2 text-left text-[13px] text-gray-600 transition hover:bg-brand/5 hover:text-brand"
+              className="flex w-full items-center gap-2 rounded-sm py-1 pr-2 text-left text-[13px] text-gray-600 transition hover:bg-brand/5 hover:text-brand"
               title={p}
             >
               <span className="truncate">{p}</span>
@@ -6270,7 +6713,7 @@ const Bubble = memo(function Bubble({
   return (
     <div className="flex justify-start">
       <div className="w-full max-w-full">
-        <div className="rounded-lg border border-gray-200 bg-white px-4 py-3 text-sm text-gray-900 shadow-sm">
+        <div className="rounded-lg border border-gray-200 bg-white px-4 py-3 text-sm text-gray-900 shadow-xs">
           <div className="prose-chat">
             <Markdown components={MARKDOWN_COMPONENTS}>
               {content}
@@ -6440,7 +6883,7 @@ function MermaidEditorPanel({ code, onClose }: { code: string; onClose: () => vo
             onChange={(e) => setDraft(e.target.value)}
             spellCheck={false}
             rows={12}
-            className="w-full resize-y rounded-lg border border-gray-300 bg-gray-900 px-3 py-2 font-mono text-[12px] leading-snug text-gray-100 focus:border-sky-400 focus:outline-none focus:ring-1 focus:ring-sky-400"
+            className="w-full resize-y rounded-lg border border-gray-300 bg-gray-900 px-3 py-2 font-mono text-[12px] leading-snug text-gray-100 focus:border-sky-400 focus:outline-hidden focus:ring-1 focus:ring-sky-400"
           />
         </div>
 
@@ -6614,7 +7057,7 @@ function CodeBlock({ children }: { children?: React.ReactNode }) {
                 ? "Run this KQL query via Azure Resource Graph"
                 : "Run this command on the host"
             }
-            className="inline-flex items-center gap-1 rounded-md border border-sky-400/40 bg-sky-500/20 px-1.5 py-1 text-[11px] text-sky-100 backdrop-blur transition hover:bg-sky-500/30 disabled:opacity-50"
+            className="inline-flex items-center gap-1 rounded-md border border-sky-400/40 bg-sky-500/20 px-1.5 py-1 text-[11px] text-sky-100 backdrop-blur-sm transition hover:bg-sky-500/30 disabled:opacity-50"
           >
             {running ? (
               <Spinner className="h-3.5 w-3.5 text-sky-200" />
@@ -6630,7 +7073,7 @@ function CodeBlock({ children }: { children?: React.ReactNode }) {
           <button
             onClick={() => exec.openEditor(text, kqlRunnable ? "kql" : "command")}
             title="Edit before running"
-            className="inline-flex items-center gap-1 rounded-md border border-white/15 bg-white/10 px-1.5 py-1 text-[11px] text-gray-200 backdrop-blur transition hover:bg-white/20"
+            className="inline-flex items-center gap-1 rounded-md border border-white/15 bg-white/10 px-1.5 py-1 text-[11px] text-gray-200 backdrop-blur-sm transition hover:bg-white/20"
           >
             <svg className="h-3.5 w-3.5" viewBox="0 0 20 20" fill="none" stroke="currentColor" strokeWidth="1.6">
               <path d="M13.5 4.5l2 2L7 15l-3 .8.8-3 8.7-8.3z" strokeLinejoin="round" />
@@ -6642,7 +7085,7 @@ function CodeBlock({ children }: { children?: React.ReactNode }) {
           content={() => text}
           title="Copy code"
           label="Copy"
-          className="inline-flex items-center gap-1 rounded-md border border-white/15 bg-white/10 px-1.5 py-1 text-[11px] text-gray-200 backdrop-blur transition hover:bg-white/20"
+          className="inline-flex items-center gap-1 rounded-md border border-white/15 bg-white/10 px-1.5 py-1 text-[11px] text-gray-200 backdrop-blur-sm transition hover:bg-white/20"
           checkClassName="h-3.5 w-3.5 text-green-400"
         />
       </div>
@@ -6657,7 +7100,7 @@ function CodeBlock({ children }: { children?: React.ReactNode }) {
             {running ? (
               <button
                 onClick={() => abortRef.current?.abort()}
-                className="rounded px-1.5 py-0.5 text-gray-300 hover:bg-gray-700"
+                className="rounded-sm px-1.5 py-0.5 text-gray-300 hover:bg-gray-700"
               >
                 Stop
               </button>
@@ -6685,13 +7128,13 @@ function CodeBlock({ children }: { children?: React.ReactNode }) {
               <div className="flex gap-2">
                 <button
                   onClick={() => setConfirmReq(null)}
-                  className="rounded border border-gray-600 px-2 py-0.5 text-gray-300 hover:bg-gray-700"
+                  className="rounded-sm border border-gray-600 px-2 py-0.5 text-gray-300 hover:bg-gray-700"
                 >
                   Cancel
                 </button>
                 <button
                   onClick={() => void doRun(true)}
-                  className="rounded bg-amber-500 px-2 py-0.5 font-medium text-gray-900 hover:bg-amber-400"
+                  className="rounded-sm bg-amber-500 px-2 py-0.5 font-medium text-gray-900 hover:bg-amber-400"
                 >
                   Run anyway
                 </button>
@@ -6795,7 +7238,7 @@ function MarkdownTable({ children }: { children?: React.ReactNode }) {
             value={query}
             onChange={(e) => setQuery(e.target.value)}
             placeholder={`Search ${rows.length} rows…`}
-            className="w-56 rounded-md border px-2 py-1 text-xs focus:outline-none focus:ring-1 focus:ring-brand"
+            className="w-56 rounded-md border px-2 py-1 text-xs focus:outline-hidden focus:ring-1 focus:ring-brand"
           />
           {query && (
             <span className="text-[11px] text-gray-400">
@@ -6960,7 +7403,7 @@ function CommandEditorPanel({
             onChange={(e) => setDraft(e.target.value)}
             spellCheck={false}
             rows={isKql ? 8 : 4}
-            className="w-full resize-y rounded-lg border border-gray-300 bg-gray-900 px-3 py-2 font-mono text-[12px] leading-snug text-gray-100 focus:border-sky-400 focus:outline-none focus:ring-1 focus:ring-sky-400"
+            className="w-full resize-y rounded-lg border border-gray-300 bg-gray-900 px-3 py-2 font-mono text-[12px] leading-snug text-gray-100 focus:border-sky-400 focus:outline-hidden focus:ring-1 focus:ring-sky-400"
             onKeyDown={(e) => {
               if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) {
                 e.preventDefault();
@@ -7013,13 +7456,13 @@ function CommandEditorPanel({
             <div className="flex gap-2">
               <button
                 onClick={() => setConfirmReq(null)}
-                className="rounded border border-gray-300 bg-white px-2.5 py-1 font-medium text-gray-700 hover:bg-gray-50"
+                className="rounded-sm border border-gray-300 bg-white px-2.5 py-1 font-medium text-gray-700 hover:bg-gray-50"
               >
                 Cancel
               </button>
               <button
                 onClick={() => void run(true)}
-                className="rounded bg-amber-500 px-2.5 py-1 font-medium text-gray-900 hover:bg-amber-400"
+                className="rounded-sm bg-amber-500 px-2.5 py-1 font-medium text-gray-900 hover:bg-amber-400"
               >
                 Run anyway
               </button>

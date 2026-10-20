@@ -25,7 +25,11 @@ You need:
 
 ### AI provider
 
-Bring at least one supported provider or local endpoint. The application supports API-key, OAuth, and local-server configurations, depending on the provider. Providers remain disabled until an administrator configures one. Resource enumeration can use Azure Resource Graph without an LLM, but AI grouping and chat require a working model.
+Bring at least one supported provider or local endpoint. The application supports API-key,
+OAuth, and local-server configurations, depending on the provider. Providers remain disabled
+until a user with `settings.read` and `settings.write` configures one through the read-gated
+Settings route. Resource enumeration can use Azure Resource Graph without an LLM, but AI
+grouping and chat require a working model.
 
 ### Operator access
 
@@ -34,7 +38,7 @@ Plan two kinds of authorization:
 1. **Azure authorization** controls what a connection can inspect or change in Azure.
 2. **Application permissions** control which product features a signed-in user can use.
 
-Built-in application roles include administrator, operator, auditor, user, and no-access. For example, chat requires `chat.use`, workload viewing requires `workloads.read`, and workload editing requires `workloads.write`.
+Built-in application roles are SysAdmin (`admin`), Operator, Auditor, User, and NoAccess; custom roles select exact capabilities. Chat requires `chat.use`, workload viewing requires `workloads.read`, and workload editing requires `workloads.write`. Navigation follows the active permission set, and entering a denied route directly does not bypass backend enforcement.
 
 ### Browser and network
 
@@ -58,6 +62,12 @@ The one-click template creates a Container App, Container Apps environment, Post
 - Prefer managed identity where available to avoid a long-lived Azure client secret.
 - Treat AI output as advisory. Verify evidence and review proposed changes before approval or execution.
 - Decide whether Microsoft Graph features are needed before granting Graph application permissions.
+
+## Choose coverage tools after setup
+
+After [first-run setup]({{ site.baseurl }}/getting-started/first-run/), open `/proactive` and search for coverage to find Monitoring Coverage, Telemetry Coverage, and Backup & DR Coverage. This is a capability directory, not the Dashboard or a set of scan results.
+
+{% include screenshot.html file="admin-onboarding-proactive-coverage-directory.png" title="Proactive Support directory filtered for coverage" caption="The cards explain which coverage question each tool answers. This local test-data view does not show completed scans or verify any OAuth sign-in, AI-provider connection, or Azure connectivity." %}
 
 ## Readiness checklist
 

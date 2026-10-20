@@ -6,6 +6,7 @@ grand_parent: How-to guides
 nav_order: 52
 description: Add, test, discover, validate, default, disable, and remove Azure tenant connections.
 permalink: /how-to/administration/azure-tenants/
+feature_ids: [ADMIN_NAV:tenants]
 ---
 
 # Manage Azure tenant connections
@@ -13,7 +14,7 @@ permalink: /how-to/administration/azure-tenants/
 ## Prerequisites
 
 - Product permission `connections.manage`.
-- Tenant and client identifiers plus credentials for a method offered by the form: service-principal secret, service-principal certificate, host/default credential chain, or pasted Azure CLI token.
+- Tenant and client identifiers plus credentials for a method offered by the form: service-principal secret, service-principal certificate, host/default credential chain, or pasted Azure CLI token. See [Azure Tenants]({{ site.baseurl }}/admin/azure-tenants/) to choose one.
 - Least-privilege Azure RBAC at the intended scope; Graph administrator consent only when Entra features are required.
 
 ## Route
@@ -23,8 +24,10 @@ permalink: /how-to/administration/azure-tenants/
 
 ## How to add and verify an Azure tenant connection
 
+{% include screenshot.html file="admin-tenant-host-identity.png" title="Prepare a read-only host-identity connection" caption="This unsaved test-data form illustrates method selection and read-only onboarding. No connection was saved, no subscriptions were pulled, and Azure connectivity was not verified; follow the method-specific guide and verification steps below." %}
+
 1. Select **Add connection** and provide a non-sensitive display name.
-2. Choose an authentication method and complete only its visible fields.
+2. Choose an authentication method and complete only its visible fields. Each method has its own Azure-side setup — follow its page: [service principal (client secret)]({{ site.baseurl }}/admin/azure-tenants-service-principal-secret/), [service principal (certificate)]({{ site.baseurl }}/admin/azure-tenants-service-principal-certificate/), [host identity]({{ site.baseurl }}/admin/azure-tenants-host-identity/), or [pasted Azure CLI token]({{ site.baseurl }}/admin/azure-tenants-pasted-token/).
 3. Set the default subscription or Log Analytics workspace only when required by workflows.
 4. Keep **Read only** enabled and automatic writes disabled during onboarding.
 5. Save. Secret, certificate, and token fields are write-only; blank values on a later edit preserve stored values.
@@ -47,7 +50,7 @@ Only one connection is default. Prefer **Disabled** over deletion while assessin
 
 | Symptom | Resolution |
 | --- | --- |
-| Unexpected result | Re-check route, permissions, and latest refresh state before retrying. |
+| A connection resolves the wrong tenant or subscription set | Disable it, verify tenant and client identifiers plus the selected default, then retest before enabling dependent scans. |
 | Test cannot acquire an ARM token | Check tenant/client identifiers, credential validity, authority, clock, and network egress. |
 | No subscriptions are visible | Check Azure RBAC and tenant selection; authentication success alone grants no resource scope. |
 | Entra validation is unavailable | Use a service-principal secret or certificate connection; host-chain and pasted ARM token methods do not provide application Graph authentication here. |
@@ -56,6 +59,6 @@ Only one connection is default. Prefer **Disabled** over deletion while assessin
 ## Related docs
 
 - [How-to guides]({{ site.baseurl }}/how-to/)
-- [Azure tenant reference]({{ site.baseurl }}/admin/azure-tenants-sandbox-vms/)
+- [Azure tenant reference]({{ site.baseurl }}/admin/azure-tenants/)
 - [Connection Capability recipe]({{ site.baseurl }}/how-to/coverage/connection-capability/)
-- [Entra setup]({{ site.baseurl }}/ENTRA_SETUP/)
+- [Entra setup]({{ site.baseurl }}/getting-started/entra-setup/)

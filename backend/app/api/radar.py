@@ -31,6 +31,7 @@ router = APIRouter(prefix="/radar", tags=["radar"])
 # Existing `require_admin` call sites now enforce a fine-grained capability (admins always
 # pass through require_permission). See app.auth.permissions for the catalog.
 require_admin = require_permission("radar.read")
+require_write = require_permission("radar.manage")
 log = logging.getLogger("app.api.radar")
 
 
@@ -108,7 +109,19 @@ async def _get_snapshot(principal: Principal, scope_kind: str, scope_id: str, *,
     lock = cache.get_lock(tenant_id, scope_kind, scope_id)
     async with lock:
         connection = connection_for_scope(scope_kind, connection_id=connection_id, workload=workload)
+        previous = cache.read_snapshot(tenant_id, scope_kind, scope_id)
         fresh = await collect_radar(connection, scope_kind=scope_kind, scope_id=scope_id, workload=workload, tenant_id=tenant_id)
+        if fresh.get("collection_failed") and previous:
+            preserved = dict(previous)
+            preserved.update(
+                {
+                    "last_good_preserved": True,
+                    "last_refresh_error": str(fresh.get("error") or "Radar refresh failed.")[:500],
+                    "last_refresh_source_status": fresh.get("source_status") or {},
+                }
+            )
+            cache.write_snapshot(tenant_id, scope_kind, scope_id, preserved)
+            return _decorate(preserved, ttl, tenant_id)
         cache.write_snapshot(tenant_id, scope_kind, scope_id, fresh)
         return _decorate(fresh, ttl, tenant_id)
 
@@ -138,7 +151,7 @@ async def refresh(
     workload_id: str | None = Query(default=None),
     subscription_id: str | None = Query(default=None),
     connection_id: str | None = Query(default=None),
-    principal: Principal = Depends(require_admin),
+    principal: Principal = Depends(require_write),
     db: AsyncSession = Depends(get_db),
 ) -> dict[str, Any]:
     scope_kind, scope_id = _resolve_scope_params(workload_id, subscription_id)
@@ -175,7 +188,7 @@ class RunbookRequest(BaseModel):
 
 
 @router.post("/runbook")
-async def generate_runbook(payload: RunbookRequest, principal: Principal = Depends(require_admin)) -> dict[str, Any]:
+async def generate_runbook(payload: RunbookRequest, principal: Principal = Depends(require_write)) -> dict[str, Any]:
     from app.radar.runbook import draft_runbook
 
     result = await draft_runbook(payload.event, architecture_id=payload.architecture_id)
@@ -198,7 +211,7 @@ class ReferenceUpdate(BaseModel):
 
 @router.put("/reference")
 async def put_reference(
-    payload: ReferenceUpdate, principal: Principal = Depends(require_admin), db: AsyncSession = Depends(get_db)
+    payload: ReferenceUpdate, principal: Principal = Depends(require_write), db: AsyncSession = Depends(get_db)
 ) -> dict[str, Any]:
     from app.radar.reference import save_reference
 
@@ -231,7 +244,7 @@ class RestoreRequest(BaseModel):
 
 
 @router.post("/reference/restore")
-async def restore_reference(payload: RestoreRequest, principal: Principal = Depends(require_admin)) -> dict[str, Any]:
+async def restore_reference(payload: RestoreRequest, principal: Principal = Depends(require_write)) -> dict[str, Any]:
     from app.radar.reference import restore_revision
 
     doc = restore_revision(payload.revision_id, actor=principal.subject)
@@ -241,7 +254,7 @@ async def restore_reference(payload: RestoreRequest, principal: Principal = Depe
 
 
 @router.post("/reference/reset")
-async def reset_reference(principal: Principal = Depends(require_admin)) -> dict[str, Any]:
+async def reset_reference(principal: Principal = Depends(require_write)) -> dict[str, Any]:
     from app.radar.reference import reset_to_builtin
 
     return {"ok": True, "reference": reset_to_builtin(actor=principal.subject)}
@@ -257,7 +270,7 @@ class StateUpdate(BaseModel):
 
 @router.post("/state")
 async def update_state(
-    payload: StateUpdate, principal: Principal = Depends(require_admin), db: AsyncSession = Depends(get_db)
+    payload: StateUpdate, principal: Principal = Depends(require_write), db: AsyncSession = Depends(get_db)
 ) -> dict[str, Any]:
     if payload.status and payload.status not in state.STATUSES:
         return {"ok": False, "detail": f"Invalid status. Allowed: {', '.join(state.STATUSES)}."}
@@ -311,7 +324,7 @@ def _severity_for_item(it: RadarItem) -> str:
 
 @router.post("/findings/register")
 async def register_findings(
-    payload: RegisterFindingsRequest, principal: Principal = Depends(require_admin), db: AsyncSession = Depends(get_db)
+    payload: RegisterFindingsRequest, principal: Principal = Depends(require_write), db: AsyncSession = Depends(get_db)
 ) -> dict[str, Any]:
     """Register radar items as Reliability-pillar findings via a lightweight AssessmentRun,
     so they feed the existing assessment scoring + finding-state + waiver machinery."""
@@ -388,7 +401,7 @@ class TicketRequest(BaseModel):
 
 @router.post("/ticket")
 async def create_radar_ticket(
-    payload: TicketRequest, principal: Principal = Depends(require_admin), db: AsyncSession = Depends(get_db)
+    payload: TicketRequest, principal: Principal = Depends(require_write), db: AsyncSession = Depends(get_db)
 ) -> dict[str, Any]:
     from app.assessments.tickets import create_ticket
 
@@ -440,6 +453,6 @@ async def digest_preview(
 
 # ----------------------------------------------------------------------- demo
 @router.post("/demo/seed")
-async def seed_demo_endpoint(principal: Principal = Depends(require_admin)) -> dict[str, Any]:
+async def seed_demo_endpoint(principal: Principal = Depends(require_write)) -> dict[str, Any]:
     snap = demo.seed_demo(tenant_id=principal.tenant_id or "default")
     return {"ok": True, "workload_id": demo.DEMO_WORKLOAD_ID, "counts": snap.get("counts", {})}

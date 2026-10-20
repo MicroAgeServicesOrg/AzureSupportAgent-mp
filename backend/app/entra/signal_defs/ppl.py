@@ -10,7 +10,6 @@ from __future__ import annotations
 from typing import Any
 
 from app.entra import guests, model
-from app.entra.collectors.roles import privileged_principal_ids
 from app.entra.collectors.tenant import (
     GUEST_ROLE_SAME_AS_MEMBER,
     guest_access_label,
@@ -55,7 +54,7 @@ def _stale_user(data: dict[str, Any], ctx: SignalContext) -> list[dict[str, Any]
             signal_id="ppl.stale_user", severity="medium", pillar="ppl",
             object_kind="user", object_id=str(u["id"]), object_name=u.get("upn") or str(u["id"]),
             title=f"{u.get('upn')} has not signed in for {days} days",
-            detail="A dormant enabled account still holds its group memberships, licences and access.",
+            detail="A dormant enabled account still holds its group memberships, licenses and access.",
             evidence={"last_signin": u.get("last_signin"), "days_since": days,
                       "department": u.get("department", ""), "licences": u.get("licence_count")},
             portal_link=model.portal_user(str(u["id"])),
@@ -191,7 +190,7 @@ def _guest_no_sponsor(data: dict[str, Any], ctx: SignalContext) -> list[dict[str
         out.append(model.finding(
             signal_id="ppl.guest_no_sponsor", severity="medium", pillar="ppl",
             object_kind="user", object_id=str(u["id"]), object_name=u.get("upn") or str(u["id"]),
-            title=f"Guest {u.get('upn')} has no recorded sponsor or organisation",
+            title=f"Guest {u.get('upn')} has no recorded sponsor or organization",
             detail="With no internal owner recorded, there is nobody to ask whether this access is "
                    "still needed at review time.",
             evidence={"company_name": u.get("company_name", ""), "department": u.get("department", ""),
@@ -311,7 +310,10 @@ def _guest_accepted_never_used(data: dict[str, Any], ctx: SignalContext) -> list
     for u in guests.guests_of(domain(data, "people")):
         if not u.get("signin_known"):
             continue
-        if guests.lifecycle(u, now=ctx.now, stale_days=ctx.guest_stale_days) != guests.STATE_NEVER_USED:
+        # Asked directly rather than via the lifecycle string: a guest that was disabled AFTER
+        # never using its access still holds that access, and displaying it as "Disabled"
+        # must not delete the finding.
+        if not guests.never_used(u):
             continue
         invited = guests.invited_at(u)
         out.append(model.finding(
@@ -375,7 +377,7 @@ def _guest_consumer_domain(data: dict[str, Any], ctx: SignalContext) -> list[dic
 
     One row per person would be 72 near-identical findings on a real tenant. The decision is
     per domain anyway: nobody can de-provision a Gmail address when an engagement ends,
-    because there is no counterparty organisation to ask.
+    because there is no counterparty organization to ask.
     """
     rows = [u for u in guests.guests_of(domain(data, "people")) if u.get("enabled")]
     buckets: dict[str, list[dict[str, Any]]] = {}
@@ -390,7 +392,7 @@ def _guest_consumer_domain(data: dict[str, Any], ctx: SignalContext) -> list[dic
             signal_id="ppl.guest_consumer_domain", severity="medium", pillar="ppl",
             object_kind="domain", object_id=dom, object_name=dom,
             title=f"{len(items):,} enabled guest(s) use the consumer mailbox domain {dom}",
-            detail="A consumer address has no owning organisation, so there is nobody to notify "
+            detail="A consumer address has no owning organization, so there is nobody to notify "
                    "when the engagement ends and no partner admin who can disable it. Access "
                    "outlives the relationship by default.",
             evidence={"domain": dom, "guests": len(items),
@@ -425,7 +427,7 @@ SPECS: list[SignalSpec] = [
     ),
     SignalSpec(
         id="ppl.guest_consumer_domain", title="Guests on consumer mailbox domains",
-        question="Which external access has no owning organisation behind it?",
+        question="Which external access has no owning organization behind it?",
         why="Nobody can de-provision a personal Gmail address when an engagement ends — there is "
             "no partner admin to ask and no leaver process to inherit.",
         pillar="ppl", severity="medium", weight=5, object_kind="domain",
@@ -537,7 +539,7 @@ SPECS: list[SignalSpec] = [
     ),
     SignalSpec(
         id="ppl.external_collab_open", title="Inbound collaboration open to any tenant",
-        question="Which organisations can be invited into this directory?",
+        question="Which organizations can be invited into this directory?",
         why="Unrestricted inbound B2B means any Entra user anywhere can be given access.",
         pillar="ppl", severity="high", weight=6, object_kind="tenant",
         domains=("tenant",), requires=("Policy.Read.All",), impact=IMPACT_BINARY,

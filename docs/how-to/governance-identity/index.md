@@ -12,6 +12,8 @@ permalink: /how-to/governance-identity/
 
 Use these guides to turn cached governance and access data into verified review outcomes. The pages distinguish read-only analysis from local writes and Azure-side remediation.
 
+{% include screenshot.html file="identity-accessmap-grant-paths.png" title="Access-review starting point — trace principal, group, role, and scope" caption="The IAM Access Map groups synthetic grants into paths and exposes filters for principal type, privilege, surface, and PIM eligibility. Read its limitations banner before choosing an access-review recipe. Eligible grants are excluded in this view and a deny is reported separately; populated fixture ribbons do not mean a live scan or an access change occurred." %}
+
 | Goal | Guide |
 | --- | --- |
 | Scan and inventory policy | [Inventory and assignments]({{ site.baseurl }}/how-to/governance-identity/policy-inventory-assignments/) |
@@ -29,6 +31,7 @@ Use these guides to turn cached governance and access data into verified review 
 | Review external access and clear stale invitations | [Guest (B2B) access reviews]({{ site.baseurl }}/how-to/governance-identity/review-guest-access/) |
 | Triage IAM findings and run the access scanners | [Work the IAM scanner inbox]({{ site.baseurl }}/how-to/governance-identity/iam-scanner-inbox/) |
 | Trace and close a route from ordinary access to full control | [Run an IAM escalation review]({{ site.baseurl }}/how-to/governance-identity/iam-escalation-review/) |
+| Find access still held by accounts that were disabled in Entra ID | [Export disabled accounts that still hold access]({{ site.baseurl }}/how-to/governance-identity/iam-disabled-access/) |
 | Establish what access changed between collections, and who changed it | [Find what access changed and who changed it]({{ site.baseurl }}/how-to/governance-identity/iam-compare-attribute-changes/) |
 
 ## Common operating pattern

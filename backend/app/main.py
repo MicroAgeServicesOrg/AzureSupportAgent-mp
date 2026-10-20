@@ -2,12 +2,14 @@
 from __future__ import annotations
 
 import logging
+from contextlib import asynccontextmanager
 from pathlib import Path
+from types import SimpleNamespace
 
 from fastapi import APIRouter, Depends, FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.middleware.gzip import GZipMiddleware
-from fastapi.responses import FileResponse, JSONResponse
+from fastapi.responses import FileResponse, JSONResponse, PlainTextResponse
 from fastapi.staticfiles import StaticFiles
 
 from app.api import (
@@ -31,9 +33,11 @@ from app.api import (
     connections,
     connectors,
     coverage_reports,
+    dashboard,
     dnsdebug,
     entra,
     evidence,
+    firewall,
     fmea,
     graph,
     iam,
@@ -51,12 +55,14 @@ from app.api import (
     quota,
     radar,
     reservations,
+    resiliency,
     tagintel,
     telemetry,
     teleintel,
     users,
     vms,
     workbooks,
+    work_batches,
     workloads,
 )
 from app.core.config import get_settings
@@ -89,12 +95,24 @@ import os  # noqa: E402
 # the running container (the env var must be set on the active revision).
 _OPENAPI_PUBLIC = os.getenv("OPENAPI_PUBLIC", "").lower() in ("1", "true", "yes")
 _DOCS_ENABLED = (settings.environment == "local") or _OPENAPI_PUBLIC
+
+
+@asynccontextmanager
+async def _lifespan(_app: FastAPI):
+    await _startup()
+    try:
+        yield
+    finally:
+        await _shutdown()
+
+
 app = FastAPI(
     title="Azure Support Agent",
     version="0.1.0",
     docs_url="/docs" if _DOCS_ENABLED else None,
     redoc_url="/redoc" if _DOCS_ENABLED else None,
     openapi_url="/openapi.json" if _DOCS_ENABLED else None,
+    lifespan=_lifespan,
 )
 logging.getLogger("app.main").info(
     "Startup: environment=%s, openapi_docs_enabled=%s", settings.environment, _DOCS_ENABLED
@@ -133,10 +151,41 @@ async def _http_exception_handler(_request: Request, exc: HTTPException) -> JSON
 _warm_task = None
 
 
-@app.on_event("startup")
+async def _ensure_schema_resilient(attempts: int = 4) -> None:
+    """`ensure_schema` with backoff, and a last resort that does not kill the container."""
+    import asyncio
+
+    log = logging.getLogger("app.main")
+    for attempt in range(1, attempts + 1):
+        try:
+            await ensure_schema()
+            return
+        except Exception:  # noqa: BLE001
+            if attempt == attempts:
+                # Boot anyway. A replica that cannot migrate can still serve reads against a
+                # schema another replica just finished, and an exiting container serves nothing
+                # at all while it restart-loops.
+                log.error("Schema sync failed after %d attempts; continuing without it",
+                          attempts, exc_info=True)
+                return
+            delay = min(8.0, 0.5 * 2 ** (attempt - 1))
+            log.warning("Schema sync attempt %d/%d failed; retrying in %.1fs",
+                        attempt, attempts, delay, exc_info=True)
+            await asyncio.sleep(delay)
+
+
 async def _startup() -> None:
-    # Keep the local SQLite schema in sync (creates tables + late-added columns).
-    await ensure_schema()
+    # Keep the schema in sync (creates tables + late-added columns). Retried rather than
+    # allowed to kill the process: this is DDL every replica runs at boot, and losing a race
+    # with another replica used to raise straight out of the lifespan — "Application startup
+    # failed. Exiting." — which the platform answered by restarting into the same race. The
+    # loser of a deadlock has usually had its work done for it by the winner.
+    await _ensure_schema_resilient()
+    # Expired running jobs are failed, and old terminal replay events are removed, even when
+    # the scale-out replica that executed them no longer exists.
+    from app.core.durable_jobs import janitor as durable_job_janitor
+
+    durable_job_janitor.start()
     # Bootstrap auth: seed system roles + the initial admin/admin account.
     from app.auth.oidc_seed import seed_oidc_provider
     from app.auth.service import seed_admin
@@ -297,6 +346,18 @@ async def _startup() -> None:
 
     backup_lro_poller.start()
 
+    # Durable Performance Profiler Fleet worker. Queued/running SQL rows are recovered before
+    # its runner starts, so browser reloads and container restarts cannot drop the batch tail.
+    from app.perfprofile.fleet import worker as perf_fleet_worker
+
+    await perf_fleet_worker.start()
+
+    # Shared durable worker for Assessment, Change Explorer, coverage, Backup Manager,
+    # Architecture, Mission, Cost, Deep Review and nightly batches.
+    from app.core.work_batches import worker as work_batch_worker
+
+    await work_batch_worker.start()
+
     # Warm the Azure MCP tool catalog in the background so the FIRST chat message
     # doesn't pay the `npx @azure/mcp` cold-start (node spawn + package resolve),
     # which the orchestrator awaits before streaming any token. Non-blocking.
@@ -312,7 +373,6 @@ async def _startup() -> None:
     _warm_task = asyncio.create_task(warm_tool_catalog())
 
 
-@app.on_event("shutdown")
 async def _shutdown() -> None:
     import asyncio
     import contextlib
@@ -325,6 +385,22 @@ async def _shutdown() -> None:
         with contextlib.suppress(asyncio.CancelledError, Exception):
             await _warm_task
     _warm_task = None
+
+    # Container Apps can remove scale-out replicas while detached work is running. Close all
+    # process-owned durable runners first, while SQL is still available, so their rows reach a
+    # terminal state instead of remaining "running" after the replica has disappeared.
+    from app.agent.turn_runner import registry as turn_registry
+    from app.core.durable_jobs import shutdown_executors
+    from app.core.genjob import shutdown_registries
+    from app.api.telemetry import shutdown_refresh_tasks
+
+    await asyncio.gather(
+        turn_registry.stop(),
+        shutdown_registries(),
+        shutdown_executors(),
+        shutdown_refresh_tasks(),
+        return_exceptions=True,
+    )
 
     from app.core import loopwatch
 
@@ -343,9 +419,18 @@ async def _shutdown() -> None:
     from app.monitor.sampler import sampler as monitor_sampler
 
     await monitor_sampler.stop()
+    from app.perfprofile.fleet import worker as perf_fleet_worker
+
+    await perf_fleet_worker.stop()
+    from app.core.work_batches import worker as work_batch_worker
+
+    await work_batch_worker.stop()
     from app.backup_manager.lro import poller as backup_lro_poller
 
     await backup_lro_poller.stop()
+    from app.core.durable_jobs import janitor as durable_job_janitor
+
+    await durable_job_janitor.stop()
 
 app.add_middleware(
     CORSMiddleware,
@@ -365,6 +450,10 @@ app.add_middleware(
         "Cache-Control",
         "X-Requested-With",
     ],
+    # Downloads fetched as a Blob (rather than a plain link) cannot read the server's
+    # filename unless it is exposed, so every such caller has to invent its own — and two
+    # names for one file is how a report gets filed under the wrong scope.
+    expose_headers=["Content-Disposition"],
     max_age=3600,
 )
 
@@ -372,6 +461,10 @@ app.add_middleware(
 # send `Accept: text/event-stream`; we bypass GZipMiddleware for those requests
 # so per-event delivery latency is preserved (gzip's internal buffer would
 # otherwise batch/delay events).
+#
+# Workbook downloads are deliberately NOT excluded. An .xlsx looks incompressible because it
+# is a ZIP container, but measured on a real 1,500-row export gzip still removes 18.5% — and
+# Starlette compresses a body over 128 KiB in a worker thread, so it never reaches the loop.
 class _SafeGZip:
     def __init__(self, app, minimum_size: int = 1024) -> None:
         self._raw_app = app
@@ -464,6 +557,85 @@ class _SecurityHeaders:
         await self._app(scope, receive, _send)
 
 
+# ------------------------------------------------------- network access control (IP allowlist)
+#
+# Refuses requests from sources outside the configured allowlist BEFORE authentication runs, so
+# an unknown caller never reaches the sign-in page and cannot attempt credentials at all. The
+# existing per-IP lockout is reactive — it responds after failures; this stops the attempt.
+#
+# ORDERING (verified, not assumed): Starlette's `add_middleware` INSERTS AT THE FRONT of
+# `user_middleware`, and the stack is built so the FIRST entry is OUTERMOST — i.e. the LAST
+# middleware registered runs FIRST. This class is therefore registered BEFORE `_SecurityHeaders`
+# so that it ends up INSIDE it, which is what lets a 403 from here still carry CSP/HSTS/nosniff.
+# `test_netaccess.py` asserts this ordering, because a refactor that moved this outside the
+# header middleware, or after authentication, would weaken it with no other visible symptom.
+class _IpAllowlist:
+    """Enforce the configured IP allowlist.
+
+    Exempt paths are ONLY the platform probes and the build id. Everything else — including
+    `/api/auth/login`, the SSO routes and the SPA shell — is subject to the allowlist, because
+    keeping unknown sources away from the sign-in page is the entire purpose of the feature.
+    """
+
+    #: Never blocked. `/healthz` and `/readyz` are the Container Apps liveness/readiness probes;
+    #: blocking them would kill the revision and take the app down far more effectively than any
+    #: attacker. `/version` is a public build id the SPA polls.
+    EXEMPT_PATHS = frozenset({"/healthz", "/readyz", "/version"})
+
+    def __init__(self, app) -> None:  # type: ignore[no-untyped-def]
+        self._app = app
+
+    async def __call__(self, scope, receive, send):  # type: ignore[no-untyped-def]
+        if scope.get("type") != "http" or scope.get("path", "") in self.EXEMPT_PATHS:
+            await self._app(scope, receive, send)
+            return
+
+        from app.core import netaccess
+
+        mode = netaccess.effective_mode()
+        if mode == "off":
+            await self._app(scope, receive, send)
+            return
+
+        from app.core.clientip import client_ip
+        from app.core.netaccess_events import record
+
+        cfg = netaccess.load_config()
+        # A lightweight Request wrapper: `client_ip` only needs `.client` and `.headers`, and
+        # building a full Starlette Request on every call would be wasted work on the hot path.
+        ip = client_ip(_ScopeRequest(scope))
+        if netaccess.matches(ip, cfg.get("rules", [])):
+            await self._app(scope, receive, send)
+            return
+
+        record(ip or "unknown", mode, scope.get("path", ""))
+        if mode == "monitor":
+            # Recorded, deliberately NOT blocked. This is what makes it safe to discover the
+            # right rules before committing to them.
+            await self._app(scope, receive, send)
+            return
+
+        # Bare 403: do not confirm what is here, do not name the feature, do not tell the caller
+        # their address is not on a list. A blocked scanner should learn nothing.
+        resp = PlainTextResponse("Forbidden", status_code=403)
+        await resp(scope, receive, send)
+
+
+class _ScopeRequest:
+    """Minimal `.client` / `.headers` view over a raw ASGI scope."""
+
+    __slots__ = ("client", "headers")
+
+    def __init__(self, scope) -> None:  # type: ignore[no-untyped-def]
+        peer = scope.get("client")
+        self.client = SimpleNamespace(host=peer[0]) if peer else None
+        self.headers = {
+            k.decode("latin-1").lower(): v.decode("latin-1") for k, v in scope.get("headers", [])
+        }
+
+
+app.add_middleware(_IpAllowlist)
+
 app.add_middleware(_SecurityHeaders)
 
 
@@ -540,75 +712,141 @@ app.add_middleware(_CsrfGuard)
 # All application endpoints live under /api so the SPA can own every other path
 # (client-side routes like /inventory, /admin, /policy collide with API prefixes
 # otherwise). The frontend talks to this via VITE_API_BASE=/api in production.
+#
+# Sub-routers are registered DIRECTLY on `app` with the /api prefix rather than nested inside
+# this router. `include_router` re-creates every route it copies, so nesting made all ~1,077
+# sub-router routes pay a second full registration pass: measured 2,012 ms nested vs 999 ms
+# flat, for a route set proven byte-identical (same sha256 over path+methods+name+model).
+# `api` still exists for the handful of endpoints defined directly below.
 api = APIRouter(prefix="/api")
 
-api.include_router(auth.router)
-api.include_router(users.router)
-api.include_router(meta.router)
-api.include_router(chats.router)
-api.include_router(charts.router)
-api.include_router(admin.router)
-api.include_router(admin_demo.router)
-api.include_router(connections.router)
-api.include_router(connectors.router)
-api.include_router(automations.router)
-api.include_router(backup.router)
-api.include_router(workbooks.router)
-api.include_router(playbooks.router)
-api.include_router(notifications.router)
-api.include_router(workloads.router)
-api.include_router(assessments.router)
-api.include_router(architectures.router)
-api.include_router(fmea.router)
-api.include_router(policy.router)
-api.include_router(inventory.router)
-api.include_router(tagintel.router)
-api.include_router(changeexplorer.router)
-api.include_router(identity.router)
-api.include_router(entra.router)
-api.include_router(alert_analysis.router)
-api.include_router(alerts_manager.router)
-api.include_router(amba.router)
-api.include_router(backup_manager.router)
-api.include_router(telemetry.router)
-api.include_router(backupdr.router)
-api.include_router(coverage_reports.router)
-api.include_router(netcheck.router)
-api.include_router(dnsdebug.router)
-api.include_router(evidence.router)
-api.include_router(graph.router)
-api.include_router(radar.router)
-api.include_router(teleintel.router)
-api.include_router(perfprofile.router)
-api.include_router(missions.router)
-api.include_router(iam.router, prefix="/iam")
+for _sub in (
+    auth.router,
+    users.router,
+    meta.router,
+    chats.router,
+    charts.router,
+    admin.router,
+    admin_demo.router,
+    firewall.router,
+    connections.router,
+    connectors.router,
+    automations.router,
+    backup.router,
+    workbooks.router,
+    playbooks.router,
+    notifications.router,
+    workloads.router,
+    work_batches.router,
+    assessments.router,
+    architectures.router,
+    fmea.router,
+    policy.router,
+    inventory.router,
+    tagintel.router,
+    changeexplorer.router,
+    identity.router,
+    entra.router,
+    alert_analysis.router,
+    alerts_manager.router,
+    amba.router,
+    backup_manager.router,
+    resiliency.router,
+    telemetry.router,
+    backupdr.router,
+    coverage_reports.router,
+    dashboard.router,
+    netcheck.router,
+    dnsdebug.router,
+    evidence.router,
+    graph.router,
+    radar.router,
+    teleintel.router,
+    perfprofile.router,
+    missions.router,
+):
+    app.include_router(_sub, prefix="/api")
+
+app.include_router(iam.router, prefix="/api/iam")
 # Legacy alias: /rbac was renamed to /iam. Kept (hidden from the schema, Deprecation-tagged)
 # so existing bookmarks, saved automations and API clients keep working. Remove one release
 # after the frontend has moved.
-api.include_router(
+app.include_router(
     iam.router,
-    prefix="/rbac",
+    prefix="/api/rbac",
     include_in_schema=False,
     dependencies=[Depends(iam.deprecated_rbac_alias)],
 )
-api.include_router(reservations.router)
-api.include_router(quota.router)
-api.include_router(ownership.router)
-api.include_router(vms.router)
-api.include_router(capability.router)
-api.include_router(cases.router)
-api.include_router(insights.router)
+
+for _sub in (
+    reservations.router,
+    quota.router,
+    ownership.router,
+    vms.router,
+    capability.router,
+    cases.router,
+    insights.router,
+):
+    app.include_router(_sub, prefix="/api")
 
 
 # Health/readiness probes stay at the root (no auth, no /api) for Container Apps.
 @app.get("/healthz")
 async def healthz():
+    """Process liveness only: no database, network, or downstream dependency checks."""
     return {"status": "ok"}
+
+
+_last_readiness_failure_log = 0.0
+
+
+async def _database_ready(timeout_s: float = 2.0) -> bool:
+    """Run one bounded checkout/query without exposing connection or exception details."""
+    import asyncio
+
+    from sqlalchemy import text
+
+    from app.core.db import SessionLocal
+
+    try:
+        async with asyncio.timeout(timeout_s):
+            async with SessionLocal() as db:
+                await db.execute(text("SELECT 1"))
+        return True
+    except Exception:  # noqa: BLE001 - readiness converts every failure to a boolean
+        return False
 
 
 @app.get("/readyz")
 async def readyz():
-    return {"status": "ready"}
+    """Fast readiness: bounded database access plus recoverable recent loop health."""
+    import time
+
+    from app.core import loopwatch
+
+    db_ok = await _database_ready()
+    loop_ok = loopwatch.recent_max_lag_s(window_s=30.0) < 1.0
+    ready = db_ok and loop_ok
+    if ready:
+        return {"status": "ready", "checks": {"database": True, "event_loop": True}}
+
+    # The platform probes every few seconds. Rate-limit a stable, secret-free marker that can
+    # drive a Log Analytics alert without flooding logs during a database outage.
+    global _last_readiness_failure_log
+    now = time.monotonic()
+    if now - _last_readiness_failure_log >= 60.0:
+        logging.getLogger("app.main").warning(
+            "readiness probe failed (database_ok=%s event_loop_ok=%s)", db_ok, loop_ok
+        )
+        _last_readiness_failure_log = now
+    return JSONResponse(
+        status_code=503,
+        content={
+            "status": "not_ready",
+            "checks": {"database": db_ok, "event_loop": loop_ok},
+        },
+        headers={"Cache-Control": "no-store"},
+    )
 
 
 @app.get("/version")

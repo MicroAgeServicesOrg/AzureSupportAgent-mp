@@ -11,7 +11,7 @@ feature_ids: [PROACTIVE_NAV:entra, ENTRA_NAV:signals]
 
 # Entra: risk and sign-ins
 
-**Product permission:** `entra.read` for every view on this tab. No action on this tab writes anything.
+**Product permissions:** `entra.read` for views; changing the lookback requires `settings.write`, and the subsequent recollection requires `entra.admin`. These actions change product configuration/cache, not directory objects.
 
 ## Purpose
 
@@ -41,21 +41,30 @@ Six sub-views, selected from the strip at the top of the tab.
 | Auth methods | `/signals/auth-methods` | Registration coverage for administrators and for all enabled users, method distribution, and the registration gap list |
 | Legacy auth | `/signals/legacy-auth` | Legacy protocol breakdown with attempts, successes, users, apps and last success; the Conditional Access policies that block legacy clients; and whether a gap remains |
 | Failures | `/signals/failures` | Failure clustering by Entra error code with a plain-English meaning, per-day trend, and the applications carrying the failures |
-| Risky users | `/signals/risky-users` | Identity Protection risky users filtered by level and state, detection type counts, and risky workload identities || Patterns | `/signals/patterns` | Deterministic sign-in patterns, each carrying the rule and thresholds that produced it |
+| Risky users | `/signals/risky-users` | Identity Protection risky users filtered by level and state, detection type counts, and risky workload identities |
+| Patterns | `/signals/patterns` | Deterministic sign-in patterns, each carrying the rule and thresholds that produced it |
+
+The Reads column names API suffixes under `/api/entra`, not app routes. App sub-tab IDs are `overview`, `auth-methods`, `legacy`, `failures`, `risky` and `patterns`, all under `/entra/signals/`.
 
 Controls are the sub-view strip, the risky-users filters (search, risk level, risk state, and a brushable last-updated window), and the lookback control on Overview.
+
+**Screenshot notes:** These synthetic browser fixtures do not represent live Graph reads, backend aggregation or actual Identity Protection detections. The selected seven-day sign-in window is an example, not the default 30-day lookback; the displayed counts and rates are illustrative.
+
+{% include screenshot.html file="fid2-entra-signin-health.png" title="Sign-in health: sampling, lookback and Conditional Access outcomes" caption="The sampling banner qualifies every count and proportion even in this shorter window: counts are lower bounds and rates are approximate. Read the measured window with the selector, and distinguish MFA enforced by Conditional Access from all MFA use." %}
 
 ### The lookback window
 
 The Overview sub-view carries a **lookback window** selector offering 1, 3, 7, 14, 30, 60 and 90 days, with **Apply and re-collect** beside it. It is the only lever against the row cap: on a busy tenant the cap is reached long before a 30-day window closes, and every count on the tab becomes a lower bound. A shorter window buys exact figures over a shorter period.
 
-The window is a collection setting, not a query filter. Sign-ins are folded into counters while the collection runs and the raw rows are never kept, so changing the window has no effect on the numbers already on screen. Applying a change saves the setting and immediately starts a collection of the sign-in domain alone, rather than making you wait for the whole directory to be re-read. The control states both facts side by side: the window the next collection will use, and the window the figures currently displayed actually cover.
+The window is an application setting, not a query filter or a per-reader preference. Applying it saves `entra_signin_lookback_days`, then requests the **risk** domain, which owns the sign-in aggregation. If saving succeeds but refresh is denied, the setting has changed while the displayed data has not. Check both the configured window and the measured window; a shorter request is not automatically complete if it still reaches a cap.
 
 Saving the setting requires the `settings.write` permission, because the window governs collection for every reader of the tenant. Without it the selector still reports the current window; the apply action reports that it needs the permission.
 
 **Auth methods** deserves a specific note. Only users the registration report actually returned are scored. Enabled accounts absent from the report — typically newly created ones the report has not caught up with — are excluded from every figure and reported separately as unreported, rather than being counted as a gap.
 
 **Legacy auth** raises a distinct condition: a blocking policy exists, is enforced, and legacy sign-ins still succeeded in the window. That combination is the finding, not the presence or absence of the policy.
+
+{% include screenshot.html file="fid2-entra-signin-failures.png" title="Sign-in failures: error meanings and affected applications" caption="Use the failure-code meanings and application breakdown to select a troubleshooting lead. The same sampling boundary applies here; a missing code or application is not proof that no such failure occurred outside the collected slice." %}
 
 ## Freshness and scope behavior
 One snapshot per tenant serves every tab in Entra ID, so this tab reads the same collection as Posture, Conditional Access, Privileged Access, Applications, Governance, and Blast radius. Refresh from the freshness badge in the Entra ID header. Tabs never collect on their own; opening this one reads the cached snapshot and nothing else.
@@ -80,15 +89,17 @@ Risky users are joined to two things Identity Protection does not know: whether 
 
 The risky users grid narrows in four ways. Level and state are server-side filters. A search over user and UPN and a **risk last updated** window are client-side slices of what came back, the latter a brushable histogram with high-risk users stacked in red. Every column sorts, starting descending, and the orderings are semantic rather than alphabetical: level runs high to none, state runs confirmed-compromised to confirmed-safe, and self-remediation places `unknown` between no and yes because it is evidence of neither. Users Identity Protection never stamped with a last-updated time sort to the bottom in both directions and are excluded while a window is brushed — the page says how many.
 
+{% include screenshot.html file="fid2-entra-risky-identities.png" title="Risky identities: privilege, unknown remediation and license boundaries" caption="Read risk alongside privilege and self-remediation evidence. Unknown remediation capability is neither yes nor no; a missing update time is not an old event. The workload-identity license notice means that surface is unavailable, not that it contains zero risky identities." %}
+
 Patterns are counting rules, not predictions. Each result states its rule and carries the raw counts, so the claim can be verified rather than trusted. The rules are deterministic: distinct users failing invalid-credential attempts from a single IP address, repeated multi-factor denials or timeouts by one user, daily failures exceeding a multiple of the trailing median for the window, and successful interactive sign-ins from devices reported as non-compliant. The unmanaged-device pattern is reported once in aggregate with the worst accounts, not once per account.
 
 ## Safety and limitations
 
-- Every read on this tab is read-only. Nothing here dismisses a risk, confirms a compromise, blocks a user, resets a credential, or edits a policy. Remediate in the Microsoft Entra admin center or through your change process.
+- Nothing here dismisses risk, confirms compromise, blocks users or edits directory policies. Lookback changes do persist local settings and trigger a read-only collection. Remediate directory findings externally.
 - Sign-in analysis is sampled and bounded. It cannot prove absence: "no legacy sign-in succeeded in this window" is a statement about the window, not about the tenant.
-- The window is also bounded by Microsoft's own sign-in log retention for the tenant's licence. Events older than retention were never available to read.
+- The window is also bounded by Microsoft's own sign-in log retention for the tenant's license. Events older than retention were never available to read.
 - Unbounded dimensions are truncated to a top slice before storage — applications, failure codes, IP addresses, and users by volume. Counts outside a top slice are not shown.
-- Missing licence produces an explicit unavailable notice naming P1, P2, or Workload Identities Premium. It never produces a zero.
+- Missing license produces an explicit unavailable notice naming P1, P2, or Workload Identities Premium. It never produces a zero.
 - Exports and screenshots from this tab contain user principal names and risk verdicts. Handle them as identity material; do not paste live tenant, object, or user identifiers into tickets or prompts.
 
 ## Troubleshooting
@@ -97,7 +108,7 @@ Patterns are counting rules, not predictions. Each result states its rule and ca
 | --- | --- |
 | Every sign-in sub-view says analysis is unavailable | Either the tenant lacks Entra ID P1 or `AuditLog.Read.All` is not granted; the notice names which. |
 | Risky users says Identity Protection is unavailable | Entra ID P2 and `IdentityRiskyUser.Read.All` are both required. Sign-in views work without either. |
-| Risky workload identities is empty with a licence note | Requires Entra Workload Identities Premium; consent will not help. |
+| Risky workload identities is empty with a license note | Requires Entra Workload Identities Premium; consent will not help. |
 | Auth methods says the registration report is unavailable | Requires Entra ID P1 and `Reports.Read.All`. Grant, re-check permissions, then collect. |
 | A sampling banner is shown on every chart | The row cap truncated the window. Reduce the sign-in lookback window and collect again. |
 | Registration percentages exclude accounts you expect | Those users are absent from the registration report; the unreported count states how many. |

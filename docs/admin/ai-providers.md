@@ -5,11 +5,12 @@ parent: Administration
 nav_order: 1
 description: Configure model providers, credentials, model visibility, OAuth sessions, and connectivity diagnostics.
 permalink: /admin/ai-providers/
+feature_ids: [ADMIN_NAV:providers]
 ---
 
 # AI Providers
 
-**Permission:** `settings.write`
+**Permissions:** `settings.read` to inspect provider configuration, model visibility, and OAuth status; `settings.write` to save, test, refresh models, or change OAuth state
 
 ## Purpose
 
@@ -22,7 +23,7 @@ The provider screen exposes the provider catalog implemented by the application,
 
 ## Tabs and actions
 
-
+With `settings.read` alone, the section is rendered read-only and mutation controls are disabled. Provider/model saves, model refresh and test streams, OAuth authorize/refresh/sign-out actions, and visibility changes require `settings.write` and are audit logged where implemented.
 
 ## Freshness and scope behavior
 
@@ -39,6 +40,14 @@ The provider screen exposes the provider catalog implemented by the application,
 5. Mark unused providers disabled and sign out OAuth providers when retiring them.
 
 Credentials are masked and not returned to the browser. Leaving a saved secret field blank preserves the existing value. Local providers such as Ollama or LM Studio still need network reachability from the application container.
+
+### Unsaved configuration examples
+
+These local test-data forms illustrate the fields before save. No actual OAuth sign-in, provider request, or Azure connectivity was verified during capture; a default label or model name is not proof of a working provider.
+
+{% include screenshot.html file="admin-provider-openai-draft.png" title="OpenAI API-key and model fields — unsaved" caption="The model is a synthetic draft and the API-key field is empty. Save changes and Test connection were not used; the Default label does not establish authentication or model entitlement." %}
+
+{% include screenshot.html file="admin-provider-azure-openai-draft.png" title="Azure OpenAI endpoint and deployment fields — unsaved" caption="Azure OpenAI adds endpoint and API-version fields, with the deployment name used as the model. The example endpoint is nonfunctional, the key is empty, and no configuration was saved or tested." %}
 
 ## Interpretation of results
 
@@ -66,7 +75,6 @@ AI is inactive until configured. Provider requests may send prompts, retrieved A
 
 ## Related pages
 
-### Related docs
-
+- [Configure AI providers (how-to)]({{ site.baseurl }}/how-to/administration/ai-providers/)
 - [Credential handling]({{ site.baseurl }}/security/credential-handling/)
 - [Usage and Audit Log]({{ site.baseurl }}/admin/usage-audit/)

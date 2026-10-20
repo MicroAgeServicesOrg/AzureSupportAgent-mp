@@ -11,13 +11,15 @@ feature_ids: [PROACTIVE_NAV:iam, IAM_NAV:compare, IAM_NAV:simulator]
 
 # IAM: change and simulation
 
-**Product permission:** `iam.read` for **Compare** and for the attribution run. `iam.simulate` for **Simulator** — modelling is read-only and cheap, but it produces a very confident-looking artifact, so it is a separate capability from plain read.
+**Product permission:** `iam.read` for **Compare** and for the attribution run. `iam.simulate` for **Simulator** — modeling is read-only and cheap, but it produces a very confident-looking artifact, so it is a separate capability from plain read.
 
 ## Purpose
 
 **App routes:** `/iam/compare` — tab label **Compare**; `/iam/simulator` — tab label **Simulator**
 
 **Compare** answers *what changed since the last scan, is it worse, and who did it*. **Simulator** answers the same question in the other direction: *if I make this change, what actually happens* — before it is made anywhere.
+
+**Screenshot notes:** These synthetic browser fixtures show saved attribution and illustrative what-if output, not live Activity Log reads or backend-computed results. **Find out who** was not invoked for the capture. Counts and selected changes are examples, not defaults or proof of cloud changes.
 
 ## Prerequisites and data sources
 
@@ -54,21 +56,23 @@ Two decisions carry the model:
 | `deactivated` | Deactivated | Narrows access |
 | `path_changed` | Path changed | Neither — the route changed, the access did not |
 
-**Colour encodes direction, in both directions.** Widening changes are red, orange or amber; narrowing changes are green; a path change is blue. Only the five widening classes count towards *changes that increase risk*, the header's `N increase risk` figure and the **Only changes that increase risk** filter, and only those classes raise drift findings — a de-escalation is a change worth showing and never worth alerting on. A row also carries a `broader scope` marker when a re-scope moved outwards rather than in.
+**Color encodes direction, in both directions.** Widening changes are red, orange or amber; narrowing changes are green; a path change is blue. Only the five widening classes count towards *changes that increase risk*, the header's `N increase risk` figure and the **Only changes that increase risk** filter, and only those classes raise drift findings — a de-escalation is a change worth showing and never worth alerting on. A row also carries a `broader scope` marker when a re-scope moved outwards rather than in.
 
-**Escalation is decided by tier, not by role name.** Roles are placed in coarse ordered tiers — none, read, write, admin, owner — because comparing role names cannot tell you whether a change was an escalation. A deny row sits at the bottom tier. An unrecognised custom role is placed at *write*, never at none, so an unclassified role is never reported as a de-escalation from Reader. Scope movement is judged by depth: tenant root, management group, subscription, resource group, resource. The tiering is used only to *label* a change; whether somebody is actually allowed to do something is the evaluator's job on the [Effective Access]({{ site.baseurl }}/user-guide/governance-identity/iam-access-paths/) tab.
+**Escalation is decided by tier, not by role name.** Roles are placed in coarse ordered tiers — none, read, write, admin, owner — because comparing role names cannot tell you whether a change was an escalation. A deny row sits at the bottom tier. An unrecognized custom role is placed at *write*, never at none, so an unclassified role is never reported as a de-escalation from Reader. Scope movement is judged by depth: tenant root, management group, subscription, resource group, resource. The tiering is used only to *label* a change; whether somebody is actually allowed to do something is the evaluator's job on the [Effective Access]({{ site.baseurl }}/user-guide/governance-identity/iam-access-paths/) tab.
 
 **Nothing to compare against is not an all-clear.** When the comparison could not be made the header reads `not comparable`, the change count is replaced with an em dash, and a banner states that there is no earlier snapshot and that this is not a clean bill of health. A tenant with one scan must never be told its estate is stable on the day the product was installed.
 
 **Attribution: who made the change.** **Find out who** runs `POST /api/iam/attribute`, which joins the current diff to the Azure Activity Log per subscription. It is slow and is deliberately separate from the refresh. The summary line reports `X exact, Y inferred, Z unknown over the last N days`.
 
 - **exact** — matched on the assignment id.
-- **inferred** — matched on scope and time rather than on the assignment id, and labelled as such on the row.
+- **inferred** — matched on scope and time rather than on the assignment id, and labeled as such on the row.
 - **unknown actor** — no Activity Log event matched, because the retention window rolled past the change or because the match was ambiguous and was refused rather than guessed.
 
 An unattributed change is rendered as the words *unknown actor*, never as a blank cell, because an empty actor column reads as *nobody did this*. Where the actor is real it becomes a second investigable identity on the row — *whose access changed* and *who changed it* are different investigations, and the second is usually the next question. A change source is shown when the log carries one.
 
 Before attribution has ever been run, the tab states that every actor below is unknown *for that reason* rather than because no event exists. It does not report `0 exact, 0 inferred, 0 unknown` for a tenant where the join has never been attempted.
+
+{% include screenshot.html file="fid2-iam-compare-attribution.png" title="Access changes: direction and actor confidence" caption="Added, escalated and removed rows are shown with exact, inferred and unknown attribution. The example uses the tab's 30-day attribution window; inferred is a scope-and-time lead, while unknown means no unambiguous match, not that nobody made the change." %}
 
 **Controls.** Change-type selector, **Only changes that increase risk**, and **Find out who**. A truncation banner states `Showing the first N of M changes` when the page cap bites.
 
@@ -92,7 +96,7 @@ Served by `POST /api/iam/simulate`.
 | `assume_principal` | Assume a principal is compromised | principal id |
 | `add_delegation` | Onboard a delegation | principal id, scope, role name |
 
-Changes are added to a **basket** and simulated together, so the interactions between them are modelled rather than each one being modelled in isolation.
+Changes are added to a **basket** and simulated together, so the interactions between them are modeled rather than each one being modeled in isolation.
 
 **The result has three columns and one panel above them.**
 
@@ -105,9 +109,13 @@ Changes are added to a **basket** and simulated together, so the interactions be
 
 The middle column is why the tab exists. Removing somebody from a group frequently revokes nothing — they may hold the same role directly, through a second group, or through a service principal they own — and a tool that only reports what it removed encourages revocations that achieve nothing while leaving a false record of remediation behind. The orphaned panel is the second reason: *after this change, these scopes have nobody with owner-level access* is the outcome that gets a revocation reverted in a panic a fortnight later, and it is knowable in advance.
 
+{% include screenshot.html file="fid2-iam-simulator-impact.png" title="Simulator: lost, retained and gained access with ownerless-scope warnings" caption="The synthetic basket illustrates three different outcomes and an orphaned-scope warning; no backend simulation or cloud change produced these values. Read Retained anyway and the limitations before proposing a fix. Unmodeled tokens, service-local access and runtime conditions remain unknown, not proven safe." %}
+
 **A failed simulation is never a green tick.** An unknown change kind or a malformed change is rejected as a 400 and a change whose referent has since been deleted is a 409; both are surfaced with their message and the explicit statement that nothing was simulated and this is not a result showing no impact. An ignored change would produce a reassuring "nothing happens" from a typo, which is the worst possible output because it looks like an answer.
 
-**Sampling is stated, seeded, and never drops the cohorts you came for.** Below the sampling threshold every row is modelled and the footer says `showing all N`. Above it the footer states the sample size, the population, the fixed seed and how many always-kept rows were retained. The seed is deliberately fixed: an answer that moves between identical runs cannot support a decision, and "run it again" becomes the first thing anybody does when they dislike the result. Privileged and other named cohorts are never sampled away, because a sample that drops the break-glass account is answering a different question from the one that was asked.
+**Sampling applies to the Lost output, not the input estate.** Changes are applied to all cached rows. If truly lost rows exceed 5,000, that output keeps every privileged lost row and a seeded sample of the remainder (`20260801`). Retained and Gained are not sampled by this function. The footer's population is therefore lost rows—not all scanned grants or distinct people. No separate guest or break-glass sampling rule is implemented here.
+
+**Model boundary.** Retained access is matched by principal, role name, active state and covering scope, not full permission equivalence between different roles. `disable_bypass` leaves access rows unchanged and reports a limitation; it does not simulate shared-key revocation. `assume_principal` also leaves rows unchanged and does not produce a separate compromise-reach report. Neither kind's empty columns establish no impact. Orphan detection checks owner-level rows at each exact assignment scope, so inherited owners need an independent check.
 
 The footer also reports principals affected, grants unchanged, and standing privilege before and after. A limitations panel names what the model did not evaluate.
 
@@ -135,14 +143,14 @@ The footer also reports principals affected, grants unchanged, and standing priv
 - **`inferred` was matched on scope and time**, not on the assignment id. Treat it as a lead, not as attribution.
 - **`path_changed` is not a widening.** The access is the same; the route to it changed, which usually still matters for how it would be revoked.
 - **A tier-based escalation label is coarse by design.** Confirm what a custom role actually authorizes before treating an `escalated` row as a privilege increase.
-- **The Simulator models access, not Azure's behaviour.** It does not validate that a change is permitted, that it will succeed, or that a dependent workload will keep running.
+- **The Simulator models access, not Azure's behavior.** It does not validate that a change is permitted, that it will succeed, or that a dependent workload will keep running.
 - **`Retained anyway` is the column to act on.** A change with rows there does less than it appears to.
 
 ## Exports, history, scheduling, and integrations
 
 - `GET /api/iam/runs` and `GET /api/iam/run/{run_id}` list and read the retained run history. Neither has a screen today.
 - `POST /api/iam/run/{run_id}/pin` (permission `iam.review`) retains a run's full rows indefinitely so it can serve as a campaign baseline or as evidence. There is no pin control in the UI.
-- `GET /api/iam/principal/{principal_id}/timeline` returns one principal's access events across every retained run, and publishes its own limitation: runs recorded before classified diffing existed contribute nothing, so a gap means the history was not captured rather than that nothing happened. It has no API client and no screen.
+- `GET /api/iam/principal/{principal_id}/timeline` considers at most 30 retained runs. It has a client method but no dedicated IAM tab. Runs recorded before classified diffing contribute nothing; gaps do not prove inactivity.
 - `GET /api/iam/simulate/kinds` publishes the accepted change kinds and the sampling seed. The tab renders its own kind list rather than reading this.
 - Compare and Simulator have no export of their own. The Excel workbook from the Overview tab is the export surface for the access data they operate on.
 - Refresh runs are recorded in the audit log; pinning a run is recorded with its reason.
@@ -169,7 +177,7 @@ The footer also reports principals affected, grants unchanged, and standing priv
 | A group membership change produced no diff rows | Confirm the directory was refreshed. Group expansion is what turns a membership change into effective-access changes. |
 | The Simulator returns an error instead of a result | An unknown or malformed change is a 400 and a deleted referent is a 409. The message names which. Nothing was simulated — this is not a "no impact" result. |
 | The Simulator's **Lost** column is empty but I expected a revocation | Read **Retained anyway**. The principal almost certainly holds the same role by another route, which is the outcome this tab exists to surface. |
-| The Simulator footer says results were sampled | The population exceeded the sampling threshold. The seed is fixed so the answer is reproducible, and privileged cohorts are never sampled away. Narrow the basket for a full answer. |
+| The Simulator footer says results were sampled | More than 5,000 truly lost rows were produced. Privileged lost rows are retained; the remainder is sampled. Reduce the change set and inspect each result without treating its count as the estate population. |
 | The Simulator tab returns a permission error | Simulation requires `iam.simulate`, which is separate from `iam.read`. |
 
 ## Related pages

@@ -21,18 +21,16 @@ must never sit on the critical path of a dashboard render.
 """
 from __future__ import annotations
 
-import json
 import logging
 import time
 from pathlib import Path
 from typing import Any
 
-import httpx
+from app.core import jsonstore
+from app.core.retail_prices import fetch_retail_prices
 
 log = logging.getLogger("app.backup_manager.pricing")
 
-RETAIL_API = "https://prices.azure.com/api/retail/prices"
-RETAIL_API_VERSION = "2023-01-01-preview"
 BACKUP_SERVICE = "Backup"
 ASR_SERVICE = "Azure Site Recovery"
 
@@ -41,7 +39,7 @@ _CACHE_PATH = Path(__file__).resolve().parents[2] / ".data" / "backup_manager_pr
 CACHE_TTL_SECONDS = 7 * 24 * 3600
 MAX_PAGES = 8
 
-# Our normalised datasource types -> the retail meter that prices one protected instance.
+# Our normalized datasource types -> the retail meter that prices one protected instance.
 # Keys are lowercase and matched loosely (see `instance_meter_key`).
 DATASOURCE_TO_METER: dict[str, str] = {
     "vm": "azure vm",
@@ -86,7 +84,7 @@ _FILES_REDUNDANCY_ALIASES = {
 
 
 def instance_meter_key(meter_name: str) -> str:
-    """Normalise `"Azure VM Protected Instance"` -> `"azure vm"`."""
+    """Normalize `"Azure VM Protected Instance"` -> `"azure vm"`."""
     text = str(meter_name or "").strip().lower()
     for suffix in (" protected instance", " snapshot instance"):
         if text.endswith(suffix):
@@ -97,33 +95,14 @@ def instance_meter_key(meter_name: str) -> str:
 # --------------------------------------------------------------------------- fetching
 async def _fetch(service_name: str, region: str, currency: str) -> tuple[list[dict[str, Any]], str]:
     """Page through the retail API for one service/region. Returns ``(items, error)``."""
-    filters = (
-        f"serviceName eq '{service_name}'"
-        f" and armRegionName eq '{region}'"
-        " and type eq 'Consumption'"
+    result = await fetch_retail_prices(
+        service_name,
+        currency=currency,
+        regions=(region,),
+        max_pages=MAX_PAGES,
     )
-    url = f"{RETAIL_API}?api-version={RETAIL_API_VERSION}&currencyCode='{currency}'&$filter={filters}"
-    # NextPageLink comes back inside the response body. This call is unauthenticated, so a
-    # redirected page leaks no token, but it would still turn the pricing refresh into a
-    # server-side request probe. Pin the host to the API we meant to call.
-    origin_host = (httpx.URL(RETAIL_API).host or "").lower()
-    items: list[dict[str, Any]] = []
-    try:
-        async with httpx.AsyncClient(timeout=45) as client:
-            for _page in range(MAX_PAGES):
-                if (httpx.URL(url).host or "").lower() != origin_host:
-                    return items, f"Retail Prices refused NextPageLink host {httpx.URL(url).host!r}"
-                response = await client.get(url)
-                if response.status_code != 200:
-                    return items, f"Retail Prices {response.status_code}: {response.text[:200]}"
-                payload = response.json()
-                items.extend(payload.get("Items") or [])
-                url = str(payload.get("NextPageLink") or "")
-                if not url:
-                    break
-    except (httpx.HTTPError, ValueError) as exc:  # noqa: BLE001 - degrade to the seeded table
-        return items, f"Retail Prices request error: {exc}"
-    return items, ""
+    error = f"Retail Prices request failed ({result.error})." if result.error else ""
+    return result.items, error
 
 
 def build_rate_card(
@@ -191,22 +170,8 @@ def build_rate_card(
 
 # --------------------------------------------------------------------------- cache
 def _read_cache() -> dict[str, Any]:
-    if _CACHE_PATH.exists():
-        try:
-            data = json.loads(_CACHE_PATH.read_text(encoding="utf-8"))
-            if isinstance(data, dict):
-                return data
-        except (json.JSONDecodeError, OSError):
-            pass
-    return {}
-
-
-def _write_cache(data: dict[str, Any]) -> None:
-    try:
-        _CACHE_PATH.parent.mkdir(parents=True, exist_ok=True)
-        _CACHE_PATH.write_text(json.dumps(data, indent=2), encoding="utf-8")
-    except OSError as exc:  # noqa: BLE001 - a cache write failure must not break pricing
-        log.debug("backup_manager: could not persist price cache: %s", exc)
+    data = jsonstore.read_json(_CACHE_PATH, {})
+    return data if isinstance(data, dict) else {}
 
 
 def _cache_key(region: str, currency: str) -> str:
@@ -244,8 +209,15 @@ async def get_rate_card(region: str, currency: str, *, force: bool = False) -> d
         }
 
     card = build_rate_card(backup_items, asr_items, region=region, currency=currency)
-    cache[key] = {"cached_at": time.time(), "card": card}
-    _write_cache(cache)
+    cached_at = time.time()
+
+    def _mutate(stored: dict[str, Any]) -> None:
+        stored[key] = {"cached_at": cached_at, "card": card}
+
+    try:
+        jsonstore.mutate_json(_CACHE_PATH, {}, _mutate)
+    except OSError as exc:  # noqa: BLE001 - a cache write failure must not break pricing
+        log.debug("backup_manager: could not persist price cache: %s", exc)
     card["cache_age_seconds"] = 0
     return card
 

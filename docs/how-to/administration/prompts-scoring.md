@@ -4,19 +4,21 @@ title: Govern prompts and scoring
 parent: Administration tasks
 grand_parent: How-to guides
 nav_order: 59
-description: Edit or reset system prompts and tune assessment and architecture settings with controlled verification.
+description: Edit or reset system prompts and tune assessment, workload-health, and architecture settings with controlled verification.
 permalink: /how-to/administration/prompts-scoring/
+feature_ids: [ADMIN_NAV:prompts, ADMIN_NAV:scoring]
 ---
 
 # Govern prompts and scoring
 
 ## Prerequisites
 
-- Product permission `settings.write`.
+- Product permissions `settings.read` and `settings.write`. The routes use the read key; prompt
+	and scoring mutations use the write key.
 - Reviewed prompt text with no credentials or tenant-specific secret values.
 - A benign and adversarial test set.
 - A recorded scoring baseline and a small representative assessment.
-- Approved score-band, weight, execution-budget, or design-palette changes.
+- Approved score-band, weight, or design-palette changes.
 
 ## Route
 
@@ -25,6 +27,8 @@ permalink: /how-to/administration/prompts-scoring/
 - Open `/admin/scoring`.
 
 ## How to edit or reset a system prompt
+
+{% include screenshot.html file="admin-prompts-chat-agent-default.png" title="Inspect the shipped Chat Agent prompt before editing" caption="Use the built-in text and usage guidance as the comparison point for an approved override. No edit, save, reset, or AI invocation occurred in this local capture." %}
 
 1. Select the prompt by its displayed name and description.
 2. Compare the current value with the built-in seed where shown.
@@ -39,20 +43,24 @@ permalink: /how-to/administration/prompts-scoring/
 
 ## How to tune assessment and architecture settings
 
-1. Record current severity weights, good/warning score bands, concurrency, per-check timeout, run budget, confidence threshold, and category colors that are visible.
+{% include screenshot.html file="admin-scoring-assessment-defaults.png" title="Record assessment weights and score bands before tuning" caption="The severity weights, recovery opt-in, and band thresholds establish the configuration baseline to record in step 1. The capture does not show a saved change or an assessment result." %}
+
+{% include screenshot.html file="admin-scoring-workload-health-weights.png" title="Distinguish workload-health weights from assessment weights" caption="The lower-page signal weights and nightly-refresh control are separate from assessment severity weights. No changes were saved; the current update contract does not accept these fields, so verify effective values independently rather than trusting a save banner." %}
+
+1. Record current severity weights, good/warning score bands, Workload Health Score weights, nightly-refresh state, and category colors that are visible.
 2. Change only the approved values. Use valid hex colors for known categories.
 3. Save and reload the page to observe normalized values.
 4. Run the representative assessment.
-5. Compare score, band, confidence, timeout behavior, and architecture rendering with the baseline.
+5. Compare score, band, workload-health interpretation, and architecture rendering with the baseline.
 6. Annotate the effective date so reports from different scoring regimes are not compared silently.
 
 **Expected result:** New calculations and diagrams use the saved values without unexpected incomplete checks or invalid colors.
 
-**Verification:** Inspect the bounded assessment, its confidence and timeout indicators, the architecture palette, and the Audit Log.
+**Verification:** Inspect the bounded assessment, its score bands, the architecture palette, and the Audit Log. Verify Workload Health Score and nightly-refresh effective values independently because those visible fields are not accepted by the current settings update contract.
 
 ## Safety and rollback
 
-Higher concurrency and budgets can increase Azure and model load; lower limits can create incomplete results. Restore the recorded values and rerun the same assessment to roll back.
+Scoring changes can make identical Azure evidence appear better or worse. Restore the recorded values and rerun the same assessment to roll back; annotate the effective date for reports created under each regime.
 
 Prompt text acts as executable policy. Never embed credentials, signed URLs, personal secrets, or instructions that bypass approvals. Reset restores the built-in seed, not an earlier custom revision; preserve approved text externally or in a backup before replacing it.
 
@@ -61,8 +69,8 @@ Prompt text acts as executable policy. Never embed credentials, signed URLs, per
 | Symptom | Resolution |
 | --- | --- |
 | Scores move without Azure changes | Compare weight and band settings and the reference-set revision. |
-| Checks time out | Review concurrency, per-check timeout, run budget, provider latency, and connection capability. |
 | Color is rejected | Use a visible known category and `#rrggbb` format, or clear the override for the built-in value. |
+| Workload Health Score or nightly refresh does not persist | Those visible fields are not accepted by the current settings update contract. Treat them as unavailable until the contract is updated. |
 | Existing operation ignores the change | Start a new operation; in-flight context is not rebuilt. |
 | Agent behavior becomes unsafe or inconsistent | Reset the affected prompt and rerun the test set. |
 | Save is unavailable | Confirm `settings.write` and that the selected prompt is editable. |

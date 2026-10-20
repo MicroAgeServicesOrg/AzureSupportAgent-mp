@@ -6,6 +6,7 @@ grand_parent: How-to guides
 nav_order: 54
 description: Add, test, send through, disable, and retire supported external connectors.
 permalink: /how-to/administration/connectors/
+feature_ids: [ADMIN_NAV:connectors]
 ---
 
 # Configure connectors
@@ -19,6 +20,14 @@ permalink: /how-to/administration/connectors/
 ## Route
 
 - Open `/admin/connectors`.
+
+## Catalog and unsaved review
+
+These native screens illustrate provider selection and review before saving, not a completed integration. The draft is **unsaved and disabled**, credential secrets are empty, and non-secret values are fictional with non-resolving example domains. No save, authentication, test, or delivery is demonstrated.
+
+{% include screenshot.html file="fconn-catalog.png" title="Connector catalog — available provider types" caption="Native provider cards are shown with saved demo rows omitted from this documentation view only. No stored connectors were removed. The catalog shows available types, not configured or healthy integrations, and does not establish connectivity, permissions, or delivery." %}
+
+{% include screenshot.html file="fconn-disabled-review.png" title="Review before adding — disabled, unsaved Jira draft" caption="Native Review + add shows fictional Jira defaults and a Disabled badge for the UNSAVED draft. The API-token em dash represents an empty field, not a stored secret. Add connector was never clicked; this is not a saved-row status, successful Test, credential-rotation result, or deletion outcome." %}
 
 ## How to add and verify a connector
 
@@ -44,7 +53,7 @@ Treat webhook URLs, SAS-signed Logic App URLs, tokens, passwords, connection str
 
 | Symptom | Resolution |
 | --- | --- |
-| Unexpected result | Re-check route, permissions, and latest refresh state before retrying. |
+| **Send test** creates an unintended external event | Disable the connector, inspect destination logs, reverse or close the controlled event, and rotate the credential when it may have been exposed. |
 | Stored secret appears blank | This is expected masking. Leave it blank to keep it; enter a new value only to rotate. |
 | Test passes but delivery fails | The test may only validate configuration. Use **Send test** where offered and inspect destination permissions/logs. |
 | URL is rejected | Use the HTTPS and host pattern required by the connector; webhook-like connectors enforce SSRF protection. |

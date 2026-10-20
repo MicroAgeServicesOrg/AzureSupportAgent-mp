@@ -5,11 +5,16 @@ parent: Administration
 nav_order: 5
 description: Configure local sign-in policy, lockouts, session lifetime, SSO provisioning, and session revocation.
 permalink: /admin/security-policy-sessions/
+feature_ids: [ADMIN_NAV:policies, ADMIN_NAV:sessions, SECURITY_NAV:policies, SECURITY_NAV:sessions]
 ---
 
 # Security Policy and Active Sessions
 
 **Permission:** `users.manage`
+
+The per-IP protection here is *reactive* — it responds after failed sign-ins. To stop unknown
+addresses reaching the sign-in page at all, see
+[Network Access]({{ site.baseurl }}/admin/network-access/).
 
 ## Purpose
 
@@ -58,6 +63,8 @@ Visible settings are:
 
 The implementation does not expose local-account MFA controls in this screen. Complexity is not a substitute for SSO/MFA at the identity provider. Keep JIT's default role at `noaccess` or another explicitly reviewed least-privilege role.
 
+{% include screenshot.html file="admin-security-policy-defaults.png" title="Security Policy sign-in, password, and lockout defaults" caption="Review the local policy controls before changing authentication behavior. No policy was saved and no lockout, session-revocation, or external SSO test was performed; visible defaults do not verify an identity-provider configuration." %}
+
 ## Troubleshooting
 
 
@@ -65,5 +72,6 @@ Use the checks below when results differ from expectations.
 
 ## Related pages
 
+- [Set security policy and revoke sessions (how-to)]({{ site.baseurl }}/how-to/administration/security-sessions/)
 - [Access Control]({{ site.baseurl }}/admin/access-control/)
 - [Security troubleshooting]({{ site.baseurl }}/security/troubleshooting/)

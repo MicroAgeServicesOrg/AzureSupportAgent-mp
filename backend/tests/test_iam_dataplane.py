@@ -1,8 +1,8 @@
-"""Data-plane access catalogue and signals.
+"""Data-plane access catalog and signals.
 
-The behaviour under test is a classification, so most of these assert on the tier a REAL Azure
+The behavior under test is a classification, so most of these assert on the tier a REAL Azure
 role receives. Every role name and every dataAction string here was copied from a live tenant's
-role catalogue (981 definitions, 324 with dataActions) rather than from documentation — an
+role catalog (981 definitions, 324 with dataActions) rather than from documentation — an
 invented action string would make every test pass against a classifier that never runs.
 """
 from __future__ import annotations
@@ -13,7 +13,7 @@ from app.iam import dataplane as dp, schema
 from app.iam.signal_defs import dp as dp_signals
 from app.iam.signals import SignalContext, SignalUnavailable
 
-# Real dataActions, verbatim from a live catalogue.
+# Real dataActions, verbatim from a live catalog.
 KV_SECRETS_USER = ["Microsoft.KeyVault/vaults/secrets/getSecret/action"]
 KV_ADMIN = ["Microsoft.KeyVault/vaults/*"]
 KV_READER = ["Microsoft.KeyVault/vaults/*/read"]
@@ -71,7 +71,7 @@ def test_key_vault_reader_cannot_open_anything():
     credential finding, and a report that cries wolf on Key Vault Reader gets switched off
     before it reports Key Vault Administrator.
 
-    Asserted through :func:`derive_tier` as well as :func:`role_tier`, because the catalogue
+    Asserted through :func:`derive_tier` as well as :func:`role_tier`, because the catalog
     carries an explicit override for this role — testing only the public function would pass
     against a derivation that calls every Key Vault grant a credential."""
     assert dp.derive_tier(KV_READER) == dp.TIER_META
@@ -113,7 +113,7 @@ def test_a_role_with_no_data_actions_is_not_a_data_role():
 
 # =========================================================================== privileged flag
 def test_privileged_now_catches_the_roles_the_name_test_missed():
-    """On a real 981-role catalogue the old test — dataActions plus "owner"/"contributor" in the
+    """On a real 981-role catalog the old test — dataActions plus "owner"/"contributor" in the
     name — missed 118 dangerous roles, including every Key Vault officer role and AKS cluster
     admin."""
     for name, actions in [
@@ -132,7 +132,7 @@ def test_the_name_test_is_kept_as_well_never_swapped():
     Contributor` and eight others from privileged — a REDUCTION in coverage dressed up as a
     precision fix. This flag drives the privileged counts and the PIM screens, where a false
     negative hides access and a false positive only adds noise."""
-    # Read-tier dataActions: the catalogue alone would say "not privileged".
+    # Read-tier dataActions: the catalog alone would say "not privileged".
     assert dp.role_tier("Log Analytics Contributor", BLOB_READER) == dp.TIER_READ
     assert schema.role_is_privileged(
         "Log Analytics Contributor", has_data_actions=True, data_actions=BLOB_READER
@@ -143,7 +143,7 @@ def test_read_only_data_roles_are_not_privileged_by_the_catalogue():
     assert not dp.is_privileged_data_role("Storage Blob Data Reader", BLOB_READER)
 
 
-# =========================================================================== the catalogue
+# =========================================================================== the catalog
 def test_every_blind_service_states_a_reason():
     """A blind spot without a stated reason is indistinguishable from a pass."""
     for svc in dp.UNREADABLE:
@@ -364,3 +364,179 @@ def test_the_export_is_not_capped_at_the_ui_page_size():
     assert "cap" in inspect.signature(f.list_findings).parameters
     src = inspect.getsource(f.list_findings)
     assert "if cap is None" in src
+
+
+# =========================================================================== workbook shape
+@pytest.fixture()
+def isolated_cache(tmp_path, monkeypatch):
+    """Point the cache index + blob dir at a tmp location, as test_iam.py does."""
+    from app.iam import cache
+
+    monkeypatch.setattr(cache, "_DATA", tmp_path)
+    monkeypatch.setattr(cache, "_INDEX", tmp_path / "iam_cache.json")
+    monkeypatch.setattr(cache, "_BLOBS", tmp_path / "iam")
+    monkeypatch.setattr(cache, "_migrated", True)
+    return tmp_path
+
+
+def _demo_workbook(**over):
+    """The IAM workbook built from the demo dataset."""
+    import io
+
+    from openpyxl import load_workbook
+
+    from app.iam import cache, compose, demo, export, pivots
+
+    demo.seed_demo("wbdemo")
+    master = compose.build_master_rows("wbdemo")
+    kwargs = dict(
+        rows=master,
+        overview=compose.compute_overview("wbdemo"),
+        pivots=pivots.compute_pivots(master),
+        pivot_labels=pivots.PIVOT_LABELS,
+        directory=cache.read_directory("wbdemo"),
+    )
+    kwargs.update(over)
+    return load_workbook(io.BytesIO(export.to_workbook(**kwargs)))
+
+
+def test_every_timestamp_in_the_workbook_is_a_real_date(isolated_cache):
+    """Text sorts lexically and only offers Excel's text filter, so "granted before 2023" is
+    not a question a workbook of ISO strings can answer."""
+    import datetime as dt
+    import re
+
+    iso = re.compile(r"^\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}")
+    wb = _demo_workbook()
+    offenders = []
+    for name in wb.sheetnames:
+        ws = wb[name]
+        heads = [c.value for c in ws[1]]
+        for row in ws.iter_rows(min_row=2, values_only=True):
+            for i, v in enumerate(row):
+                if isinstance(v, str) and iso.match(v):
+                    offenders.append(f"{name}.{heads[i] if i < len(heads) else i}")
+    assert not offenders, f"timestamps exported as text: {sorted(set(offenders))}"
+
+    ws = wb["Effective Access"]
+    heads = [c.value for c in ws[1]]
+    assert "assignmentCreatedOn (UTC)" in heads, "the lenses must say when access was granted"
+    col = heads.index("assignmentCreatedOn (UTC)") + 1
+    values = [ws.cell(r, col).value for r in range(2, ws.max_row + 1)]
+    assert any(isinstance(v, dt.datetime) for v in values)
+
+
+def test_the_workbook_speaks_one_yes_no_vocabulary(isolated_cache):
+    """The collectors emit `true`/`false`, `Yes`/blank and `yes`/`no` for the same kind of
+    fact, so filtering "not privileged" meant three different predicates in one file."""
+    wb = _demo_workbook()
+    allowed = {"Yes", "No", "Not measured", "n/a", "", None}
+    for sheet, col in (("Effective Access", "principalExists"),
+                       ("Effective Access", "roleIsPrivileged"),
+                       ("Effective Access", "roleHasDataActions")):
+        ws = wb[sheet]
+        i = [c.value for c in ws[1]].index(col)
+        seen = {r[i] for r in ws.iter_rows(min_row=2, values_only=True)}
+        assert seen <= allowed, f"{sheet}.{col} speaks another dialect: {seen - allowed}"
+
+
+def test_no_python_repr_ever_reaches_a_cell(isolated_cache):
+    """`window` is a dict. It used to arrive through str(), printing the literal
+    `{'days': 60, 'clamped': True}` into a review document."""
+    wb = _demo_workbook(rightsizing={
+        "measured": True,
+        "recommendations": [{"principalName": "p", "window": {"days": 60, "clamped": True}}],
+    })
+    ws = wb["Right-sizing"]
+    heads = [c.value for c in ws[1]]
+    row = dict(zip(heads, [c.value for c in ws[2]]))
+    assert row["Window (days)"] == 60
+    assert row["Window clamped"] == "Yes"
+    for name in wb.sheetnames:
+        for r in wb[name].iter_rows(values_only=True):
+            for v in r:
+                assert not (isinstance(v, str) and v.startswith("{'")), f"{name}: {v[:60]}"
+
+
+def test_a_count_that_could_not_be_measured_is_never_printed_as_zero(isolated_cache):
+    """`PIM eligible: 0` beside a skipped PIM collector is the most misleading cell the file
+    can print: it is not "nobody is eligible", it is "we were never allowed to look"."""
+    wb = _demo_workbook(overview={
+        "kpis": {"eligible": 0}, "scopes": [], "generated_at": "2026-08-19T18:09:24Z",
+        "collectors": [
+            {"collector": "PimEligibility", "scopeLabel": "s1", "status": "Skipped",
+             "rowsAdded": 0, "message": "PIM is not licensed on this tenant."},
+            {"collector": "ArgRoleAssignments", "scopeLabel": "s1", "status": "Succeeded",
+             "rowsAdded": 12, "message": ""},
+        ],
+    })
+    text = {str(r[0]): str(r[1]) for r in wb["Summary"].iter_rows(values_only=True)}
+    assert "NOT MEASURED" in text["PIM eligible"]
+    assert "not licensed" in text["PIM eligible"]
+    assert "COVERAGE" in text, "the summary must point at the coverage register"
+
+    # And the register itself, ahead of anything that looks like a complete answer.
+    assert wb.sheetnames.index("Coverage & blind spots") < wb.sheetnames.index("Effective Access")
+    cov = wb["Coverage & blind spots"]
+    assert cov.cell(2, 2).value != "Succeeded", "what did not succeed sorts first"
+
+
+def test_role_definition_counts_come_from_the_permission_lists(isolated_cache):
+    """They were read as `actionsCount`/`dataActionsCount`, keys only the demo fixture writes.
+    Against a real directory both columns were blank on every row."""
+    wb = _demo_workbook(directory={"role_defs": [
+        {"roleName": "Custom", "roleCategory": "ControlPlane", "roleIsPrivileged": False,
+         "roleHasDataActions": True, "actions": ["a", "b", "c"], "dataActions": ["d"]},
+    ]})
+    ws = wb["Role Definitions"]
+    row = dict(zip([c.value for c in ws[1]], [c.value for c in ws[2]]))
+    assert row["Actions #"] == 3
+    assert row["Data actions #"] == 1
+    assert row["Privileged"] == "No"
+
+
+def test_the_scope_column_is_a_name_not_a_second_copy_of_the_id(isolated_cache):
+    """`scopeDisplayName` is set to the ARM id itself for subscription-scoped rows, so two
+    60-wide columns held the same `/subscriptions/…` string."""
+    from app.iam import export
+
+    row = {"scopeDisplayName": "/subscriptions/s1", "scope": "/subscriptions/s1",
+           "subscriptionName": "Prod", "resourceGroup": "rg1", "resourceName": ""}
+    assert export._scope_label(row) == "Prod / rg1"
+    # A real display name is kept, and an unnameable scope still falls back to its id.
+    assert export._scope_label({"scopeDisplayName": "kv0", "scope": "/x"}) == "kv0"
+    assert export._scope_label({"scope": "/subscriptions/s2"}) == "/subscriptions/s2"
+
+
+def test_the_workbook_is_navigable_and_grouped_by_colour(isolated_cache):
+    """A twenty-sheet file needs a contents page, and the tab colours have to be opaque or
+    Excel draws nothing at all."""
+    wb = _demo_workbook()
+    assert wb.sheetnames[0] == "Index"
+    listed = {r[0].value: r[1].value for r in wb["Index"].iter_rows(min_row=2)}
+    assert listed, "the index is empty"
+
+    by_section: dict[str, set[str]] = {}
+    for name, section in listed.items():
+        colour = wb[name].sheet_properties.tabColor
+        rgb = str(colour.rgb) if colour else ""
+        assert len(rgb) == 8 and rgb[:2] == "FF", f"{name}: {rgb} is transparent"
+        by_section.setdefault(str(section), set()).add(rgb)
+    for section, colours in by_section.items():
+        assert len(colours) == 1, f"{section} sheets disagree on colour: {colours}"
+    flat = [next(iter(c)) for c in by_section.values()]
+    assert len(flat) == len(set(flat)), f"two sections share a colour: {flat}"
+
+    # Every populated sheet is a real table, so filters and banding come for free.
+    for name in listed:
+        ws = wb[name]
+        if ws.max_row > 1:
+            assert ws.tables, f"{name} is a plain range, not a table"
+
+
+def test_a_blind_spot_list_is_a_table_not_prose_in_a_grid(isolated_cache):
+    wb = _demo_workbook(escalation={"paths": [], "limitations": ["Policy identities are not inventoried."]})
+    ws = wb["Escalation - blind spots"]
+    assert [c.value for c in ws[1]] == ["Limitation", "What this map cannot see"]
+    assert ws.cell(2, 2).value == "Policy identities are not inventoried."
+

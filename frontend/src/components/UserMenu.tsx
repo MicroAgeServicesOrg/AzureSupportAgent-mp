@@ -8,7 +8,7 @@ import { queryClient } from "../queryClient";
 import { roleLabel } from "../utils/roleLabel";
 import { formatError } from "../utils/format";
 
-export function UserMenu({ user, onLogout, onRefresh }: { user: Me; onLogout: () => void; onRefresh: () => void }) {
+export function UserMenu({ user, onLogout, onRefresh }: { user: Me; onLogout: () => void; onRefresh: () => Promise<void> }) {
   const [open, setOpen] = useState(false);
   const [showProfile, setShowProfile] = useState(false);
   const [busy, setBusy] = useState(false);
@@ -34,7 +34,7 @@ export function UserMenu({ user, onLogout, onRefresh }: { user: Me; onLogout: ()
       await api.setActiveRole(role);
       // Refresh the shared identity, then drop every cached query so all permission-gated
       // UI (sidebar, dashboards, panels) refetches and re-renders under the new role.
-      onRefresh();
+      await onRefresh();
       await queryClient.invalidateQueries();
       setOpen(false);
       setBusy(false);
@@ -65,12 +65,13 @@ export function UserMenu({ user, onLogout, onRefresh }: { user: Me; onLogout: ()
             <div className="truncate text-xs text-slate-500">{user.email}</div>
           </div>
           <div className="px-4 py-3">
-            <label className="mb-1 block text-xs font-medium text-slate-500">Active Role</label>
+            <label htmlFor="active-role-select" className="mb-1 block text-xs font-medium text-slate-500">Active Role</label>
             <select
+              id="active-role-select"
               value={activeRole}
               disabled={busy || roles.length <= 1}
               onChange={(e) => void switchRole(e.target.value)}
-              className="w-full rounded-lg border border-slate-300 px-2.5 py-1.5 text-sm text-brand-dark focus:border-brand-dark focus:outline-none disabled:opacity-60"
+              className="w-full rounded-lg border border-slate-300 px-2.5 py-1.5 text-sm text-brand-dark focus:border-brand-dark focus:outline-hidden disabled:opacity-60"
             >
               {roles.map((r) => (
                 <option key={r} value={r}>{roleLabel(r)}</option>
@@ -104,7 +105,7 @@ export function UserMenu({ user, onLogout, onRefresh }: { user: Me; onLogout: ()
   );
 }
 
-function ProfileModal({ user, roles, onClose, onSaved }: { user: Me; roles: string[]; onClose: () => void; onSaved: () => void }) {
+function ProfileModal({ user, roles, onClose, onSaved }: { user: Me; roles: string[]; onClose: () => void; onSaved: () => Promise<void> }) {
   const [firstName, setFirstName] = useState(user.first_name ?? (user.display_name ?? "").split(" ")[0] ?? "");
   const [lastName, setLastName] = useState(user.last_name ?? (user.display_name ?? "").split(" ").slice(1).join(" "));
   const [activeRole, setActiveRole] = useState(user.active_role || user.role);
@@ -123,7 +124,7 @@ function ProfileModal({ user, roles, onClose, onSaved }: { user: Me; roles: stri
         await api.setActiveRole(activeRole);
         await queryClient.invalidateQueries();
       }
-      onSaved();
+      await onSaved();
       onClose();
     } catch (e) {
       setErr(formatError(e));
@@ -132,7 +133,7 @@ function ProfileModal({ user, roles, onClose, onSaved }: { user: Me; roles: stri
   };
 
   return (
-    <div className="fixed inset-0 z-[60] flex items-center justify-center bg-black/40 p-4" onClick={onClose}>
+    <div className="fixed inset-0 z-60 flex items-center justify-center bg-black/40 p-4" onClick={onClose}>
       <div className="w-full max-w-md rounded-2xl bg-white text-slate-700 shadow-xl" onClick={(e) => e.stopPropagation()}>
         <div className="flex items-center justify-between border-b px-5 py-3">
           <h3 className="font-semibold text-slate-900">Update Profile</h3>
@@ -178,7 +179,7 @@ function ProfileModal({ user, roles, onClose, onSaved }: { user: Me; roles: stri
 }
 
 const inputCls =
-  "w-full rounded-lg border border-slate-300 px-3 py-2 text-sm focus:border-brand-dark focus:outline-none";
+  "w-full rounded-lg border border-slate-300 px-3 py-2 text-sm focus:border-brand-dark focus:outline-hidden";
 
 function Field({ label, children }: { label: string; children: React.ReactNode }) {
   return (

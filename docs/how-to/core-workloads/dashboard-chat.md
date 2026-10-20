@@ -6,15 +6,16 @@ grand_parent: How-to guides
 nav_order: 1
 description: Review dashboard posture, ask grounded questions, and run a structured Deep Investigation War Room.
 permalink: /how-to/core-workloads/dashboard-chat/
+feature_ids: [SHELL_NAV:chat, ROUTE:dashboard, ROUTE:chat, ROUTE:c]
 ---
 
 # Use Dashboard, Chat, and Deep Investigation
 
-![Deep Investigation hypothesis tree]({{ site.baseurl }}/assets/deep-investigation.png)
+{% include screenshot.html file="core-dashboard.png" title="Start a workload-scoped review from Dashboard" caption="Select the workload and review readiness and source coverage before following a signal. The values are synthetic examples, not a live scan or verified operational evidence." %}
 
 ## Prerequisites
 
-- `chat.use`, an active AI provider/model, and a readable Azure connection for live evidence.
+- An authenticated session with `chat.use`, an active AI provider/model, and a readable Azure connection for live evidence. Chat history, lifecycle, turn, and SSE endpoints are also scoped to the signed-in user and tenant.
 - A workload is strongly recommended for scope control.
 - Graph or Log Analytics access is required only when the investigation needs those sources.
 - A configured Jira, ServiceNow, or XSOAR connector is required for the corresponding ticket handoff.
@@ -26,10 +27,12 @@ Dashboard: `/dashboard` (also `/`). Chat: `/chat`, `/chat?deep=1`, or an existin
 ## How to triage from the Dashboard
 
 1. Open `/dashboard` and complete visible **Setup guide** items.
-2. Select the **primary workload** used by scope-aware trend cards.
-3. Review workload, architecture, assessment, coverage, posture, risk, recent-investigation, insight, reservation, retirement, identity, and RBAC summaries visible to your role.
-4. Treat each card as a cached navigation cue; open its owning feature before deciding.
-5. Prioritize severity and deadline, then start Chat or open the source feature.
+2. Select the **primary workload** used by Mission readiness and scope-aware trend cards.
+3. Read **Mission readiness**, then verify the context, freshness, and source-coverage summary. Treat **Unknown**, **Not assessed**, and unavailable sources as missing evidence rather than a clean result.
+4. Review the actionable KPIs and workload, architecture, assessment, coverage, posture, risk, recent-run, reservation, retirement, identity, and IAM summaries visible to your role.
+5. Use **Recently visited** to reopen prior work. Pin destinations that must remain prominent, remove obsolete entries, or clear unpinned history. The same permitted destinations appear under **Recently visited** in the command palette.
+6. Treat each card as a cached navigation cue; open its owning feature before deciding.
+7. Prioritize severity and deadline, then start Chat or open the source feature.
 
 **Expected result:** A short, workload-scoped list of signals requiring review.
 
@@ -48,6 +51,8 @@ Dashboard: `/dashboard` (also `/`). Chat: `/chat`, `/chat?deep=1`, or an existin
 
 **Verification:** Open cited resources or source modules and independently confirm the important observations.
 
+{% include screenshot.html file="core-investigation-conversation.png" title="Review the question and evidence in a Deep Investigation conversation" caption="This completed-conversation example shows the question, evidence context, and answer for review. It is a synthetic browser fixture, not a submitted live question, executed LLM investigation, or persistence test." %}
+
 ## How to run a Deep Investigation War Room
 
 1. Enable **Deep investigation** in the composer or open `/chat?deep=1`.
@@ -63,12 +68,15 @@ Dashboard: `/dashboard` (also `/`). Chat: `/chat`, `/chat?deep=1`, or an existin
 
 **Verification:** Reproduce the decisive check in the owning Azure/source feature and confirm the time window and workload boundary.
 
+{% include screenshot.html file="core-investigation-result.png" title="Inspect hypotheses, evidence, and proposed investigation actions" caption="Use the result layout to locate the decisive evidence and review each recommendation. Hypotheses and conclusions here are illustrative; they do not prove root cause, and no proposed action was executed." %}
+
 ## How to manage chat lifecycle
 
 1. Reopen `/c/{chatId}` to continue a durable conversation or reconnect after a stream interruption.
-2. Archive completed chats when they should leave recents.
-3. Restore from Trash if archived accidentally.
-4. Purge or empty Trash only after retention and transcript-review requirements are met.
+2. Inspect saved messages and active-turn state before resending a question. Navigation or a disconnected stream does not cancel the turn; use **Stop** to request cancellation, then reopen the chat to verify the partial output saved by its best-effort checkpoint.
+3. Archive completed chats when they should leave recents.
+4. Restore from Trash if archived accidentally.
+5. Purge or empty Trash only after retention and transcript-review requirements are met.
 
 **Expected result:** Active and retained conversations remain intentional.
 
@@ -79,14 +87,15 @@ Dashboard: `/dashboard` (also `/`). Chat: `/chat`, `/chat?deep=1`, or an existin
 - Never paste credentials, tokens, private keys, connection strings, or unnecessary personal data.
 - Tool success proves execution, not completeness. Model confidence is not evidence quality.
 - Deep Investigation is read-oriented by default, but proposed commands and linked workflows may mutate systems; review them separately.
-- Stopping or navigating away may not cancel server-side work. Reopen the chat to inspect state.
+- Navigation and stream disconnects do not cancel server-side turns. **Stop** requests cancellation and attempts to save partial output; it does not undo tool work already performed. Reopen the chat to verify its state and saved messages.
 - Archive is reversible; purge is not. Review transcripts before external ticket/PDF handoff.
 
 ## Troubleshooting
 
 | Symptom | Resolution |
 | --- | --- |
-| No model is available | Ask an administrator to test and activate a provider. |
+| Chat is hidden or the direct route is denied | Switch to an assigned role containing `chat.use`, or request that exact capability. |
+| No model is available | Ask a user with `settings.read` and `settings.write` to test and activate a provider. |
 | Stream stops | Reopen the chat; then check provider health, rate limits, and connection state. |
 | Tool is unauthorized | Verify selected connection, workload, application permission, Azure RBAC, and Graph/log access. |
 | Conclusion is missing | Narrow scope/time and ensure specialists can reach the required evidence. |

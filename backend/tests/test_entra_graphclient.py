@@ -1,7 +1,7 @@
 """Unit tests for the shared Entra Graph client.
 
 Everything here runs against a fake transport — the point is to prove paging, `$batch`
-splitting, id chunking, throttling and fail-open behaviour without touching Microsoft Graph.
+splitting, id chunking, throttling and fail-open behavior without touching Microsoft Graph.
 """
 from __future__ import annotations
 
@@ -12,7 +12,7 @@ import httpx
 import pytest
 
 from app.entra import graphclient as gc
-from app.entra.graphclient import GraphClient, GraphPermissionError, GraphRequest
+from app.entra.graphclient import GraphClient, GraphError, GraphPermissionError, GraphRequest
 
 
 class FakeTransport(httpx.AsyncBaseTransport):
@@ -81,6 +81,109 @@ def test_get_all_reports_truncation_rather_than_silently_capping():
     assert truncated is True
 
 
+def test_get_page_returns_count_and_validated_continuation():
+    def handler(request, body):  # noqa: ARG001
+        assert request.headers["ConsistencyLevel"] == "eventual"
+        assert request.url.params["$count"] == "true"
+        return _json({
+            "@odata.count": 1200,
+            "value": [{"id": "a"}, {"id": "b"}],
+            "@odata.nextLink": "https://graph.microsoft.com/v1.0/applications?$skiptoken=next",
+        })
+
+    async def run():
+        client = _client(handler)
+        try:
+            return await client.get_page(
+                "applications", select=["id"], top=250, include_count=True,
+            )
+        finally:
+            await client.aclose()
+
+    page = asyncio.run(run())
+    assert [item["id"] for item in page.items] == ["a", "b"]
+    assert page.total == 1200
+    assert "$skiptoken=next" in page.next_link
+
+
+def test_get_page_refuses_foreign_or_wrong_collection_continuation_before_request():
+    calls = 0
+
+    def handler(request, body):  # noqa: ARG001
+        nonlocal calls
+        calls += 1
+        return _json({"value": []})
+
+    async def run(url: str):
+        client = _client(handler)
+        try:
+            await client.get_page("applications", next_link=url)
+        finally:
+            await client.aclose()
+
+    for url in (
+        "https://example.invalid/v1.0/applications?$skiptoken=x",
+        "https://graph.microsoft.com/v1.0/users?$skiptoken=x",
+        "http://graph.microsoft.com/v1.0/applications?$skiptoken=x",
+        "https://graph.microsoft.com@evil.invalid/v1.0/applications?$skiptoken=x",
+    ):
+        with pytest.raises(GraphError):
+            asyncio.run(run(url))
+    assert calls == 0
+
+
+def test_get_page_reports_retry_after_throttling(monkeypatch):
+    slept: list[float] = []
+    retries: list[tuple[int, int, float]] = []
+    state = {"calls": 0}
+
+    async def fake_sleep(delay):
+        slept.append(delay)
+
+    monkeypatch.setattr(gc.asyncio, "sleep", fake_sleep)
+
+    def handler(request, body):  # noqa: ARG001
+        state["calls"] += 1
+        if state["calls"] == 1:
+            return httpx.Response(429, headers={"Retry-After": "3"}, json={"error": {"message": "slow"}})
+        return _json({"value": [{"id": "a"}]})
+
+    async def run():
+        client = _client(handler)
+        try:
+            async def on_retry(status: int, attempt: int, delay: float):
+                retries.append((status, attempt, delay))
+            return await client.get_page("applications", on_retry=on_retry)
+        finally:
+            await client.aclose()
+
+    page = asyncio.run(run())
+    assert page.items == [{"id": "a"}]
+    assert retries and retries[0][0:2] == (429, 1)
+    assert 3 <= retries[0][2] <= 3.5
+    # The retry also re-enters the adaptive gate, which holds callers off for the same
+    # Retry-After window. Under a real clock that second wait is already elapsed and costs
+    # nothing; here `sleep` is faked so time never moves and it is recorded again.
+    assert slept[0] == retries[0][2]
+
+
+def test_get_count_reads_plain_integer_with_eventual_consistency():
+    def handler(request, body):  # noqa: ARG001
+        assert request.url.path == "/v1.0/applications/$count"
+        assert request.headers["ConsistencyLevel"] == "eventual"
+        assert request.headers["Accept"] == "text/plain"
+        return httpx.Response(200, text="1234")
+
+    async def run():
+        client = _client(handler)
+        try:
+            return await client.get_count("applications")
+        finally:
+            await client.aclose()
+
+    assert asyncio.run(run()) == 1234
+
+
 def test_batch_splits_at_twenty_and_preserves_order():
     seen_sizes: list[int] = []
 
@@ -125,6 +228,80 @@ def test_batch_sub_request_403_does_not_lose_the_rest():
     responses = asyncio.run(run())
     assert responses[1].forbidden
     assert responses[0].value() and responses[2].value()
+
+
+def test_batch_sub_request_retry_honours_header_and_reports_progress(monkeypatch):
+    slept: list[float] = []
+    retries: list[tuple[int, int, float]] = []
+    calls = 0
+
+    async def fake_sleep(delay: float):
+        slept.append(delay)
+
+    monkeypatch.setattr(gc.asyncio, "sleep", fake_sleep)
+    monkeypatch.setattr(gc.random, "uniform", lambda *_args: 0.0)
+
+    def handler(request, body):  # noqa: ARG001
+        nonlocal calls
+        calls += 1
+        row = body["requests"][0]
+        if calls == 1:
+            return _json({"responses": [{
+                "id": row["id"], "status": 429,
+                "headers": {"Retry-After": "4"},
+                "body": {"error": {"message": "slow"}},
+            }]})
+        return _json({"responses": [{
+            "id": row["id"], "status": 200, "body": {"value": [{"id": "ok"}]},
+        }]})
+
+    async def run():
+        client = _client(handler)
+        try:
+            async def on_retry(status: int, attempt: int, delay: float):
+                retries.append((status, attempt, delay))
+            return await client.batch([GraphRequest(id="0", url="/objects/0")], on_retry=on_retry)
+        finally:
+            await client.aclose()
+
+    responses = asyncio.run(run())
+    assert responses[0].ok
+    assert calls == 2
+    # See the note in test_get_page_reports_retry_after_throttling: the retry re-enters the
+    # adaptive gate, which under a faked clock records the same window a second time.
+    assert slept[0] == 4.0
+    assert retries == [(429, 1, 4.0)]
+
+
+def test_batch_sub_request_retry_is_bounded(monkeypatch):
+    calls = 0
+
+    async def fake_sleep(_delay: float):
+        return None
+
+    monkeypatch.setattr(gc.asyncio, "sleep", fake_sleep)
+    monkeypatch.setattr(gc.random, "uniform", lambda *_args: 0.0)
+    monkeypatch.setattr(gc, "_MAX_RETRIES", 2)
+
+    def handler(request, body):  # noqa: ARG001
+        nonlocal calls
+        calls += 1
+        row = body["requests"][0]
+        return _json({"responses": [{
+            "id": row["id"], "status": 429,
+            "headers": {"Retry-After": "1"}, "body": {"error": {"message": "slow"}},
+        }]})
+
+    async def run():
+        client = _client(handler)
+        try:
+            return await client.batch([GraphRequest(id="0", url="/objects/0")])
+        finally:
+            await client.aclose()
+
+    responses = asyncio.run(run())
+    assert calls == 3
+    assert responses[0].status == 429
 
 
 def test_get_by_ids_chunks_at_one_thousand():

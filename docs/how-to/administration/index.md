@@ -5,12 +5,15 @@ parent: How-to guides
 nav_order: 5
 description: Task-oriented procedures for every visible administration area.
 permalink: /how-to/administration/
+feature_ids: [SHELL_NAV:admin, ROUTE:admin]
 has_children: true
 ---
 
 # Administration tasks
 
 Use these procedures to configure the application, govern access, maintain reference data, and verify administrative changes without exposing credentials.
+
+{% include screenshot.html file="admin-access-built-in-roles.png" title="Administration task example — inspect roles before changing access" caption="Access Control → Roles exposes exact capability keys and distinguishes built-in roles. Use the access-control recipe below when the task is authorization; provider, connection, and reference changes have separate recipes and permissions. This local catalog was inspected only, with no user or role changes." %}
 
 ## How to choose an administration task
 
@@ -34,10 +37,12 @@ Open `/admin`, then select the required administration card.
    - [Change General settings]({{ site.baseurl }}/how-to/administration/general-settings/)
    - [Manage users, roles, groups, and SSO]({{ site.baseurl }}/how-to/administration/access-control/)
    - [Set policy and revoke sessions]({{ site.baseurl }}/how-to/administration/security-sessions/)
+   - [Restrict network access by IP]({{ site.baseurl }}/how-to/administration/network-access/)
    - [Edit prompts and scoring]({{ site.baseurl }}/how-to/administration/prompts-scoring/)
    - [Maintain reference sets and requests]({{ site.baseurl }}/how-to/administration/reference-sets/)
    - [Review usage and audit history]({{ site.baseurl }}/how-to/administration/usage-audit/)
    - [Inspect Azure and EntraID MCP tools]({{ site.baseurl }}/how-to/administration/mcp-tools/)
+   - [Operate durable fleet and background batches]({{ site.baseurl }}/how-to/administration/durable-batches/)
    - [Back up, restore, or manage demo data]({{ site.baseurl }}/how-to/administration/backup-demo/)
 2. Follow the exact route, permission, verification, and rollback guidance on that page.
 3. Review the Audit Log after a write.

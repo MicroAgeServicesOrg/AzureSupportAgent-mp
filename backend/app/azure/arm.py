@@ -8,7 +8,9 @@ selector works even for pasted-token connections.
 """
 from __future__ import annotations
 
+import asyncio
 import json
+import random
 import re
 from datetime import datetime, timezone
 from typing import Any
@@ -81,7 +83,9 @@ async def _get(token: str, path: str, params: dict[str, str]) -> tuple[Any, str 
                 detail = resp.json().get("error", {}).get("message", resp.text)
             except (ValueError, AttributeError):
                 detail = resp.text
-            return None, f"ARM {resp.status_code}: {str(detail)[:300]}"
+            retry_after = _retry_after_seconds(resp)
+            retry_hint = f" Retry-After: {retry_after:g}s." if retry_after is not None else ""
+            return None, f"ARM {resp.status_code}: {str(detail)[:300]}{retry_hint}"
         return resp.json(), None
     except httpx.HTTPError as e:  # noqa: BLE001
         return None, f"ARM request error: {e}"
@@ -363,11 +367,11 @@ async def query_resource_graph(
                     await asyncio.sleep(min(30.0, (2 ** attempt) + random.uniform(0, 0.5)))
                     continue
 
-                arg_throttle.note_quota_headers(resp.headers)
+                await arg_throttle.note_quota_headers_async(resp.headers)
                 if resp.status_code in _RETRYABLE_STATUS:
                     retry_after = _retry_after_seconds(resp)
                     if resp.status_code == 429:
-                        arg_throttle.note_throttled(retry_after)
+                        await arg_throttle.note_throttled_async(retry_after)
                     if attempt < max_retries:
                         delay = retry_after if retry_after is not None else (2 ** attempt) + random.uniform(0, 0.5)
                         await asyncio.sleep(min(60.0, delay))
@@ -458,11 +462,11 @@ async def query_resource_graph_paged(
                             return rows, last_err, False, total
                         await asyncio.sleep(min(30.0, (2 ** attempt) + random.uniform(0, 0.5)))
                         continue
-                    arg_throttle.note_quota_headers(resp.headers)
+                    await arg_throttle.note_quota_headers_async(resp.headers)
                     if resp.status_code in _RETRYABLE_STATUS:
                         retry_after = _retry_after_seconds(resp)
                         if resp.status_code == 429:
-                            arg_throttle.note_throttled(retry_after)
+                            await arg_throttle.note_throttled_async(retry_after)
                         if attempt < max_retries:
                             delay = retry_after if retry_after is not None else (2 ** attempt) + random.uniform(0, 0.5)
                             await asyncio.sleep(min(60.0, delay))
@@ -522,6 +526,8 @@ async def list_activity_log_events(
     end_iso: str,
     *,
     max_events: int = 1000,
+    max_retries: int = 4,
+    on_retry: Any = None,
 ) -> tuple[list[dict[str, Any]], str | None]:
     """Read the Azure Monitor Activity Log (management events) for a subscription window via
     ARM REST. Returns ``(events, error)``.
@@ -563,7 +569,30 @@ async def list_activity_log_events(
     try:
         async with httpx.AsyncClient(timeout=timeout) as client:
             for _page in range(max_pages):  # safety ceiling — max_events normally stops sooner
-                resp = await client.get(url, headers=headers, params=params)
+                resp = None
+                for attempt in range(max_retries + 1):
+                    try:
+                        resp = await client.get(url, headers=headers, params=params)
+                    except (httpx.TimeoutException, httpx.TransportError):
+                        if attempt >= max_retries:
+                            raise
+                        delay = min(30.0, (2 ** attempt) + random.uniform(0, 0.5))
+                        if on_retry is not None:
+                            await on_retry(0, attempt + 1, delay)
+                        await asyncio.sleep(delay)
+                        continue
+                    if resp.status_code not in _RETRYABLE_STATUS:
+                        break
+                    retry_after = _retry_after_seconds(resp)
+                    if attempt >= max_retries:
+                        break
+                    delay = retry_after if retry_after is not None else min(
+                        30.0, (2 ** attempt) + random.uniform(0, 0.5)
+                    )
+                    if on_retry is not None:
+                        await on_retry(resp.status_code, attempt + 1, delay)
+                    await asyncio.sleep(min(60.0, delay))
+                assert resp is not None
                 if resp.status_code != 200:
                     try:
                         detail = resp.json().get("error", {}).get("message", resp.text)
@@ -629,6 +658,7 @@ async def get_metrics(
     start_time: str | None = None,
     end_time: str | None = None,
     dimension_filter: str | None = None,
+    metric_namespace: str | None = None,
 ) -> tuple[str, str | None]:
     """Azure Monitor metrics for a resource via ARM REST. Returns ``(json_text, error)`` where
     ``json_text`` matches ``az monitor metrics list`` stdout — the full ``{value:[…]}`` object
@@ -649,6 +679,8 @@ async def get_metrics(
         params["timespan"] = f"{start_time}/{end_time or _utc_now_iso()}"
     if dimension_filter:
         params["$filter"] = dimension_filter
+    if metric_namespace:
+        params["metricnamespace"] = metric_namespace
     data, err = await _get(token, f"{resource_id}/providers/microsoft.insights/metrics", params)
     if err:
         return "", err

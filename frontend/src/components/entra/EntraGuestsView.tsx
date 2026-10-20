@@ -13,7 +13,7 @@
  *  - **Partner governance shows `unknown` when the cross-tenant list could not be read.**
  *    Rendering every partner as "ungoverned" because we could not look would be the loudest
  *    false claim on the page. A domain that simply has no Entra tenant behind it is a
- *    separate, honestly-labelled case.
+ *    separate, honestly-labeled case.
  */
 import { useMemo, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
@@ -24,6 +24,11 @@ import { cmp, CoverageBanner, EntraEmpty, SortTh, useEntraSorted, useSortState }
 import { InvestigateLink } from "./InvestigateLink";
 
 const LIFECYCLE_META: Record<string, { label: string; cls: string; why: string }> = {
+  disabled: {
+    label: "Disabled", cls: "bg-slate-200 text-slate-800",
+    why: "The account is blocked from signing in. It still carries whatever it was granted, "
+      + "which is why it is listed rather than filtered out.",
+  },
   pending: {
     label: "Invitation pending", cls: "bg-amber-100 text-amber-900",
     why: "Invited, never accepted. A directory object nobody needs.",
@@ -60,8 +65,45 @@ const GOV_META: Record<string, { label: string; cls: string }> = {
   unknown: { label: "Unknown", cls: "text-gray-400" },
 };
 
-function days(n: number | null | undefined): string {
-  return n == null ? "—" : n === 0 ? "today" : `${n}d`;
+/** Add months to a date, clamping the day so 31 Jan + 1 month is 28/29 Feb, not 3 March. */
+function addMonths(d: Date, months: number): Date {
+  const m = d.getUTCMonth() + months;
+  const lastDay = new Date(Date.UTC(d.getUTCFullYear(), m + 1, 0)).getUTCDate();
+  return new Date(Date.UTC(d.getUTCFullYear(), m, Math.min(d.getUTCDate(), lastDay),
+                           d.getUTCHours(), d.getUTCMinutes(), d.getUTCSeconds()));
+}
+
+/** Compact age, at most two units: "today", "5d", "2mo 26d", "1y 4mo".
+ *
+ *  `iso` makes the months a real CALENDAR count. Without it they are approximated at 30
+ *  days, which drifts badly at the top of the range — a year reads as "12mo 5d". `mo`
+ *  rather than `m` because `m` already means minutes elsewhere in the app.
+ */
+function age(n: number | null | undefined, iso?: string): string {
+  if (n == null) return "—";
+  if (n <= 0) return "today";
+  if (n < 31) return `${n}d`;
+
+  let months: number;
+  let rest: number;
+  const from = iso ? new Date(iso) : null;
+  if (from && !Number.isNaN(from.getTime())) {
+    const now = new Date();
+    months = (now.getUTCFullYear() - from.getUTCFullYear()) * 12
+      + (now.getUTCMonth() - from.getUTCMonth());
+    if (addMonths(from, months) > now) months -= 1;
+    rest = Math.max(0, Math.floor((now.getTime() - addMonths(from, months).getTime()) / 86_400_000));
+  } else {
+    months = Math.floor(n / 30);
+    rest = n - months * 30;
+  }
+
+  if (months >= 12) {
+    const years = Math.floor(months / 12);
+    const rem = months % 12;
+    return rem ? `${years}y ${rem}mo` : `${years}y`;
+  }
+  return rest ? `${months}mo ${rest}d` : `${months}mo`;
 }
 
 function Tile({ label, value, tone, title }: {
@@ -82,7 +124,10 @@ function Funnel({ c }: { c: EntraGuests["counts"] }) {
   const steps = [
     { label: "Invited", value: c.invited, lost: c.pending, lostLabel: "never accepted" },
     { label: "Accepted", value: c.accepted, lost: c.never_used, lostLabel: "never used" },
-    { label: "Used it", value: c.accepted - c.never_used, lost: c.dormant, lostLabel: "now dormant" },
+    // Disabled accounts leave the engagement funnel here: they cannot sign in, so counting
+    // them as "used it" would claim usage the account is incapable of.
+    { label: "Used it", value: Math.max(0, c.accepted - c.never_used - (c.disabled || 0)),
+      lost: c.dormant, lostLabel: "now dormant" },
     { label: "Still active", value: c.active, lost: 0, lostLabel: "" },
   ];
   const max = Math.max(1, c.invited);
@@ -93,8 +138,8 @@ function Funnel({ c }: { c: EntraGuests["counts"] }) {
         {steps.map((s) => (
           <div key={s.label} className="flex items-center gap-2">
             <div className="w-24 shrink-0 text-[11px] text-gray-600">{s.label}</div>
-            <div className="h-4 min-w-0 flex-1 rounded bg-gray-100">
-              <div className="h-4 rounded bg-brand/70" style={{ width: `${(s.value / max) * 100}%` }} />
+            <div className="h-4 min-w-0 flex-1 rounded-sm bg-gray-100">
+              <div className="h-4 rounded-sm bg-brand/70" style={{ width: `${(s.value / max) * 100}%` }} />
             </div>
             <div className="w-16 shrink-0 text-right text-[11px] tabular-nums text-gray-800">
               {s.value.toLocaleString()}
@@ -110,6 +155,13 @@ function Funnel({ c }: { c: EntraGuests["counts"] }) {
           {c.not_measured.toLocaleString()} guest(s) are excluded from the funnel because their
           sign-in activity was not collected — that is an absence of measurement, not a lifecycle
           outcome.
+        </div>
+      )}
+      {(c.disabled || 0) > 0 && (
+        <div className="mt-1 text-[11px] text-gray-500">
+          {(c.disabled || 0).toLocaleString()} guest(s) are excluded because the account is
+          disabled and cannot sign in. They are still listed below — a disabled guest keeps
+          whatever it was granted.
         </div>
       )}
     </div>
@@ -195,7 +247,7 @@ export function EntraGuestsView({ connectionId }: { connectionId?: string | null
     <div className="min-h-0 flex-1 overflow-auto p-4">
       <CoverageBanner meta={d.meta} />
 
-      <div className="mb-3 grid grid-cols-2 gap-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-7">
+      <div className="mb-3 grid grid-cols-2 gap-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-8">
         <Tile label="Guests" value={c.invited} />
         <Tile label="Pending invite" value={c.pending} tone="text-amber-600"
               title="Invited and never accepted." />
@@ -204,6 +256,8 @@ export function EntraGuestsView({ connectionId }: { connectionId?: string | null
         <Tile label="Dormant" value={c.dormant} tone="text-rose-600"
               title={`No sign-in for ${d.stale_days} days or more.`} />
         <Tile label="Active" value={c.active} tone="text-emerald-600" />
+        <Tile label="Disabled" value={c.disabled || 0} tone="text-slate-600"
+              title="Blocked from signing in, but still carrying whatever it was granted." />
         <Tile label="Not measured" value={c.not_measured} tone="text-gray-400"
               title="Sign-in activity was not collected — NOT evidence the account is unused." />
         <Tile label="Partner domains" value={d.domain_count} tone="text-sky-600" />
@@ -219,8 +273,8 @@ export function EntraGuestsView({ connectionId }: { connectionId?: string | null
                 <span className={`w-28 shrink-0 ${CLASS_META[k]?.cls || ""}`}>
                   {CLASS_META[k]?.label || k}
                 </span>
-                <div className="h-3 min-w-0 flex-1 rounded bg-gray-100">
-                  <div className="h-3 rounded bg-brand/60"
+                <div className="h-3 min-w-0 flex-1 rounded-sm bg-gray-100">
+                  <div className="h-3 rounded-sm bg-brand/60"
                        style={{ width: `${(n / Math.max(1, c.invited)) * 100}%` }} />
                 </div>
                 <span className="w-12 shrink-0 text-right tabular-nums text-gray-700">
@@ -232,7 +286,7 @@ export function EntraGuestsView({ connectionId }: { connectionId?: string | null
           {(d.by_class.consumer ?? 0) > 0 && (
             <div className="mt-2 text-[11px] text-rose-700">
               {d.by_class.consumer.toLocaleString()} guest(s) use a consumer mailbox. No partner
-              organisation can de-provision those when an engagement ends.
+              organization can de-provision those when an engagement ends.
             </div>
           )}
         </div>
@@ -246,7 +300,7 @@ export function EntraGuestsView({ connectionId }: { connectionId?: string | null
           </button>
           <button onClick={() => setView("partners")}
                   className={`border-l px-2.5 py-1 ${view === "partners" ? "bg-brand/10 font-medium text-brand" : "text-gray-600 hover:bg-gray-50"}`}>
-            Partner organisations ({d.domain_count.toLocaleString()})
+            Partner organizations ({d.domain_count.toLocaleString()})
           </button>
         </div>
 
@@ -254,16 +308,16 @@ export function EntraGuestsView({ connectionId }: { connectionId?: string | null
           <>
             <input value={search} onChange={(e) => setSearch(e.target.value)}
                    placeholder="Search name, address or domain…"
-                   className="w-56 rounded border px-2 py-1 text-xs" />
+                   className="w-56 rounded-sm border px-2 py-1 text-xs" />
             <select value={life} onChange={(e) => setLife(e.target.value)}
-                    aria-label="Lifecycle" className="rounded border px-2 py-1 text-xs">
+                    aria-label="Lifecycle" className="rounded-sm border px-2 py-1 text-xs">
               <option value="">All lifecycle states</option>
               {Object.entries(LIFECYCLE_META).map(([k, m]) => (
                 <option key={k} value={k}>{m.label}</option>
               ))}
             </select>
             <select value={cls} onChange={(e) => setCls(e.target.value)}
-                    aria-label="Domain class" className="rounded border px-2 py-1 text-xs">
+                    aria-label="Domain class" className="rounded-sm border px-2 py-1 text-xs">
               <option value="">All domain classes</option>
               {Object.entries(CLASS_META).map(([k, m]) => <option key={k} value={k}>{m.label}</option>)}
             </select>
@@ -273,17 +327,12 @@ export function EntraGuestsView({ connectionId }: { connectionId?: string | null
             </label>
             {dom && (
               <button onClick={() => setDom("")}
-                      className="rounded border px-2 py-1 text-xs text-gray-700 hover:bg-gray-50">
+                      className="rounded-sm border px-2 py-1 text-xs text-gray-700 hover:bg-gray-50">
                 {dom} ✕
               </button>
             )}
           </>
         )}
-        <a href={api.entraWorkbookUrl(connectionId || "")}
-           className="ml-auto rounded border border-green-300 bg-green-50 px-2 py-1 text-xs font-medium text-green-700 hover:bg-green-100"
-           title="Every sheet including the guest inventory and partner rollup">
-          ⬇ Export to Excel
-        </a>
       </div>
 
       {view === "people" ? (
@@ -292,7 +341,7 @@ export function EntraGuestsView({ connectionId }: { connectionId?: string | null
             <thead className="bg-gray-50 text-left text-[11px] uppercase text-gray-500">
               <tr>
                 <SortTh label="Guest" col="name" sort={guestSort} setSort={setGuestSort} firstDir={1} />
-                <SortTh label="Organisation" col="domain" sort={guestSort} setSort={setGuestSort} firstDir={1} />
+                <SortTh label="Organization" col="domain" sort={guestSort} setSort={setGuestSort} firstDir={1} />
                 <SortTh label="State" col="lifecycle" sort={guestSort} setSort={setGuestSort} firstDir={1} />
                 <SortTh label="Invited" col="invited" sort={guestSort} setSort={setGuestSort} />
                 <SortTh label="Last human sign-in" col="human" sort={guestSort} setSort={setGuestSort}
@@ -326,19 +375,31 @@ export function EntraGuestsView({ connectionId }: { connectionId?: string | null
                       </div>
                     </td>
                     <td className="px-2 py-1.5">
-                      <span className={`rounded px-1.5 py-0.5 ${m.cls}`} title={m.why}>{m.label}</span>
+                      <span className={`rounded-sm px-1.5 py-0.5 ${m.cls}`} title={m.why}>{m.label}</span>
                     </td>
                     <td className="px-2 py-1.5 tabular-nums text-gray-700" title={r.invited_at}>
-                      {days(r.invited_days_ago)}
+                      {age(r.invited_days_ago, r.invited_at)}
                     </td>
-                    {/* Interactive only. Kept apart from the combined column on purpose. */}
+                    {/* Interactive only, and only when it demonstrably succeeded. A refused
+                        attempt shows as refused: "never" would erase that anyone tried. */}
                     <td className="px-2 py-1.5 tabular-nums text-gray-700"
-                        title={r.signin_known ? (r.last_human_signin || "never") : "not measured"}>
-                      {r.signin_known ? (r.last_human_signin ? days(r.last_human_days_ago) : "never") : "—"}
+                        title={r.signin_known ? (r.last_human_signin || "no successful interactive sign-in") : "not measured"}>
+                      {!r.signin_known ? "—"
+                        : r.last_human_signin ? age(r.last_human_days_ago, r.last_human_signin)
+                        : r.last_refused_signin
+                          ? <span className="text-amber-700"
+                                  title={`Last attempt refused — ${r.last_refused_signin}`}>
+                              refused {age(r.last_refused_days_ago, r.last_refused_signin)}
+                            </span>
+                          : "never"}
                     </td>
                     <td className="px-2 py-1.5 tabular-nums text-gray-500"
-                        title="Includes non-interactive token refresh — live, but not necessarily a person.">
-                      {r.signin_known ? (r.last_any_signin ? days(r.last_any_days_ago) : "never") : "—"}
+                        title="Last sign-in that actually succeeded, including non-interactive token refresh — live, but not necessarily a person.">
+                      {!r.signin_known ? "—"
+                        : r.last_any_signin ? age(r.last_any_days_ago, r.last_any_signin)
+                        : r.last_refused_signin
+                          ? <span className="text-amber-700">refused {age(r.last_refused_days_ago, r.last_refused_signin)}</span>
+                          : "never"}
                     </td>
                     <td className="px-2 py-1.5">
                       {r.enabled
@@ -371,7 +432,7 @@ export function EntraGuestsView({ connectionId }: { connectionId?: string | null
           <table className="min-w-full text-xs">
             <thead className="bg-gray-50 text-left text-[11px] uppercase text-gray-500">
               <tr>
-                <SortTh label="Organisation" col="domain" sort={domainSort} setSort={setDomainSort} firstDir={1} />
+                <SortTh label="Organization" col="domain" sort={domainSort} setSort={setDomainSort} firstDir={1} />
                 <SortTh label="Guests" col="guests" sort={domainSort} setSort={setDomainSort} />
                 <SortTh label="Pending" col="pending" sort={domainSort} setSort={setDomainSort} />
                 <SortTh label="Dormant" col="dormant" sort={domainSort} setSort={setDomainSort} />
@@ -402,7 +463,7 @@ export function EntraGuestsView({ connectionId }: { connectionId?: string | null
                     </td>
                     <td className="px-2 py-1.5 tabular-nums text-amber-700">{r.pending || ""}</td>
                     <td className="px-2 py-1.5 tabular-nums text-rose-700">{r.dormant || ""}</td>
-                    <td className="px-2 py-1.5 tabular-nums text-gray-700">{days(r.oldest_invite_days)}</td>
+                    <td className="px-2 py-1.5 tabular-nums text-gray-700">{age(r.oldest_invite_days)}</td>
                     <td className={`px-2 py-1.5 ${g.cls}`} title={r.governance_reason || ""}>{g.label}</td>
                   </tr>
                 );

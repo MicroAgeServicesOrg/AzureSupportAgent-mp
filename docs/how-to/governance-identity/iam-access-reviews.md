@@ -8,14 +8,14 @@ description: Use every IAM tab to review effective access, exposure, scopes, rol
 permalink: /how-to/governance-identity/iam-access-reviews/
 redirect_from:
   - /how-to/governance-identity/rbac-access-reviews/
-feature_ids: [PROACTIVE_NAV:iam, IAM_NAV:overview, IAM_NAV:effective, IAM_NAV:leastprivilege, IAM_NAV:roles, IAM_NAV:insights, IAM_NAV:scopes, IAM_NAV:diagnostics]
+feature_ids: [PROACTIVE_NAV:iam, ROUTE:iam, IAM_NAV:overview, IAM_NAV:effective, IAM_NAV:privileged, IAM_NAV:accessmap, IAM_NAV:leastprivilege, IAM_NAV:pim, IAM_NAV:roles, IAM_NAV:insights, IAM_NAV:scopes, IAM_NAV:diagnostics]
 ---
 
 # Review, scan, export, and investigate IAM
 
 ## Prerequisites
 
-- Product permission `iam.read`.
+- Product permission `iam.read`; `iam.write` for **Scan usage**, `iam.review` for campaign decisions, and `iam.simulate` for change modeling.
 - ARM Reader visibility at every intended management-group, subscription, resource-group, and resource scope.
 - Approved Graph read access for names, groups, Entra roles, ownership, and transitive paths.
 - An approved external process for access changes; this feature is read-only.
@@ -52,6 +52,18 @@ feature_ids: [PROACTIVE_NAV:iam, IAM_NAV:overview, IAM_NAV:effective, IAM_NAV:le
 
 **Verification:** Check assignment ID/scope, group chain, principal state, role actions/data actions, and inheritance. This is not a complete authorization-engine simulation.
 
+## How to trace access paths and PIM eligibility
+
+1. Open `/iam/accessmap` and select the intended principal or resource scope.
+2. Follow each rendered edge back to its assignment, group, ownership, or eligible-role source; do not infer a grant from the diagram label alone.
+3. Open `/iam/pim` for eligible and active assignment context, including schedule and activation state available in the cached scan.
+4. Compare the path with `/iam/effective` and the source assignment in Azure or Entra.
+5. Refresh the affected scope and directory context after an external access change.
+
+**Expected result:** The effective principal, source assignment, transitive path, and PIM state are distinguished rather than collapsed into one grant.
+
+**Verification:** The source assignment and group or eligible-role chain agree across Access Map, Effective Access, and the authoritative portal.
+
 ## How to investigate privileged and data-plane exposure
 
 1. Open `/iam/privileged` and separate privileged classification from roles containing data actions.
@@ -82,7 +94,7 @@ feature_ids: [PROACTIVE_NAV:iam, IAM_NAV:overview, IAM_NAV:effective, IAM_NAV:le
 
 1. Apply all intended filters in `/iam/effective`.
 
-2. Use the available CSV, JSON, or workbook export control and record filter/scope/generated-time metadata.
+2. Use CSV or JSON for all grid filters. **Excel (all tabs)** passes only scope/workload narrowing to access sheets and keeps analysis tenant-wide; search, surface and privileged-only are not workbook filters. Record scope and generated time.
 3. Open the file and confirm row and column completeness.
 4. Redact unnecessary object IDs, UPNs, group chains, and resource names before sharing.
 5. Create an approved case or ticket externally and attach only the minimum evidence.
@@ -91,6 +103,18 @@ feature_ids: [PROACTIVE_NAV:iam, IAM_NAV:overview, IAM_NAV:effective, IAM_NAV:le
 **Expected result:** A reproducible review artifact and tracked investigation without an in-app access mutation.
 
 **Verification:** The refreshed row disappears or changes as intended, while required emergency, deployment, and service-managed access remains intact.
+
+## How to record an access certification without changing Azure
+
+1. Open `/iam/reviews`, choose a narrow selector, name the campaign and choose its reviewer strategy. Manager lookup is not populated; confirm owner/fallback routing or deliberately choose labeled self-attestation.
+2. Confirm the total and returned items before activating. Creation caps at 2,000 deduplicated items, while detail shows at most 500 without UI paging; prefer a selector that fits the detail view.
+3. Activate, expand each item and record approve, revoke, reduce or needs-info. Supply a reason for re-presented items and preserve the business rationale for all material decisions.
+4. Generate the remediation/rollback proposal, review every scope and membership path, and execute only through the external change process. A revoke decision is a local decision—not cloud revocation.
+5. Refresh and verify in Azure/Entra, then complete and export evidence. Re-check compares existing keys and can clear earlier decisions; it is not a complete post-change verification mechanism.
+
+**Expected result:** A local campaign with explicit decisions and a hashed evidence artifact, separate from any externally executed change.
+
+**Verification and safety:** Compare visible items with `stats.total` and `stats.truncated`, retain any pinned baseline separately, and confirm every claimed removal in current authoritative records. Undecided items remain undecided after completion.
 
 ## Safety and rollback
 
@@ -107,7 +131,8 @@ Page visits read disk-backed caches and never scan. Azure scopes and directory c
 | Overview is empty | Inspect Diagnostics and refresh the correct scope; page load is cache-only. |
 | The header reads `scanned just now` but the data looks old | The headline is the newest collection across all scopes. Check for the `N of M scopes stale` split, then read per-scope ages on Overview. |
 | Least Privilege reports that usage was not measured | No usage scan has run for this connection. Pick a window and use **Scan usage**. |
-| A usage window over 90 days will not apply | Azure Activity Log retention is the ceiling; the request is refused rather than silently shortened. |
+| A usage window becomes 90 days | The custom picker clamps to 1–90 days; the API rejects out-of-range input. Check the selected value before scanning. |
+| Scan usage returns a permission error | Usage refresh needs `iam.write`, unlike ordinary access refreshes under `iam.read`. |
 | Principal/group path is stale | Refresh Directory and verify Graph consent. |
 | Subscription is missing | Verify connection visibility and Reader at parent/subscription scope. |
 | Search is slow | Filter scope, surface, and principal type before typing. |

@@ -10,9 +10,10 @@ import { WorkloadCard } from "./workloads/WorkloadCard";
 import { FleetCockpit, matchesFleetFilter } from "./workloads/FleetCockpit";
 import { WorkloadTable, WorkloadBoard } from "./workloads/WorkloadTableBoard";
 import { ConstellationMap } from "./workloads/ConstellationMap";
+import { DurableBatchBar, useDurableBatch } from "./DurableBatch";
 
 const input =
-  "w-full rounded-lg border px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-brand";
+  "w-full rounded-lg border px-3 py-2 text-sm focus:outline-hidden focus:ring-2 focus:ring-brand";
 const label = "mb-1 block text-xs font-medium text-gray-600";
 const DEEP_RELIABILITY_REVIEW_PROMPT =
   "Do a full reliability review of the workload across networking, identity, compute, storage, security, monitoring and cost, and name the top risk.";
@@ -125,10 +126,10 @@ function WorkloadResourceTree({
   return (
     <div className="max-h-72 space-y-0.5 overflow-y-auto rounded-lg border p-2 text-sm">
       {tree.mgs.map((m) => (
-        <div key={m.id} className="flex items-center gap-2 rounded px-1 py-0.5 hover:bg-gray-50">
+        <div key={m.id} className="flex items-center gap-2 rounded-sm px-1 py-0.5 hover:bg-gray-50">
           <AzureIcon kind="mg" className="h-3.5 w-3.5" />
           <span className="truncate text-gray-800" title={m.id}>{m.name || m.id}</span>
-          <span className="shrink-0 rounded bg-gray-100 px-1.5 py-0.5 text-[9px] text-gray-500">management group</span>
+          <span className="shrink-0 rounded-sm bg-gray-100 px-1.5 py-0.5 text-[9px] text-gray-500">management group</span>
           <RemoveBtn id={m.id} />
         </div>
       ))}
@@ -138,13 +139,13 @@ function WorkloadResourceTree({
         const subOpen = !collapsed.has(subKey);
         return (
           <div key={s.sub}>
-            <div className="flex items-center gap-1.5 rounded px-1 py-0.5 hover:bg-gray-50">
+            <div className="flex items-center gap-1.5 rounded-sm px-1 py-0.5 hover:bg-gray-50">
               <button onClick={() => toggle(subKey)} className="shrink-0 text-gray-400" aria-label={subOpen ? "Collapse" : "Expand"}>
                 <span className={`inline-block transition-transform ${subOpen ? "rotate-90" : ""}`}>▸</span>
               </button>
               <AzureIcon kind="subscription" className="h-3.5 w-3.5" />
               <span className="truncate font-medium text-gray-800" title={s.sub}>{subName(s.sub)}</span>
-              {s.scope && <span className="shrink-0 rounded bg-brand/10 px-1.5 py-0.5 text-[9px] text-brand">entire subscription</span>}
+              {s.scope && <span className="shrink-0 rounded-sm bg-brand/10 px-1.5 py-0.5 text-[9px] text-brand">entire subscription</span>}
               {s.scope && <RemoveBtn id={s.scope.id} />}
             </div>
 
@@ -155,13 +156,13 @@ function WorkloadResourceTree({
                   const rgOpen = !collapsed.has(rgKey);
                   return (
                     <div key={g.rg}>
-                      <div className="flex items-center gap-1.5 rounded px-1 py-0.5 hover:bg-gray-50">
+                      <div className="flex items-center gap-1.5 rounded-sm px-1 py-0.5 hover:bg-gray-50">
                         <button onClick={() => toggle(rgKey)} className="shrink-0 text-gray-400" aria-label={rgOpen ? "Collapse" : "Expand"}>
                           <span className={`inline-block transition-transform ${rgOpen ? "rotate-90" : ""}`}>▸</span>
                         </button>
                         <AzureIcon kind="resource_group" className="h-3.5 w-3.5" />
                         <span className="truncate text-gray-700" title={g.rg}>{g.rg}</span>
-                        {g.scope && <span className="shrink-0 rounded bg-brand/10 px-1.5 py-0.5 text-[9px] text-brand">entire group</span>}
+                        {g.scope && <span className="shrink-0 rounded-sm bg-brand/10 px-1.5 py-0.5 text-[9px] text-brand">entire group</span>}
                         {g.resources.length > 0 && <span className="shrink-0 text-[10px] text-gray-400">{g.resources.length}</span>}
                         {g.scope && <RemoveBtn id={g.scope.id} />}
                       </div>
@@ -169,7 +170,7 @@ function WorkloadResourceTree({
                       {rgOpen && (
                         <div className="ml-4 border-l pl-2">
                           {g.resources.map((r) => (
-                            <div key={r.id} className="flex items-center gap-1.5 rounded px-1 py-0.5 hover:bg-gray-50">
+                            <div key={r.id} className="flex items-center gap-1.5 rounded-sm px-1 py-0.5 hover:bg-gray-50">
                               <AzureIcon kind="resource" type={r.resource_type} className="h-3.5 w-3.5" />
                               <span className="truncate text-gray-800" title={r.id}>{r.name || r.id}</span>
                               {r.resource_type && <span className="shrink-0 text-[10px] text-gray-400">{friendlyResourceType(r.resource_type)}</span>}
@@ -240,7 +241,7 @@ function EstateCoveragePanel({ onTrace }: { onTrace: (resourceId: string) => voi
             <select
               value={effConn}
               onChange={(e) => { setConnId(e.target.value); setScanConn(""); }}
-              className="mb-3 rounded border px-2 py-1 text-xs text-gray-600"
+              className="mb-3 rounded-sm border px-2 py-1 text-xs text-gray-600"
             >
               {connections.map((c) => (
                 <option key={c.id} value={c.id}>{c.display_name}</option>
@@ -299,9 +300,9 @@ function EstateCoveragePanel({ onTrace }: { onTrace: (resourceId: string) => voi
                   <div className="mb-1 text-xs font-medium text-gray-600">Orphaned resources by resource group</div>
                   <div className="max-h-44 space-y-1 overflow-auto">
                     {cov.orphan_resource_groups.slice(0, 30).map((g) => (
-                      <div key={g.resource_group} className="flex items-center justify-between rounded bg-gray-50 px-2 py-1 text-xs">
+                      <div key={g.resource_group} className="flex items-center justify-between rounded-sm bg-gray-50 px-2 py-1 text-xs">
                         <span className="truncate text-gray-700">{g.resource_group}</span>
-                        <span className="shrink-0 rounded bg-gray-200 px-1.5 text-[10px] tabular-nums text-gray-600">{g.count}</span>
+                        <span className="shrink-0 rounded-sm bg-gray-200 px-1.5 text-[10px] tabular-nums text-gray-600">{g.count}</span>
                       </div>
                     ))}
                   </div>
@@ -317,7 +318,7 @@ function EstateCoveragePanel({ onTrace }: { onTrace: (resourceId: string) => voi
                   </div>
                   <div className="max-h-52 space-y-1 overflow-auto">
                     {cov.orphans.slice(0, 50).map((o) => (
-                      <div key={o.id} className="flex items-center gap-2 rounded bg-gray-50 px-2 py-1 text-xs">
+                      <div key={o.id} className="flex items-center gap-2 rounded-sm bg-gray-50 px-2 py-1 text-xs">
                         <span className="min-w-0 flex-1">
                           <span className="block truncate text-gray-700">{o.name}</span>
                           <span className="block truncate text-[10px] text-gray-400">{o.resource_type} · {o.resource_group}</span>
@@ -325,7 +326,7 @@ function EstateCoveragePanel({ onTrace }: { onTrace: (resourceId: string) => voi
                         <button
                           onClick={() => onTrace(o.id)}
                           title="Reverse-engineer the workload around this resource"
-                          className="shrink-0 rounded border border-brand/40 px-2 py-0.5 text-[11px] font-medium text-brand transition hover:bg-brand/5"
+                          className="shrink-0 rounded-sm border border-brand/40 px-2 py-0.5 text-[11px] font-medium text-brand transition hover:bg-brand/5"
                         >
                           Trace →
                         </button>
@@ -381,7 +382,7 @@ function RollupChip({ tone, children }: { tone: "gray" | "green" | "amber" | "re
     red: "bg-red-50 text-red-700",
     indigo: "bg-indigo-50 text-indigo-700",
   }[tone];
-  return <span className={`inline-flex items-center gap-1 rounded px-1.5 py-0.5 text-[11px] font-medium ${cls}`}>{children}</span>;
+  return <span className={`inline-flex items-center gap-1 rounded-sm px-1.5 py-0.5 text-[11px] font-medium ${cls}`}>{children}</span>;
 }
 
 const bandTone = (band?: string): "green" | "amber" | "red" | "gray" =>
@@ -560,6 +561,8 @@ function GroupedCards({
 export function WorkloadsPanel() {
   const qc = useQueryClient();
   const navigate = useNavigate();
+  const missionBatch = useDurableBatch("mission", [["missionLatest"], ["missions"]]);
+  const deepReviewBatch = useDurableBatch("deep_review", [["chats"], ["activeTurns"]]);
   const wlQ = useQuery({ queryKey: ["workloads"], queryFn: api.workloads });
   // Preserve the page scroll position across navigation (e.g. open a workload then hit Back).
   const scrollRef = useRef<HTMLDivElement>(null);  const [editing, setEditing] = useState<Partial<Workload> | null>(null);
@@ -574,6 +577,8 @@ export function WorkloadsPanel() {
     (localStorage.getItem("azsup.workloads.view") as "cards" | "table" | "board" | "map") || "cards");
   const [fleetFilter, setFleetFilter] = useState<string>("");  // category/env filter from cockpit
   const [search, setSearch] = useState<string>("");  // free-text filter over name/description/tags/type
+  const [minResources, setMinResources] = useState<string>(() => localStorage.getItem("azsup.workloads.minResources") || "");
+  const [maxResources, setMaxResources] = useState<string>(() => localStorage.getItem("azsup.workloads.maxResources") || "");
   // Sort + faceted classification filter (persisted so the choice sticks across visits).
   const [sortKey, setSortKey] = useState<string>(() => localStorage.getItem("azsup.workloads.sort") || "");
   const setSort = (k: string) => { setSortKey(k); localStorage.setItem("azsup.workloads.sort", k); };
@@ -649,6 +654,7 @@ export function WorkloadsPanel() {
     enabled: workloads.length > 0 && !showTrash,
     staleTime: 60_000,
   });
+  const profilesInitialLoading = profilesQ.isPending && profilesQ.fetchStatus === "fetching";
   const profileById: Record<string, WorkloadProfile> = {};
   for (const p of profilesQ.data?.profiles ?? []) profileById[p.id] = p;
 
@@ -720,6 +726,12 @@ export function WorkloadsPanel() {
   // Resource count for sorting: prefer the profile's true total, else count resource nodes.
   const resourceCount = (w: Workload): number =>
     profileById[w.id]?.composition.total ?? (w.nodes || []).filter((n) => n.kind === "resource").length;
+  const matchesResourceCount = (w: Workload): boolean => {
+    const count = resourceCount(w);
+    const minimum = minResources === "" ? null : Math.max(0, Number(minResources) || 0);
+    const maximum = maxResources === "" ? null : Math.max(0, Number(maxResources) || 0);
+    return (minimum === null || count >= minimum) && (maximum === null || count <= maximum);
+  };
   const ts = (s?: string): number => (s ? new Date(s).getTime() || 0 : 0);
   // Apply the chosen sort. "" keeps the backend order (table view still triages by health).
   const sortWorkloads = (list: Workload[]): Workload[] => {
@@ -749,7 +761,7 @@ export function WorkloadsPanel() {
     return w.group_id === groupFilter;
   };
   const visibleWorkloads = sortWorkloads(
-    workloads.filter((w) => matchesFleetFilter(profileById[w.id], fleetFilter) && matchesSearch(w) && matchesClass(w) && matchesGroup(w)),
+    workloads.filter((w) => matchesFleetFilter(profileById[w.id], fleetFilter) && matchesSearch(w) && matchesClass(w) && matchesGroup(w) && matchesResourceCount(w)),
   );
 
   const setViewMode = (v: "cards" | "table" | "board" | "map") => {
@@ -829,6 +841,7 @@ export function WorkloadsPanel() {
   const [selected, setSelected] = useState<Set<string>>(new Set());
   const [launchingMissions, setLaunchingMissions] = useState(false);
   const [launchingDeepReviews, setLaunchingDeepReviews] = useState(false);
+  const [bulkDeleting, setBulkDeleting] = useState(false);
   const toggleSelected = (id: string) =>
     setSelected((s) => {
       const n = new Set(s);
@@ -843,8 +856,8 @@ export function WorkloadsPanel() {
     setMsg("");
     setNotice("");
     try {
-      const r = await api.runFleet({ workload_ids: Array.from(selected) });
-      setNotice(`⏳ Queued ${r.queued} mission${r.queued === 1 ? "" : "s"}. Central Azure admission runs one mission per connection at a time to prevent throttling.`);
+      const batch = await missionBatch.launch(Array.from(selected));
+      setNotice(`⏳ Queued ${batch.total} durable mission${batch.total === 1 ? "" : "s"}. Central Azure admission runs one item per connection and resumes unfinished work after restart.`);
       setSelected(new Set());
     } catch (e) {
       setMsg(formatError(e));
@@ -859,26 +872,62 @@ export function WorkloadsPanel() {
     setMsg("");
     setNotice("");
     try {
-      const result = await api.deepReviewFleet(Array.from(selected));
-      const started = result.chats.filter((chat) => chat.status === "running");
-      const failed = result.chats.length - started.length;
+      const batch = await deepReviewBatch.launch(Array.from(selected));
       setSelected(new Set());
-      await Promise.all([
-        qc.invalidateQueries({ queryKey: ["chats"] }),
-        qc.invalidateQueries({ queryKey: ["activeTurns"] }),
-      ]);
-      if (started.length > 0) {
-        navigate(`/c/${started[0].chat_id}`);
-      } else {
-        setMsg(result.chats[0]?.error || "The selected deep reviews could not be started.");
-      }
-      if (failed > 0 && started.length > 0) {
-        setNotice(`Started ${started.length} deep review${started.length === 1 ? "" : "s"}; ${failed} failed to start.`);
-      }
+      setNotice(`Queued ${batch.total} durable deep review${batch.total === 1 ? "" : "s"}. Chats are created by the server and unfinished reviews rerun safely after restart.`);
+      void qc.invalidateQueries({ queryKey: ["chats"] });
     } catch (e) {
       setMsg(formatError(e));
     } finally {
       setLaunchingDeepReviews(false);
+    }
+  }
+
+  async function bulkTrashSelected() {
+    if (selected.size === 0 || bulkDeleting) return;
+    if (selected.size > 500) {
+      setMsg("Bulk Trash supports at most 500 workloads at a time. Narrow the selection and try again.");
+      return;
+    }
+    const chosen = workloads.filter((workload) => selected.has(workload.id));
+    const totalResources = chosen.reduce((total, workload) => total + resourceCount(workload), 0);
+    const groupedCount = chosen.filter((workload) => !!workload.group_id).length;
+    const names = chosen.slice(0, 10).map((workload) => `• ${workload.name}`).join("\n");
+    const more = chosen.length > 10 ? `\n• …and ${chosen.length - 10} more` : "";
+    const grouped = groupedCount > 0
+      ? `\n${groupedCount} selected workload${groupedCount === 1 ? " belongs" : "s belong"} to workload groups; those associations are preserved for restore.`
+      : "";
+    if (!window.confirm(
+      `Move ${chosen.length} workload${chosen.length === 1 ? "" : "s"} (${totalResources} resources represented) to Trash?\n\n` +
+      `${names}${more}${grouped}\n\nAzure resources are NOT modified. Workload definitions remain restorable from Trash.`,
+    )) return;
+
+    setBulkDeleting(true);
+    setMsg("");
+    setNotice("");
+    try {
+      const result = await api.bulkTrashWorkloads([...selected]);
+      setSelected(new Set());
+      await Promise.all([
+        qc.invalidateQueries({ queryKey: ["workloads"] }),
+        qc.invalidateQueries({ queryKey: ["workloadsTrash"] }),
+        qc.invalidateQueries({ queryKey: ["workloadProfiles"] }),
+        qc.invalidateQueries({ queryKey: ["workloadGroups"] }),
+        qc.invalidateQueries({ queryKey: ["workloadGroupSuggest"] }),
+        qc.invalidateQueries({ queryKey: ["workloadOverlaps"] }),
+        qc.invalidateQueries({ queryKey: ["estate-coverage"] }),
+      ]);
+      const skipped = result.already_trashed + result.not_found;
+      setNotice(
+        `Moved ${result.deleted} workload${result.deleted === 1 ? "" : "s"} to Trash.` +
+        (skipped > 0
+          ? ` ${result.already_trashed} already trashed; ${result.not_found} no longer found.`
+          : " You can restore them from the Trash view."),
+      );
+    } catch (error) {
+      setMsg(formatError(error));
+    } finally {
+      setBulkDeleting(false);
     }
   }
 
@@ -974,10 +1023,20 @@ export function WorkloadsPanel() {
         navigate("/chat");
       }}
       refreshing={refreshing === w.id}
+      profileLoading={profilesInitialLoading && !profileById[w.id]}
+      profileError={profilesQ.isError && !profileById[w.id]}
       groupName={grouped ? undefined : groupNameOf(w)}
       onOpenGroup={w.group_id ? () => navigate(`/workloads/groups/${w.group_id}`) : undefined}
     />
   );
+
+  const knownBatches = [missionBatch.batch, deepReviewBatch.batch].filter(
+    (batch): batch is NonNullable<typeof missionBatch.batch> => !!batch,
+  );
+  const actionableBatches = knownBatches.filter((batch) => batch.status !== "succeeded");
+  const visibleBatches = actionableBatches.length
+    ? actionableBatches
+    : [...knownBatches].sort((left, right) => Date.parse(right.created_at) - Date.parse(left.created_at)).slice(0, 1);
 
   return (
     <div
@@ -998,7 +1057,7 @@ export function WorkloadsPanel() {
           <div className="flex shrink-0 gap-2">
             <button
               onClick={() => setAutopilot(true)}
-              className="rounded-lg border border-brand/40 px-3 py-1.5 text-sm font-medium text-brand hover:bg-brand/5"
+              className="rounded-lg border border-brand/40 px-3 py-1.5 text-sm font-medium text-brand-dark hover:bg-brand/5"
             >
               ✨ Autopilot
             </button>
@@ -1018,7 +1077,10 @@ export function WorkloadsPanel() {
               🧩 Overlaps{overlapCount > 0 ? ` (${overlapCount})` : ""}
             </button>
             <button
-              onClick={() => setShowTrash((s) => !s)}
+              onClick={() => {
+                setShowTrash((s) => !s);
+                setSelected(new Set());
+              }}
               className={`rounded-lg border px-3 py-1.5 text-sm font-medium ${
                 showTrash ? "border-gray-400 bg-gray-100 text-gray-800" : "border-gray-300 text-gray-600 hover:bg-gray-50"
               }`}
@@ -1035,6 +1097,10 @@ export function WorkloadsPanel() {
           </div>
         )}
         {msg && <div className="rounded-lg bg-red-50 px-3 py-2 text-sm text-red-700">{msg}</div>}
+        {visibleBatches.map((batch) => {
+          const durable = batch.feature === "mission" ? missionBatch : deepReviewBatch;
+          return <DurableBatchBar key={batch.id} batch={batch} label={batch.feature === "mission" ? "Mission" : "Deep review"} onCancel={() => { void durable.cancel(); }} onRetry={() => { void durable.retry(); }} />;
+        })}
         {!showTrash && overlapCount > 0 && (
           <div className="flex flex-wrap items-center gap-2 rounded-lg border border-amber-300 bg-amber-50 px-3 py-2 text-sm text-amber-800">
             <span>⚠</span>
@@ -1057,7 +1123,7 @@ export function WorkloadsPanel() {
                 <span key={s.stem} className="inline-flex items-center gap-1.5 rounded-lg border border-indigo-200 bg-white px-2 py-1 text-xs">
                   <span className="font-semibold text-gray-700">{s.name}</span>
                   <span className="text-gray-400">{s.members.map((m) => m.environment || "?").join(" · ")}</span>
-                  <button onClick={() => void acceptSuggestion(s)} className="rounded bg-indigo-600 px-1.5 py-0.5 text-[11px] font-medium text-white hover:bg-indigo-700" title={`Group ${s.members.map((m) => m.name).join(", ")}`}>
+                  <button onClick={() => void acceptSuggestion(s)} className="rounded-sm bg-indigo-600 px-1.5 py-0.5 text-[11px] font-medium text-white hover:bg-indigo-700" title={`Group ${s.members.map((m) => m.name).join(", ")}`}>
                     + Group {s.workload_ids.length}
                   </button>
                   <button onClick={() => setDismissedSuggest((d) => new Set(d).add(s.stem))} className="text-gray-300 hover:text-gray-500" title="Dismiss">✕</button>
@@ -1067,11 +1133,14 @@ export function WorkloadsPanel() {
           </div>
         )}
         {wlQ.isLoading && <div className="text-sm text-gray-500">Loading…</div>}
+        {profilesInitialLoading && (
+          <div role="status" aria-live="polite" className="sr-only">Loading workload visualizations…</div>
+        )}
 
         {/* Front door: first-run onboarding. When the estate has no workloads yet, lead
             with Autopilot so new users map their whole estate in one motion. */}
         {!wlQ.isLoading && workloads.length === 0 && !showTrash && (
-          <div className="rounded-xl border border-brand/30 bg-gradient-to-br from-brand/5 to-transparent p-6">
+          <div className="rounded-xl border border-brand/30 bg-linear-to-br from-brand/5 to-transparent p-6">
             <div className="flex items-start gap-4">
               <div className="text-3xl">✨</div>
               <div className="min-w-0 flex-1">
@@ -1101,7 +1170,7 @@ export function WorkloadsPanel() {
           <FleetCockpit profiles={profilesQ.data!.profiles} onFilter={setFleetFilter} activeFilter={fleetFilter} />
         )}
 
-        {selected.size > 0 && (
+        {!showTrash && selected.size > 0 && (
           <div className="flex items-center gap-3 rounded-lg border border-brand/30 bg-brand/5 px-3 py-2 text-sm">
             <span className="font-medium text-brand">{selected.size} selected</span>
             <button onClick={launchFleet} disabled={launchingMissions} className="rounded-lg bg-brand px-3 py-1.5 text-xs font-semibold text-white hover:bg-brand-dark disabled:opacity-50">
@@ -1123,6 +1192,14 @@ export function WorkloadsPanel() {
             <button onClick={() => setGrouping(true)} className="rounded-lg border border-indigo-300 bg-white px-3 py-1.5 text-xs font-semibold text-indigo-600 hover:bg-indigo-50" title="Group the selected workloads as one application / service family (they stay separate — this is not a merge)">
               ⊞ Group{selected.size > 1 ? ` ${selected.size}` : ""}
             </button>
+            <button
+              onClick={() => void bulkTrashSelected()}
+              disabled={bulkDeleting || selected.size > 500}
+              className="rounded-lg border border-red-300 bg-white px-3 py-1.5 text-xs font-semibold text-red-700 hover:bg-red-50 disabled:opacity-50"
+              title={selected.size > 500 ? "Select at most 500 workloads per bulk operation" : "Move selected workload definitions to Trash; Azure resources are untouched"}
+            >
+              {bulkDeleting ? "Moving to Trash…" : `🗑 Move ${selected.size} to Trash`}
+            </button>
             <button onClick={() => setSelected(new Set())} className="text-xs text-gray-500 hover:text-gray-700">Clear</button>
           </div>
         )}
@@ -1135,7 +1212,7 @@ export function WorkloadsPanel() {
                 <button
                   key={v}
                   onClick={() => setViewMode(v)}
-                  className={`rounded-md px-2.5 py-1 capitalize ${view === v ? "bg-white font-medium text-gray-900 shadow-sm" : "text-gray-500"}`}
+                  className={`rounded-md px-2.5 py-1 capitalize ${view === v ? "bg-white font-medium text-gray-900 shadow-xs" : "text-gray-500"}`}
                 >
                   {v === "cards" ? "\u25a6 Cards" : v === "table" ? "\u25a4 Table" : v === "board" ? "\u25a5 Board" : "\u2735 Map"}
                 </button>
@@ -1196,6 +1273,48 @@ export function WorkloadsPanel() {
                 <button onClick={() => setSearch("")} title="Clear" className="absolute right-1.5 top-1/2 -translate-y-1/2 text-xs text-gray-400 hover:text-gray-600">✕</button>
               )}
             </div>
+            <label className="inline-flex items-center gap-1 text-xs text-gray-500" title="Show workloads with at least this many resources">
+              <span>Resources</span>
+              <input
+                type="number"
+                min={0}
+                value={minResources}
+                onChange={(e) => {
+                  setMinResources(e.target.value);
+                  localStorage.setItem("azsup.workloads.minResources", e.target.value);
+                }}
+                placeholder="min"
+                aria-label="Minimum workload resources"
+                className="w-16 rounded-lg border px-1.5 py-1 text-xs"
+              />
+              <span>–</span>
+              <input
+                type="number"
+                min={0}
+                value={maxResources}
+                onChange={(e) => {
+                  setMaxResources(e.target.value);
+                  localStorage.setItem("azsup.workloads.maxResources", e.target.value);
+                }}
+                placeholder="max"
+                aria-label="Maximum workload resources"
+                className="w-16 rounded-lg border px-1.5 py-1 text-xs"
+              />
+              {(minResources || maxResources) && (
+                <button
+                  onClick={() => {
+                    setMinResources("");
+                    setMaxResources("");
+                    localStorage.removeItem("azsup.workloads.minResources");
+                    localStorage.removeItem("azsup.workloads.maxResources");
+                  }}
+                  title="Clear resource-count filter"
+                  className="text-gray-400 hover:text-gray-600"
+                >
+                  ✕
+                </button>
+              )}
+            </label>
             {/* Sort — affects cards, table, board and map. */}
             <label className="inline-flex items-center gap-1 text-xs text-gray-500">
               <span className="text-gray-400">↕</span>
@@ -1223,7 +1342,7 @@ export function WorkloadsPanel() {
               </span>
             ))}
             <button onClick={saveCurrentView} className="rounded-full border border-dashed px-2.5 py-1 text-xs text-gray-500 hover:border-brand hover:text-brand" title="Save the current layout + filter as a view">+ Save view</button>
-            <span className="ml-auto text-xs text-gray-400">
+            <span className="ml-auto text-xs text-gray-600">
               {visibleWorkloads.length} of {workloads.length}
               {profilesQ.isFetching && " · refreshing profiles…"}
             </span>
@@ -1235,7 +1354,7 @@ export function WorkloadsPanel() {
           <div className="flex flex-wrap items-center gap-x-3 gap-y-1.5">
             {CLASS_FACETS.map(({ facet, label, values }) => (
               <div key={facet} className="flex flex-wrap items-center gap-1">
-                <span className="text-[10px] font-semibold uppercase tracking-wide text-gray-400">{label}</span>
+                <span className="text-[10px] font-semibold uppercase tracking-wide text-gray-600">{label}</span>
                 {values.map((v) => {
                   const token = `${facet}:${v}`;
                   const on = classFilters.has(token);
@@ -1244,7 +1363,7 @@ export function WorkloadsPanel() {
                       key={token}
                       onClick={() => toggleClassFilter(token)}
                       className={`rounded-full border px-2 py-0.5 text-[11px] font-medium capitalize transition ${
-                        on ? "border-brand bg-brand/10 text-brand" : "border-gray-200 text-gray-500 hover:bg-gray-50"
+                        on ? "border-brand bg-brand/10 text-brand-dark" : "border-gray-200 text-gray-500 hover:bg-gray-50"
                       }`}
                     >
                       {v}
@@ -1316,7 +1435,7 @@ export function WorkloadsPanel() {
         )}
 
         {showTrash && (
-          <div className="rounded-xl border border-gray-200 bg-white p-4 shadow-sm">
+          <div className="rounded-xl border border-gray-200 bg-white p-4 shadow-xs">
             <div className="mb-3 flex items-center justify-between">
               <div>
                 <h2 className="flex items-center gap-2 text-sm font-semibold text-gray-800">
@@ -1488,7 +1607,7 @@ export function WorkloadForm({
           <h2 className="text-lg font-semibold text-gray-800">
             {form.id ? "Edit workload" : "New workload"}
           </h2>
-          <button onClick={onClose} className="rounded p-1.5 text-gray-400 hover:bg-gray-100">✕</button>
+          <button onClick={onClose} className="rounded-sm p-1.5 text-gray-400 hover:bg-gray-100">✕</button>
         </div>
 
         <div className="min-h-0 flex-1 space-y-3 overflow-y-auto px-6 py-5">

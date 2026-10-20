@@ -6,13 +6,15 @@ grand_parent: How-to guides
 nav_order: 51
 description: Add, test, select, and retire supported model providers without exposing credentials.
 permalink: /how-to/administration/ai-providers/
+feature_ids: [ADMIN_NAV:providers]
 ---
 
 # Configure AI providers
 
 ## Prerequisites
 
-- Product permission `settings.write`.
+- Product permissions `settings.read` and `settings.write`. The route and provider/status reads
+	use the read key; save, test, model refresh, visibility, and OAuth mutations use the write key.
 - A provider account, approved model, and either the credential or OAuth access required by the provider card.
 - Network egress from the application to a hosted endpoint, or reachability to an Ollama or LM Studio endpoint.
 
@@ -22,6 +24,12 @@ permalink: /how-to/administration/ai-providers/
 - Open `/admin/usage`.
 
 ## How to configure and verify an AI provider
+
+The following local test-data examples show the fields for steps 1–2 only. Both forms are **unsaved**: no actual OAuth sign-in, provider request, or Azure connectivity was verified. Complete the save and verification steps with your own approved configuration.
+
+{% include screenshot.html file="admin-provider-openai-draft.png" title="Choose an OpenAI model before saving" caption="The synthetic model entry shows where to select a model; the API-key field remains empty. Neither the Default label nor this unsaved form proves the provider works." %}
+
+{% include screenshot.html file="admin-provider-azure-openai-draft.png" title="Enter Azure OpenAI endpoint and deployment details" caption="Review endpoint, API version, and deployment name together. The displayed endpoint is deliberately nonfunctional, the API key is empty, and Save changes and Test connection were not used." %}
 
 1. Select a provider card. The live catalog is authoritative; it includes key-based, OAuth, Azure OpenAI, routing, and local OpenAI-compatible providers supported by the build.
 2. Enter only fields displayed for that provider: model, credential or OAuth sign-in, and an endpoint or API version when shown.
@@ -45,7 +53,7 @@ Provider requests can transmit prompts and retrieved context outside the applica
 
 | Symptom | Resolution |
 | --- | --- |
-| Unexpected result | Re-check route, permissions, and latest refresh state before retrying. |
+| Test response comes from an unintended provider or model | Reopen the active-provider selection, verify endpoint and model entitlement, save the intended provider, and repeat the minimal test. |
 | DNS or connection stage fails | Check the visible endpoint, container egress, proxy/firewall, and TLS trust. |
 | Authentication fails | Re-enter the key or complete OAuth again; confirm account scope and expiry. |
 | Model list is empty | Refresh, check account entitlement, and clear hidden or free-only filters. |

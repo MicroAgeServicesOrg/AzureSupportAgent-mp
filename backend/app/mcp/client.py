@@ -13,19 +13,28 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import json
 import os
 import re as _re
+import shutil
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Any
-
-from mcp import ClientSession, StdioServerParameters
-from mcp.client.stdio import stdio_client
-from mcp import types as mcp_types
 
 from app.agent.provider import ToolSpec
 
+# The `mcp` SDK (~219 ms) is imported inside the three call sites that use it, not here.
+# This module is imported at startup to register routes, but a request that never spawns an
+# MCP server should not pay for the SDK.
+
 _READ_VERBS = ("list", "get", "show", "describe", "query", "read", "check", "diagnose")
+
+# Some Azure MCP extension tools are adapters around separately-installed executables.
+_TOOL_EXECUTABLES: dict[str, tuple[str, str]] = {
+    "azd": ("azd", "Azure Developer CLI"),
+    "extension_azqr": ("azqr", "Azure Quick Review CLI"),
+}
+_READ_ONLY_TOOL_OVERRIDES = frozenset({"extension_azqr"})
 
 # Short-lived cache of the discovered tool catalog, keyed by spawn config. Listing
 # tools spawns a fresh `npx @azure/mcp` process, so caching avoids that cost on every
@@ -58,6 +67,8 @@ def classify_tool(name: str) -> str:
     """Return 'read' or 'write' for a tool name. Defaults to 'write' when ambiguous
     to stay safe (gated). When the server runs read-only, only read tools exist."""
     lowered = name.lower()
+    if lowered in _READ_ONLY_TOOL_OVERRIDES:
+        return "read"
     if any(v in lowered for v in _READ_VERBS):
         return "read"
     return "write"
@@ -132,6 +143,53 @@ class DiscoveredTool:
     description: str
     parameters: dict[str, Any]
     kind: str  # read | write
+    available: bool = True
+    unavailable_reason: str = ""
+
+
+def tool_runtime_availability(name: str) -> tuple[bool, str]:
+    """Whether a discovered adapter's external runtime dependency can execute."""
+    requirement = _TOOL_EXECUTABLES.get((name or "").lower())
+    if requirement is None:
+        return True, ""
+    executable, label = requirement
+    if shutil.which(executable):
+        return True, ""
+    return False, f"{label} executable '{executable}' was not found in PATH."
+
+
+def refresh_runtime_availability(tools: list[DiscoveredTool]) -> list[DiscoveredTool]:
+    """Refresh runtime status even when the MCP catalog itself came from cache."""
+    refreshed: list[DiscoveredTool] = []
+    for tool in tools:
+        available, reason = tool_runtime_availability(tool.name)
+        refreshed.append(replace(tool, available=available, unavailable_reason=reason))
+    return refreshed
+
+
+def normalize_structured_result(result: dict[str, Any]) -> dict[str, Any]:
+    """Honor structured failure fields when an MCP adapter leaves isError false."""
+    if result.get("isError"):
+        return result
+    for block in result.get("content") or []:
+        if not isinstance(block, str):
+            continue
+        try:
+            payload = json.loads(block)
+        except (json.JSONDecodeError, TypeError):
+            continue
+        if not isinstance(payload, dict):
+            continue
+        status = payload.get("status")
+        try:
+            failed_status = int(status) >= 400
+        except (TypeError, ValueError):
+            failed_status = False
+        explicit_failure = payload.get("success") is False
+        explicit_error = bool(payload.get("error"))
+        if failed_status or explicit_failure or explicit_error:
+            return {**result, "isError": True}
+    return result
 
 
 async def _consent_elicitation_callback(context: Any, params: Any):
@@ -170,6 +228,8 @@ async def _consent_elicitation_callback(context: Any, params: Any):
                 content[key] = "yes"
     except Exception:  # noqa: BLE001 - best-effort; still accept below
         content = {}
+    from mcp import types as mcp_types
+
     return mcp_types.ElicitResult(action="accept", content=content or None)
 
 
@@ -205,6 +265,7 @@ class MCPClient:
         cleanup_paths: list[str] | None = None,
         classifier: Any = None,
         env_clear: list[str] | None = None,
+        artifact_chat_id: str = "",
     ) -> None:
         full_args = list(args)
         if read_only and "--read-only" not in full_args:
@@ -214,6 +275,7 @@ class MCPClient:
         # in a guaranteed read-only mode. Defaults to the Azure namespace-tool heuristic;
         # the EntraID client passes its own verb-prefix classifier.
         self._classifier = classifier or classify_tool
+        self._artifact_chat_id = artifact_chat_id
         self._cleanup_paths = list(cleanup_paths or [])
         env = dict(os.environ)
         # Strip inherited credential env vars FIRST so a spawned server can never
@@ -233,6 +295,8 @@ class MCPClient:
             for k, v in env_overrides.items():
                 if v:
                     env[k] = v
+        from mcp import StdioServerParameters
+
         self._params = StdioServerParameters(command=command, args=full_args, env=env)
         # --- Pooled session state --------------------------------------------------
         # Reuse ONE long-lived stdio session for call_tool so back-to-back and parallel
@@ -305,6 +369,9 @@ class MCPClient:
 
     @contextlib.asynccontextmanager
     async def _session(self):
+        from mcp import ClientSession
+        from mcp.client.stdio import stdio_client
+
         async with stdio_client(self._params) as (read, write):
             # Provide an elicitation callback so the Azure MCP server will run
             # destructive operations (it otherwise rejects them when the client can't
@@ -322,7 +389,7 @@ class MCPClient:
         cache_key = self._catalog_cache_key()
         cached = _catalog_cache_get(cache_key)
         if cached is not None:
-            return cached
+            return refresh_runtime_availability(cached)
         async with self._session() as session:
             resp = await session.list_tools()
             tools: list[DiscoveredTool] = []
@@ -341,9 +408,43 @@ class MCPClient:
                     )
                 )
             _catalog_cache_set(cache_key, tools)
-            return tools
+            return refresh_runtime_availability(tools)
 
     async def call_tool(self, name: str, arguments: dict[str, Any]) -> dict[str, Any]:
+        if (
+            name == "arm"
+            and str((arguments or {}).get("command") or "") == "execute_query"
+        ):
+            parameters = (arguments or {}).get("parameters") or {}
+            query = str(parameters.get("query") or "").strip()
+            if not query:
+                return {"isError": True, "content": ["Resource Graph query is required."]}
+            validation = await self.call_tool(
+                "arm", {"command": "validate_query", "parameters": {"query": query}},
+            )
+            if validation.get("isError"):
+                return validation
+            validation_payload: dict[str, Any] = {}
+            for block in validation.get("content") or []:
+                if not isinstance(block, str):
+                    continue
+                try:
+                    parsed = json.loads(block)
+                except json.JSONDecodeError:
+                    continue
+                if isinstance(parsed, dict):
+                    validation_payload = parsed
+                    break
+            if validation_payload.get("isValid") is not True:
+                detail = str(
+                    validation_payload.get("syntaxErrors")
+                    or validation_payload.get("message")
+                    or "Azure rejected the generated Resource Graph query."
+                )
+                return {
+                    "isError": True,
+                    "content": [f"Resource Graph query validation failed: {detail[:800]}"],
+                }
         # Preferred path: dispatch onto the pooled long-lived session so we don't spawn
         # a fresh `npx @azure/mcp` per call. Falls back to a one-shot session when
         # pooling is disabled, the pool can't start, or the session broke mid-call.
@@ -360,7 +461,17 @@ class MCPClient:
                 pass
         async with self._session() as session:
             result = await session.call_tool(name, arguments)
-            return {"isError": result.isError, "content": _extract_call_content(result)}
+            return await self._normalize_result(
+                name, {"isError": result.isError, "content": _extract_call_content(result)},
+            )
+
+    async def _normalize_result(self, name: str, result: dict[str, Any]) -> dict[str, Any]:
+        result = normalize_structured_result(result)
+        if name != "extension_azqr":
+            return result
+        from app.agent.file_artifacts import ingest_azqr_result
+
+        return await asyncio.to_thread(ingest_azqr_result, result, self._artifact_chat_id)
 
     # ------------------------------------------------------------------ pooling
     async def _ensure_pool(self) -> bool:
@@ -448,7 +559,10 @@ class MCPClient:
         try:
             result = await session.call_tool(name, arguments)
             if not fut.done():
-                fut.set_result({"isError": result.isError, "content": _extract_call_content(result)})
+                normalized = await self._normalize_result(
+                    name, {"isError": result.isError, "content": _extract_call_content(result)},
+                )
+                fut.set_result(normalized)
         except asyncio.CancelledError:
             if not fut.done():
                 fut.cancel()
@@ -481,7 +595,12 @@ class MCPClient:
         ]
 
 
-def build_mcp_client(settings, connection: dict[str, Any] | None = None) -> "MCPClient":
+def build_mcp_client(
+    settings,
+    connection: dict[str, Any] | None = None,
+    *,
+    artifact_chat_id: str = "",
+) -> "MCPClient":
     """Construct an MCPClient from application settings and an optional Azure connection.
 
     The read-only flag prefers the connection's own setting, then the runtime app
@@ -520,6 +639,7 @@ def build_mcp_client(settings, connection: dict[str, Any] | None = None) -> "MCP
         token_credentials=token_credentials,
         env_overrides=env_overrides,
         cleanup_paths=cleanup_paths,
+        artifact_chat_id=artifact_chat_id,
     )
 
 

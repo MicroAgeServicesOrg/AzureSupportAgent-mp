@@ -502,9 +502,18 @@ def render_markdown(
 
     # First pass: gather the sections that actually have content (after cleaning).
     rendered: list[tuple[str, str]] = []  # (label, content)
-    for s in know_me.get("sections", []) or []:
+    document_sections = list(know_me.get("sections", []) or [])
+    if know_me.get("composite_sla") and not any(s.get("key") == "resiliency_dr" for s in document_sections):
+        document_sections.append({"key": "resiliency_dr", "label": section_label("resiliency_dr"), "content": ""})
+    for s in document_sections:
         label = s.get("label") or section_label(str(s.get("key", "")))
         content = clean_section_content(str(s.get("content") or ""), label).strip()
+        if s.get("key") == "resiliency_dr" and know_me.get("composite_sla"):
+            from app.knowme.sla import render_subsection
+
+            content = content + "\n\n" + render_subsection(know_me["composite_sla"])
+            if know_me.get("composite_sla_stale"):
+                content += "\n\n**Stale snapshot:** known architecture, scope or calculation sources changed. Refresh and review before relying on this result."
         if not content:
             continue
         if apply_values:

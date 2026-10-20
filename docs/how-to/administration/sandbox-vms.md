@@ -6,6 +6,7 @@ grand_parent: How-to guides
 nav_order: 53
 description: Register, test, use, disable, and remove dedicated SSH diagnostic hosts safely.
 permalink: /how-to/administration/sandbox-vms/
+feature_ids: [ADMIN_NAV:sandboxvms]
 ---
 
 # Manage Sandbox VMs
@@ -22,6 +23,10 @@ permalink: /how-to/administration/sandbox-vms/
 
 ## How to register and test a Sandbox VM
 
+{% include screenshot.html file="flife-sandbox-key-draft.png" title="Prepare an SSH-key draft without saving it" caption="This unsaved example shows the SSH private key and optional passphrase fields left empty, a dummy workload association, Strict mode on, Allow sudo off, and Disabled on. It demonstrates form fields only; no credentials were supplied, VM registered, or SSH test or probe performed." %}
+
+{% include screenshot.html file="flife-sandbox-password-draft.png" title="Compare the password-authentication fields" caption="The alternative unsaved draft shows an empty Password field and the same restrictive settings. A filled host label or workload association does not prove network reachability. No save, credential transmission, connectivity test, or diagnostic command occurred." %}
+
 1. Select **Add VM** and enter display name, host, port, username, and the displayed SSH authentication fields.
 2. Keep **Strict mode** enabled. Leave **Allow sudo** off unless the diagnostic account and procedure require it.
 3. Add workload associations or a VNet label only when they are visible and useful for scoping.
@@ -34,6 +39,8 @@ permalink: /how-to/administration/sandbox-vms/
 
 **Verification:** Confirm the detected host and tools match the intended VM. Verify exit code and output rather than treating command submission as success.
 
+{% include screenshot.html file="flife-sandbox-recorded-history.png" title="Locate Recent runs before interpreting an outcome" caption="The expanded history contrasts blocked, failed, and succeeded dummy records. These invented statuses and durations do not demonstrate enforcement, a timeout, or a successful SSH, DNS, or HTTP operation. No command was executed for this screenshot; verify real output separately." %}
+
 ## Safety and rollback
 
 Validate changes in a non-production scope first, and preserve a known-good configuration for rollback.
@@ -44,7 +51,7 @@ Commands run on the remote host and may be irreversible. Keep strict mode on, us
 
 | Symptom | Resolution |
 | --- | --- |
-| Unexpected result | Re-check route, permissions, and latest refresh state before retrying. |
+| Command ran on the wrong sandbox VM | Stop further runs, verify the selected VM and workload links, inspect run history, reverse the remote change, and rotate credentials if output exposed them. |
 | SSH test fails | Check DNS, route, firewall/NSG, port, username, key format, and source-network allowlisting. |
 | Host key differs | Stop and verify the expected fingerprint before accepting a changed host. |
 | Tool is missing | Install it through the VM's approved maintenance process; automatic installation changes the host. |
@@ -53,6 +60,6 @@ Commands run on the remote host and may be irreversible. Keep strict mode on, us
 ## Related docs
 
 - [How-to guides]({{ site.baseurl }}/how-to/)
-- [Sandbox VM reference]({{ site.baseurl }}/admin/azure-tenants-sandbox-vms/)
+- [Sandbox VM reference]({{ site.baseurl }}/admin/sandbox-vms/)
 - [Approvals]({{ site.baseurl }}/security/approvals/)
 - [Auditing]({{ site.baseurl }}/security/auditing/)

@@ -11,7 +11,7 @@ Three rules the rest of the feature depends on:
    directory, is often exactly what the reader clicked to find out about. Raising 404
    would throw away the answer.
 2. **Capabilities are decided once, here.** A group has no sign-ins, a managed identity
-   has no MFA, a guest has no licences. The UI renders whatever ``capabilities`` says and
+   has no MFA, a guest has no licenses. The UI renders whatever ``capabilities`` says and
    never switches on ``kind`` — otherwise the component grows a bug per new kind.
 3. **Unreadable is not empty.** Every section carries provenance saying where it came
    from, when, and whether it was truncated or unreadable. A section we could not read
@@ -19,6 +19,7 @@ Three rules the rest of the feature depends on:
 """
 from __future__ import annotations
 
+import asyncio
 from typing import Any
 
 from app.iam import schema as iam_schema
@@ -51,10 +52,17 @@ CAP_ACCESS = "access"
 CAP_FINDINGS = "findings"
 CAP_TIMELINE = "timeline"
 CAP_SIGNINS = "signins"
+# Non-interactive sign-ins are a separate capability, not a detail of the one above: only a
+# user has them, and they are read from a different endpoint that a tenant can have disabled.
+CAP_SIGNINS_NONINTERACTIVE = "signins_noninteractive"
 CAP_AUDIT = "audit"
 CAP_AZURE_ACTIVITY = "azure_activity"
 CAP_RISK = "risk"
 CAP_MEMBERS = "members"
+# The way UP. `members` and `memberships` are opposite directions through the same edge and
+# are deliberately two capabilities: "who is in this group" and "which groups is this in"
+# have different readers, different sources and different completeness.
+CAP_MEMBERSHIPS = "memberships"
 CAP_CREDENTIALS = "credentials"
 CAP_OWNING_RESOURCE = "owning_resource"
 CAP_REGISTRATION = "registration"
@@ -63,15 +71,19 @@ CAP_REGISTRATION = "registration"
 # silently dropped, so "no sign-in section" reads as "groups do not sign in" and not as
 # "this group has never signed in".
 _CAPABILITIES_BY_KIND: dict[str, tuple[str, ...]] = {
-    KIND_USER: (CAP_ACCESS, CAP_FINDINGS, CAP_TIMELINE, CAP_SIGNINS, CAP_AUDIT,
-                CAP_AZURE_ACTIVITY, CAP_RISK, CAP_REGISTRATION),
-    KIND_GUEST: (CAP_ACCESS, CAP_FINDINGS, CAP_TIMELINE, CAP_SIGNINS, CAP_AUDIT,
-                 CAP_AZURE_ACTIVITY, CAP_RISK, CAP_REGISTRATION),
-    KIND_GROUP: (CAP_ACCESS, CAP_FINDINGS, CAP_TIMELINE, CAP_MEMBERS),
+    KIND_USER: (CAP_ACCESS, CAP_FINDINGS, CAP_TIMELINE, CAP_SIGNINS,
+                CAP_SIGNINS_NONINTERACTIVE, CAP_AUDIT,
+                CAP_AZURE_ACTIVITY, CAP_RISK, CAP_REGISTRATION, CAP_MEMBERSHIPS),
+    KIND_GUEST: (CAP_ACCESS, CAP_FINDINGS, CAP_TIMELINE, CAP_SIGNINS,
+                 CAP_SIGNINS_NONINTERACTIVE, CAP_AUDIT,
+                 CAP_AZURE_ACTIVITY, CAP_RISK, CAP_REGISTRATION, CAP_MEMBERSHIPS),
+    # A group is both: it contains members and is itself nested inside other groups, and
+    # the way up is the escalation path a recertification reader is looking for.
+    KIND_GROUP: (CAP_ACCESS, CAP_FINDINGS, CAP_TIMELINE, CAP_MEMBERS, CAP_MEMBERSHIPS),
     KIND_SP: (CAP_ACCESS, CAP_FINDINGS, CAP_TIMELINE, CAP_SIGNINS, CAP_AUDIT,
-              CAP_AZURE_ACTIVITY, CAP_CREDENTIALS),
+              CAP_AZURE_ACTIVITY, CAP_CREDENTIALS, CAP_MEMBERSHIPS),
     KIND_MI: (CAP_ACCESS, CAP_FINDINGS, CAP_TIMELINE, CAP_SIGNINS, CAP_AUDIT,
-              CAP_AZURE_ACTIVITY, CAP_CREDENTIALS, CAP_OWNING_RESOURCE),
+              CAP_AZURE_ACTIVITY, CAP_CREDENTIALS, CAP_OWNING_RESOURCE, CAP_MEMBERSHIPS),
     KIND_PLATFORM: (),
     KIND_UNKNOWN: (),
 }
@@ -82,11 +94,15 @@ _CAPABILITIES_UNRESOLVED = (CAP_ACCESS, CAP_FINDINGS, CAP_TIMELINE)
 
 _ABSENCE_REASON = {
     CAP_SIGNINS: "Groups do not sign in — there is no sign-in history to read.",
+    CAP_SIGNINS_NONINTERACTIVE: (
+        "Non-interactive sign-ins are a user category. A workload identity's own sign-ins are "
+        "already the whole of its sign-in history, and groups do not sign in at all."),
     CAP_AUDIT: "Groups do not act; they are acted upon. Audit events name the actor, not the group.",
     CAP_AZURE_ACTIVITY: "Groups do not act, so they never appear as the actor on an Azure change.",
     CAP_RISK: "Identity Protection scores users, not workload identities or groups.",
     CAP_REGISTRATION: "Authentication-method registration applies to users only.",
     CAP_MEMBERS: "Only groups have members.",
+    CAP_MEMBERSHIPS: "Only a directory object can belong to a group.",
     CAP_CREDENTIALS: "Only workload identities carry credentials.",
     CAP_OWNING_RESOURCE: "Only a managed identity is owned by an Azure resource.",
 }
@@ -101,7 +117,7 @@ def capabilities_for(kind: str, resolution: str) -> tuple[list[str], list[str]]:
         note = {
             DELETED: "This object no longer exists in the directory, so only the access it "
                      "left behind can be read. Assignments outlive the principal.",
-            CROSS_TENANT: "This principal lives in another organisation's directory "
+            CROSS_TENANT: "This principal lives in another organization's directory "
                           "(Azure Lighthouse). We can name it and show what it reaches here, "
                           "but nothing about the principal itself is readable from this tenant.",
             UNREADABLE: "The directory could not be read, so we cannot say what this principal "
@@ -113,7 +129,8 @@ def capabilities_for(kind: str, resolution: str) -> tuple[list[str], list[str]]:
     notes: list[str] = []
     if kind in (KIND_GROUP, KIND_SP, KIND_MI):
         for cap, reason in _ABSENCE_REASON.items():
-            if cap not in caps and cap in (CAP_SIGNINS, CAP_AUDIT, CAP_RISK, CAP_REGISTRATION):
+            if cap not in caps and cap in (CAP_SIGNINS, CAP_SIGNINS_NONINTERACTIVE,
+                                           CAP_AUDIT, CAP_RISK, CAP_REGISTRATION):
                 notes.append(reason)
     if kind == KIND_PLATFORM:
         notes.append("This is Azure acting on its own behalf, not a principal in your "
@@ -413,10 +430,10 @@ async def build_dossier(
 ) -> tuple[dict[str, Any], dict[str, Any]]:
     """Everything already collected about one principal. Reads caches only.
 
-    Returns ``(envelope, sections)``. Makes no Graph or ARM call — behavioural history is
+    Returns ``(envelope, sections)``. Makes no Graph or ARM call — behavioral history is
     a separate, permissioned, explicitly-requested endpoint."""
     from app.entra import activations_ledger, model
-    from app.entra.collectors.roles import effective_role_names
+    from app.entra.collectors.roles import effective_role_names, tier_of
     from app.iam import diff as iam_diff
     from app.iam import store as iam_store
 
@@ -489,6 +506,13 @@ async def build_dossier(
             # role right now. These two split it without changing that contract.
             "directory_roles_active": sorted(active_role_names),
             "directory_roles_eligible_only": sorted(eligible_role_names - active_role_names),
+            # Graded here, by the same function the collector and the scoring use. A second
+            # list of role names in the UI would be a second definition of "tenant takeover",
+            # and the two would drift the first time Microsoft adds a role.
+            "directory_role_tiers": {
+                name: tier_of(name)
+                for name in effective_role_names(roles_data, subject_id)
+            },
             "directory_assignments": directory_assignments,
             "azure": (link.get("principals") or {}).get(subject_id),
             "azure_assignments": azure_matches[:500],
@@ -549,8 +573,6 @@ async def build_dossier(
     # access through this group" and CANNOT answer "through which nested group" — the tree
     # for that is fetched live, on demand, by the members endpoint.
     if subject.get("kind") == KIND_GROUP:
-        import asyncio
-
         from app.entra import investigate_members
 
         # OFF the event loop. It is a synchronous disk read plus a JSON parse of the whole
@@ -586,6 +608,41 @@ async def build_dossier(
             ),
         )
 
+    # --- memberships: the way UP, for everything that can be in a group ----------
+    # The reverse of `members`, and a separate section because it has a separate honesty
+    # problem: nobody expands a whole directory, so this is a floor and never a total. The
+    # sources it does have are the ones that matter — a group is listed here because it
+    # grants Azure RBAC, grants a directory role, or is named by a CA policy.
+    if CAP_MEMBERSHIPS in env["capabilities"]:
+        from app.entra import investigate_members
+
+        # Same rule as `members`: the index build reads and parses the directory blob, so it
+        # must not run on the loop even though it is memoised — the first caller pays it.
+        groups, readable, coverage = await asyncio.to_thread(
+            investigate_members.cached_memberships,
+            tenant_id,
+            subject_id,
+            stamp=generated_at,
+            roles_data=roles_data,
+            ca_data=data.get("ca") or {},
+            people_groups=(data.get("people") or {}).get("groups") or [],
+        )
+        sections["memberships"] = section(
+            {
+                "groups": groups,
+                "count": len(groups),
+                "readable": readable,
+                "role_assignable_count": sum(1 for g in groups if g["role_assignable"]),
+                "source_labels": investigate_members.SOURCE_LABEL,
+            },
+            provenance(
+                "Azure access cache + the group expansions from the last directory collection",
+                collected_at=generated_at,
+                unreadable=not readable,
+                reason=coverage,
+            ),
+        )
+
     return env, sections
 
 
@@ -618,7 +675,7 @@ def recent_entries(
         if connection_id and str(meta.get("connection_id") or "") != connection_id:
             continue
         resolution = str(meta.get("resolution") or RESOLVED)
-        # An identifier nothing ever recognised is junk to return to — a mistyped id, or a
+        # An identifier nothing ever recognized is junk to return to — a mistyped id, or a
         # path segment that reached the dossier route. DELETED and CROSS_TENANT are kept on
         # purpose: those resolved to a real answer, and are often the answer worth revisiting.
         if resolution == NOT_FOUND:

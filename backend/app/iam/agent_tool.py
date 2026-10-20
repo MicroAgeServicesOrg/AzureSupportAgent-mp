@@ -238,7 +238,7 @@ def _make_escalation_paths(tenant_id: str):
                 # An escalation map that could not see managed identities reporting no paths is
                 # the most dangerous false negative in the product.
                 body += "\n\nThis is NOT an all-clear — the analysis could not see:\n" + "\n".join(
-                    f"- {l}" for l in limits[:6]
+                    f"- {limitation}" for limitation in limits[:6]
                 )
             return ok(body)
         lines = [f"{len(paths)} escalation path(s):", ""]
@@ -248,7 +248,7 @@ def _make_escalation_paths(tenant_id: str):
                 f"[confidence: {p.get('confidence')}]"
             )
         if limits:
-            lines += ["", "Not visible to this analysis:"] + [f"- {l}" for l in limits[:6]]
+            lines += ["", "Not visible to this analysis:"] + [f"- {limitation}" for limitation in limits[:6]]
         return ok("\n".join(lines))
 
     return _handler
@@ -259,7 +259,7 @@ def _make_unused_permissions(tenant_id: str):
         analysis = cache.read_rightsizing(tenant_id)
         if not analysis.get("measured"):
             # "Nothing unused" and "we never measured usage" must not read the same, especially
-            # to a model that will summarise this into a recommendation.
+            # to a model that will summarize this into a recommendation.
             reasons = analysis.get("limitations") or ["Usage has not been collected."]
             return ok(
                 "UNMEASURED — usage has not been collected for this tenant, so nothing here is a "
@@ -293,8 +293,8 @@ def _make_unused_permissions(tenant_id: str):
                 f"- {r.get('principalName')}: {', '.join(r.get('currentRoles', []))} "
                 f"[{r.get('confidence')} confidence]{narrower}"
             )
-        for l in (analysis.get("limitations") or [])[:4]:
-            lines.append(f"! {l}")
+        for limitation in (analysis.get("limitations") or [])[:4]:
+            lines.append(f"! {limitation}")
         return ok("\n".join(lines))
 
     return _handler
@@ -338,8 +338,8 @@ def _make_simulate_revoke(tenant_id: str):
                 "- NOTE: this changes NOTHING — the same access is still granted by another "
                 "assignment or path."
             )
-        for l in (result.get("limitations") or [])[:5]:
-            lines.append(f"! {l}")
+        for limitation in (result.get("limitations") or [])[:5]:
+            lines.append(f"! {limitation}")
         return ok("\n".join(lines))
 
     return _handler
@@ -405,15 +405,20 @@ def _make_who_can_reach_resource(tenant_id: str):
             )
             flag = " ⚠privileged" if p["privileged"] else ""
             dead = " [DELETED PRINCIPAL]" if p["principalExists"] == schema.EXISTS_FALSE else ""
-            lines.append(f"- {p['principalName'] or p['principalId']}{flag}{dead}: {grants}")
+            off = (
+                " [DISABLED ACCOUNT — dormant, restored on re-enable]"
+                if p.get("principalAccountEnabled") == schema.ENABLED_FALSE
+                else ""
+            )
+            lines.append(f"- {p['principalName'] or p['principalId']}{flag}{dead}{off}: {grants}")
         bypass = out.get("bypass") or {}
         if not bypass.get("measured"):
             lines += ["", f"! {bypass.get('reason')}"]
         elif bypass.get("openDoors"):
             lines += ["", "RBAC is not the only door into this resource:"]
             lines += [f"- {d['title']}" for d in bypass["openDoors"]]
-        for l in out.get("limitations", [])[:4]:
-            lines.append(f"! {l}")
+        for limitation in out.get("limitations", [])[:4]:
+            lines.append(f"! {limitation}")
         return ok("\n".join(lines))
 
     return _handler
@@ -572,7 +577,7 @@ def build_iam_tools(tenant_id: str) -> list[ConnectorTool]:
         ConnectorTool(
             name="access_changed_since",
             description=(
-                "Summarise authorization changes since the previous cached scan — new access, "
+                "Summarize authorization changes since the previous cached scan — new access, "
                 "widened scope, escalated privilege. Says so when there is no baseline to "
                 "compare against instead of reporting no changes. Read-only."
             ),

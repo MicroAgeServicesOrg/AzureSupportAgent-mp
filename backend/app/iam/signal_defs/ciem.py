@@ -12,7 +12,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from app.iam import diff as diff_mod, effective, usage
+from app.iam import diff as diff_mod, usage
 from app.iam.signals import Finding, SignalContext, SignalSpec
 
 #: A principal holding a privileged role that only ever read is the clearest CIEM finding there
@@ -41,11 +41,15 @@ def _overprivileged(ctx: SignalContext) -> list[Finding]:
             # A low-confidence "unused" is not a finding, it is a prompt to collect more data.
             continue
         proposal = rec.get("recommendation")
+        # Right-sizing intentionally emits one recommendation per current role. A principal can
+        # hold Owner and Contributor at the same scope, so principal+scope alone is not unique:
+        # it made the two findings share a fingerprint, human state, and React key.
+        role_identity = ",".join(sorted(str(role) for role in rec["currentRoles"]))
         out.append(Finding(
             signal_id="lp.overprivileged",
             title="Far more access granted than exercised",
             severity="warning", pillar="lp", object_kind="principal",
-            subject=f"{rec['principalId']}|{rec['scope']}",
+            subject=f"{rec['principalId']}|{rec['scope']}|{role_identity}",
             subject_label=rec.get("principalName") or rec["principalId"],
             detail=(
                 # Both numbers, always. "99.8% over-privileged" alone is a figure designed to be
@@ -78,7 +82,7 @@ def _overprivileged(ctx: SignalContext) -> list[Finding]:
 def _owner_used_as_reader(ctx: SignalContext) -> list[Finding]:
     """Holds a tier-0 role, exercised only reads.
 
-    Stronger than the ratio check because it needs no threshold and no judgement: somebody with
+    Stronger than the ratio check because it needs no threshold and no judgment: somebody with
     the ability to delete the subscription spent the window looking at it."""
     _measured(ctx)
     used = usage.used_actions(ctx.usage)
@@ -94,7 +98,7 @@ def _owner_used_as_reader(ctx: SignalContext) -> list[Finding]:
         if not actions:
             # No recorded activity at all is the "blind" case, not the "read-only" case. It is
             # covered by the ratio check with its own confidence, and asserting read-only here
-            # would be inventing a behaviour profile from an empty log.
+            # would be inventing a behavior profile from an empty log.
             continue
         if any(not _looks_read(a) for a in actions):
             continue

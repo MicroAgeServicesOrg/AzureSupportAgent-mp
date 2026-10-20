@@ -20,9 +20,12 @@ investigate, monitor, and remediate.
 
 </div>
 
-> 🆕 **Latest (v54):** a Workloads cockpit (health scores, fleet board, per-workload command center, Autopilot discovery), an **Estate Graph** knowledge map, and **Ownership**, **Tag Intelligence** & **Change Explorer** — all under a new **Proactive Support** hub.
+> 🆕 **Latest:** a ten-tab **Entra ID** identity workbench (Conditional Access simulator, PIM, app credentials, and Investigate for any principal), **IAM** access review (effective permissions, escalation paths, least-privilege, review campaigns), **Backup Manager** and **Alerts Manager** — both with approval-gated, reversible changes — and **AI Insight Packs** that watch your estate on a schedule and notify you only when something material happens.
 
-![Architecture designer reverse-engineering live Azure resources with AI rationale](docs/assets/architecture-designer.png)
+![Architecture designer showing a synthetic checkout topology and resource palette](docs/assets/architecture-designer.png)
+
+Screenshots use synthetic example data. Explore the [visual tour](docs/reference/visual-tour.md)
+for more than 100 detailed application views and workflow guidance.
 
 ---
 
@@ -126,6 +129,29 @@ assessment behind any node.
 <tr>
 <td width="50%" valign="top">
 
+### 🆔 Entra ID
+A ten-tab identity workbench: **posture** scoring, **Conditional Access** (coverage,
+exposure, conflicts, break-glass, and a policy **simulator**), **privileged access** and
+PIM, **app registrations** and credential expiry, sign-in **signals**, guest and access
+**governance**, an identity graph, and a findings ledger. **Investigate** any user, guest,
+group, service principal or managed identity — including deleted ones — with provenance on
+every section, so "unreadable" never looks like "empty".
+
+</td>
+<td width="50%" valign="top">
+
+### 🔑 IAM
+Azure RBAC you can actually reason about: **effective permissions** for any principal,
+an **access map**, **privilege-escalation** and **bypass** path detection,
+**least-privilege** recommendations, a **what-if simulator**, snapshot **compare**,
+scope and role explorers, and **access review campaigns** with reviewer routing,
+delegation, and evidence.
+
+</td>
+</tr>
+<tr>
+<td width="50%" valign="top">
+
 ### 🪪 Ownership
 A federated **owner directory** scoped by tenant, subscription or workload. **Export**
 owners, **import** any CSV/Excel with AI column-inference and a preview, then **apply as
@@ -162,6 +188,42 @@ finding lifecycle, and ticketing. Plus Policy compliance, baselines, and AI advi
 <tr>
 <td width="50%" valign="top">
 
+### 🗄️ Backup Manager
+Beyond coverage reporting: a live **backup inventory**, job health, policy and vault
+management, and **DR drills**. Changes are **approval-gated**, encrypted before/after
+state is retained, and every apply has a **rollback** path.
+
+</td>
+<td width="50%" valign="top">
+
+### 🚨 Alerts Manager
+A fired-alert inbox with action-group management, **overlap** and routing analysis, and
+baseline gap detection. Rule and action-group edits follow the same approval-gated,
+audited, **reversible** path as Backup Manager.
+
+</td>
+</tr>
+<tr>
+<td width="50%" valign="top">
+
+### 🗂️ Inventory
+One unified, filterable resource grid across every connected tenant, with overview,
+location, **cost** and optimization views, plus a change feed — the flat estate view the
+Portal never quite gives you.
+
+</td>
+<td width="50%" valign="top">
+
+### 🧾 Evidence & Case Files
+An **Evidence Locker** of investigation snapshots with diffs, sharing and export, and
+durable **Case Files** that keep an incident's timeline, findings and the identity it
+concerns in one place — including cases opened straight from an identity investigation.
+
+</td>
+</tr>
+<tr>
+<td width="50%" valign="top">
+
 ### 📈 Monitoring & resilience
 **Monitor 2.0** customizable dashboards with AI authoring and ping history; **AMBA**
 baseline-alert coverage with one-click Bicep/Terraform gap remediation; **Performance
@@ -182,17 +244,25 @@ Sumo Logic, CrowdStrike NG-SIEM, AWS Security Hub, Grafana, Azure Logic Apps, an
 <td width="50%" valign="top">
 
 ### 🛡️ Proactive Support hub
-One categorized landing page that unifies every posture & forensic dashboard — coverage,
-assessments, identity, ownership, tagging, change forensics and the estate graph — so
-nothing about your estate is more than a click away.
+One categorized landing page that unifies **every** posture and forensic dashboard, in the
+same clusters the product and the docs use:
+
+- **Daily intelligence** — AI Insight Packs
+- **Design & ownership** — Architectures · Know-Me · Ownership · Estate Graph
+- **Assessment & performance** — Assessments · Performance Profiler · FMEA
+- **Coverage** — Monitoring (AMBA) · Alerts Manager · Telemetry · Backup & DR ·
+  Backup Manager · Connection Capability
+- **Estate intelligence** — Inventory · Tag Intelligence · Change Explorer
+- **Governance & identity** — Azure Policy · Entra ID · IAM
+- **Lifecycle & investigation** — Retirement Radar · Reservations · Quota ·
+  Telemetry Intelligence · Evidence Locker · Case Files
 
 </td>
 <td width="50%" valign="top">
 
 ### 🔌 Bring your own AI
 A dozen+ providers — OpenAI, Azure OpenAI, Anthropic Claude, Google Gemini, GitHub
-Copilot/Models, Grok, Mistral, OpenRouter, ChatGPT (OAuth), **Claude OAuth (Pro/Max, incl.
-Opus 4.8)**, Ollama, LM Studio — switchable at runtime with live model catalogs.
+Copilot/Models, Grok, Mistral, OpenRouter, ChatGPT (OAuth), **Claude OAuth (Pro/Max)**, Ollama, LM Studio — switchable at runtime with live model catalogs.
 **Disabled until you set them up.**
 
 </td>
@@ -203,10 +273,15 @@ Opus 4.8)**, Ollama, LM Studio — switchable at runtime with live model catalog
 
 🔐 Read-only Azure by default · ✅ approval-gated writes · 🧾 full audit log ·
 👥 RBAC (users / roles / groups) · 🔑 OIDC + SAML SSO · 🗝️ encrypted connection
-credentials · 🖥️ Sandbox VMs for private-endpoint diagnostics · 🧩 multi-tenant Azure
-connections.
+credentials · 🌐 IP allowlisting · 🖥️ Sandbox VMs for private-endpoint diagnostics ·
+🧩 multi-tenant Azure connections.
 
 ## 📸 Screenshots
+
+These examples show the real application UI with synthetic records, built-in defaults or
+explicit browser fixtures—not a customer tenant or verified live integration. Configuration
+drafts are unsaved and contain no working credentials. The detailed guides provide captions
+and full-size access through the [visual tour](docs/reference/visual-tour.md).
 
 <table>
 <tr>
@@ -214,8 +289,8 @@ connections.
 <td width="50%"><img src="docs/assets/workload-detail.png" alt="Workload command center"><br/><sub><b>Workload command center</b> — health, coverage, risk &amp; next-best-actions for a single workload.</sub></td>
 </tr>
 <tr>
-<td width="50%"><img src="docs/assets/estate-graph.png" alt="Estate Graph knowledge graph"><br/><sub><b>Estate Graph</b> — a live, workload-aware knowledge graph with cost, retirement &amp; RBAC overlays.</sub></td>
-<td width="50%"><img src="docs/assets/proactive-support.png" alt="Proactive Support hub"><br/><sub><b>Proactive Support</b> — every posture &amp; forensic dashboard, grouped into one hub.</sub></td>
+<td width="50%"><img src="docs/assets/estate-graph.png" alt="Synthetic Estate Graph"><br/><sub><b>Estate Graph</b> — workload, architecture and resource relationships.</sub></td>
+<td width="50%"><img src="docs/assets/proactive-support.png" alt="Proactive Support coverage-tool directory"><br/><sub><b>Proactive Support</b> — a filtered directory of coverage workflows.</sub></td>
 </tr>
 <tr>
 <td width="50%"><img src="docs/assets/mission-control.png" alt="Mission Control"><br/><sub><b>Mission Control</b> — run every analysis against a workload from one go/no-go cockpit.</sub></td>
@@ -226,7 +301,7 @@ connections.
 <td width="50%"><img src="docs/assets/architecture-designer.png" alt="Architectures designer"><br/><sub><b>Architectures designer</b> — design diagrams with AI rationale &amp; best-practice review.</sub></td>
 </tr>
 <tr>
-<td width="50%"><img src="docs/assets/deep-investigation.png" alt="Deep investigation War Room"><br/><sub><b>War Room</b> — assemble a team of specialist agents to investigate in parallel.</sub></td>
+<td width="50%"><img src="docs/assets/deep-investigation.png" alt="Synthetic saved investigation result"><br/><sub><b>Deep Investigation</b> — review hypotheses, supporting evidence and uncertainty.</sub></td>
 <td width="50%"><img src="docs/assets/assessment.png" alt="Well-Architected assessment"><br/><sub><b>Assessments</b> — pillar scores, controls, and framework mappings (NIST/ISO/CIS).</sub></td>
 </tr>
 <tr>
@@ -235,7 +310,7 @@ connections.
 </tr>
 <tr>
 <td width="50%"><img src="docs/assets/telemetry-coverage.png" alt="Telemetry coverage"><br/><sub><b>Telemetry coverage</b> — diagnostic-settings &amp; log coverage with Bicep/Policy gap fixes.</sub></td>
-<td width="50%"><img src="docs/assets/monitor-dashboard.png" alt="Monitor 2.0 dashboard"><br/><sub><b>Monitor 2.0</b> — usage, token cost, provider mix, and activity at a glance.</sub></td>
+<td width="50%"><img src="docs/assets/monitor-dashboard.png" alt="Monitor application counters"><br/><sub><b>Monitor</b> — application counters and live-operation status.</sub></td>
 </tr>
 <tr>
 <td width="50%"><img src="docs/assets/ai-providers.png" alt="AI provider settings"><br/><sub><b>AI providers</b> — bring your own model; each one stays disabled until configured.</sub></td>
@@ -243,30 +318,33 @@ connections.
 </tr>
 <tr>
 <td width="50%"><img src="docs/assets/retirement-coverage.png" alt="Retirement and breaking-change radar"><br/><sub><b>Retirement radar</b> — service retirements &amp; breaking changes mapped to workloads, owners, and deadlines.</sub></td>
-<td width="50%"><img src="docs/assets/entra-findings.png" alt="Entra ID findings inbox"><br/><sub><b>Entra ID</b> &mdash; identity findings ranked by severity: standing global admins, expiring credentials, ownerless apps, MFA &amp; conditional-access gaps.</sub></td>
+<td width="50%"><img src="docs/assets/entra-findings.png" alt="Entra scanner baseline and synthetic finding"><br/><sub><b>Entra ID</b> — saved scanner baselines and existing findings, distinct from the new-finding delta.</sub></td>
 </tr>
 </table>
 
 ## 🚀 Deploy to Azure (one-click)
 
 > **Status: tested.** Provisions a managed PostgreSQL database, Azure Files state storage,
-> and the Container App running the public image — in **your** subscription, in one
+> and the Container App following the current public `latest` image — in **your** subscription, in one
 > deployment. No CLI, no manual wiring.
 
 [![Deploy to Azure](https://aka.ms/deploytoazurebutton)](https://portal.azure.com/#create/Microsoft.Template/uri/https%3A%2F%2Fraw.githubusercontent.com%2Fzmustafa%2FAzureSupportAgent%2Fmain%2Fdeploy%2Fmain.json)
 
 What it creates:
 
-1. **Azure Container App** running the public Docker Hub image
+1. **Azure Container App** running the public Docker Hub `latest` image with a fresh revision per deployment
 2. **Azure Database for PostgreSQL — Flexible Server** (managed), auto-linked via `DATABASE_URL` (`?ssl=require`)
 3. **Azure Files** share mounted at `/app/.data` (registries, caches, encryption key)
 4. **Container Apps environment** + external HTTPS ingress on port 8000
+5. **Log Analytics**, data-service diagnostics, managed identity, and HTTP health probes
 
-> 💰 **Estimated cost: ~$25–35 / month** for the default infra at typical low/idle usage
-> (West US 3, pay-as-you-go) — mostly the Container App (1 vCPU / 2 GiB) and a Burstable
-> `B1ms` PostgreSQL server.
+> 💰 The default remains cost-conscious: one always-running replica (scaling to at most two),
+> 1 vCPU / 2 GiB, Burstable `B1ms` PostgreSQL, LRS storage, and no database HA, geo-backup,
+> zone redundancy, locks, or paid alert rules. Use the supplied production preset to opt into
+> resilient settings after checking regional SKU support and current Azure pricing.
 
-You supply only an **admin password** (you're forced to change it on first login). Then
+You supply separate **admin and PostgreSQL passwords** (the admin is forced to change theirs
+on first login) and explicitly choose the database networking acknowledgement. Then
 connect your Azure tenant and an LLM from **Settings** — the AI does the rest (workload
 discovery, architectures, coverage scans, assessments, retirement radar, performance
 profiling). Defaults to **West US 3** (validated for Container Apps + PostgreSQL B1ms).
@@ -293,7 +371,9 @@ docker compose up --build
 ```
 
 Open **http://localhost:5173**. The backend runs DB migrations on startup; the first Azure
-MCP call fetches `@azure/mcp` via `npx` (a few seconds), then caches it.
+MCP call starts the server bundled in the image and caches its tool catalog. The image also
+includes Azure Quick Review for compliance scans; native development hides that tool when its
+optional `azqr` executable is not installed.
 
 **Health check:** [`/healthz`](http://localhost:8000/healthz) · MCP tools (admin):
 `/api/admin/mcp/tools`
@@ -341,6 +421,7 @@ For local dev nothing is deployed to Azure — the MCP server reaches your real 
 - **Read-only by default.** The Azure MCP server starts with `--read-only`; write-capable tools are classified, **approval-gated**, and **audited**.
 - **AI providers off until configured.** A fresh install ships every provider disabled; a provider only becomes selectable once you add a key (or sign in / set a local base URL).
 - **Identity & SSO.** Local users with RBAC (users / roles / groups), plus OIDC and SAML SSO. Forced password change on first admin login.
+- **Network access.** Restrict which source addresses can reach the application at all — an in-app IP allowlist with a monitor mode that shows what *would* be blocked before you enforce it, Container Apps ingress restrictions, or no public endpoint at all.
 - **Secrets.** Connection credentials are encrypted at rest and never returned to the UI. `.env`, `backend/.data/`, and keys are git-ignored.
 - **Found a vulnerability?** Please follow **[SECURITY.md](SECURITY.md)** — don't open a public issue.
 
